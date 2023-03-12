@@ -86,7 +86,7 @@ echo "Installing the required software needed to compile and run VMaNGOS."
 echo "######################################################################################################"
 
 #Install Base Software Requirements
-sudo apt install libace-dev libtbb-dev openssl libssl-dev libmysqlclient-dev p7zip-full ntp ntpdate checkinstall build-essential gcc g++ automake git-core autoconf make patch libmysql++-dev mariadb-server libtool grep binutils zlib1g-dev libbz2-dev cmake libboost-all-dev unzip -y
+sudo apt net-tools install libace-dev libtbb-dev openssl libssl-dev libmysqlclient-dev p7zip-full ntp ntpdate checkinstall build-essential gcc g++ automake git-core autoconf make patch libmysql++-dev mariadb-server libtool grep binutils zlib1g-dev libbz2-dev cmake libboost-all-dev unzip -y
 export ACE_ROOT=/usr/include/ace
 export TBB_ROOT_DIR=/usr/include/tbb
 
