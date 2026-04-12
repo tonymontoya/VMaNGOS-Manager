@@ -572,18 +572,19 @@ phase_config_setup() {
     
     # Update realmd.conf database connection
     # The config format is: LoginDatabaseInfo = "host;port;user;pass;db"
-    sed -i "s|LoginDatabaseInfo = \"127.0.0.1;3306;mangos;mangos;realmd\"|LoginDatabaseInfo = \"$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$AUTHDB\"|" "$INSTALLROOT/run/etc/realmd.conf"
-    sed -i "s|LoginDatabaseInfo = \"127.0.0.1;3306;mangos;;realmd\"|LoginDatabaseInfo = \"$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$AUTHDB\"|" "$INSTALLROOT/run/etc/realmd.conf"
-    sed -i "s|BindIP = \"0.0.0.0\"|BindIP = \"$SERVERIP\"|" "$INSTALLROOT/run/etc/realmd.conf"
+    # Use more flexible sed patterns that handle variations in spacing
+    sed -i "s|LoginDatabaseInfo.*=.*\"127\.0\.0\.1;3306;mangos;.*;realmd\"|LoginDatabaseInfo = \"$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$AUTHDB\"|" "$INSTALLROOT/run/etc/realmd.conf"
+    sed -i "s|BindIP.*=.*\"0\.0\.0\.0\"|BindIP = \"$SERVERIP\"|" "$INSTALLROOT/run/etc/realmd.conf"
     
     log_info "Configuring mangosd.conf..."
     
     # Update World server config - handle both old and new format
     # New format uses dots: LoginDatabase.Info, WorldDatabase.Info, etc.
-    sed -i "s|LoginDatabase.Info = \"127.0.0.1;3306;mangos;mangos;realmd\"|LoginDatabase.Info = \"$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$AUTHDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
-    sed -i "s|WorldDatabase.Info = \"127.0.0.1;3306;mangos;mangos;world\"|WorldDatabase.Info = \"$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$WORLDDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
-    sed -i "s|CharacterDatabase.Info = \"127.0.0.1;3306;mangos;mangos;characters\"|CharacterDatabase.Info = \"$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$CHARACTERDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
-    sed -i "s|LogsDatabase.Info = \"127.0.0.1;3306;mangos;mangos;logs\"|LogsDatabase.Info = \"$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$LOGSDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
+    # Use flexible patterns that match the actual config file format
+    sed -i "s|LoginDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|LoginDatabase.Info = \"$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$AUTHDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|WorldDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|WorldDatabase.Info = \"$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$WORLDDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|CharacterDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|CharacterDatabase.Info = \"$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$CHARACTERDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|LogsDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|LogsDatabase.Info = \"$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$LOGSDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
     
     # Update DataDir to point to installation root
     sed -i "s|DataDir = \"\.\"|DataDir = \"$INSTALLROOT\"|" "$INSTALLROOT/run/etc/mangosd.conf"
@@ -606,6 +607,39 @@ phase_config_setup() {
         VALUES (1, 'VMaNGOS', '$SERVERIP', '127.0.0.1', '255.255.255.0', 8085, 0, 0, 1, 0, 0, 5875, 5875, 0, '') 
         ON DUPLICATE KEY UPDATE \`address\` = '$SERVERIP', \`localAddress\` = '127.0.0.1', \`port\` = 8085;" 2>/dev/null || \
         mysql -u root "$AUTHDB" -e "UPDATE \`realmlist\` SET \`address\` = '$SERVERIP', \`localaddress\` = '127.0.0.1', \`port\` = 8085 WHERE \`id\` = '1';" || true
+    
+    # Create test account
+    log_info "Creating test account (tony/REDACTED)..."
+    python3 << PYEOF 2>/dev/null || log_warn "Could not create test account"
+import hashlib
+
+N = int('894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3AC9EBF6E18C71B9B4B29C0D0B58D483B7AE82A6D8A2F422B5FDD5E39E712A7ECE534', 16)
+g = 7
+
+def sha1(s):
+    if isinstance(s, str):
+        s = s.encode('utf-8')
+    return hashlib.sha1(s).digest()
+
+username = "tony"
+password = "REDACTED"
+username_upper = username.upper()
+password_upper = password.upper()
+
+s = hashlib.sha1(username_upper.encode()).digest()[:32]
+identity = f"{username_upper}:{password_upper}".encode()
+x_hash = sha1(identity)
+x_input = s + x_hash
+x = int.from_bytes(sha1(x_input), 'big')
+v = pow(g, x, N)
+
+v_hex = format(v, 'x').zfill(64)
+s_hex = s.hex()
+
+print(f"INSERT INTO account (username, gmlevel, v, s, email, joindate, last_ip, failed_logins, locked, expansion)")
+print(f"VALUES ('{username}', 0, '{v_hex}', '{s_hex}', 'tony@localhost', NOW(), '127.0.0.1', 0, 0, 0)")
+print(f"ON DUPLICATE KEY UPDATE v = '{v_hex}', s = '{s_hex}', gmlevel = 0;")
+PYEOF | mysql -u root "$AUTHDB" 2>/dev/null || log_warn "Test account creation failed (non-critical)"
     
     set_checkpoint "CONFIG_DONE"
 }
