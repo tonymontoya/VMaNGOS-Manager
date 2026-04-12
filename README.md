@@ -16,6 +16,23 @@ VMaNGOS is an independent continuation of the Elysium/LightsHope codebases, focu
 
 ## Quick Start
 
+### Automated Installation (Recommended)
+
+For a fully automated installation with secure random passwords:
+
+```bash
+wget https://raw.githubusercontent.com/YOUR_USERNAME/vmangos-setup/main/auto_install.sh
+wget https://raw.githubusercontent.com/YOUR_USERNAME/vmangos-setup/main/vmangos_setup.sh
+sudo bash auto_install.sh
+```
+
+The auto-installer will:
+- Generate secure random passwords stored in `/root/.vmangos-secrets/setup.conf`
+- Run the full installation non-interactively
+- Display credentials at completion
+
+### Interactive Installation
+
 1. Upload your WoW 1.12.1 client's `/Data` folder to the server
 2. Download and run the script:
 
@@ -34,10 +51,44 @@ sudo bash vmangos_setup.sh
 set realmlist YOUR_SERVER_IP
 ```
 
+## Automated/Non-Interactive Mode
+
+The installer supports non-interactive installation via environment variables:
+
+```bash
+export VMANGOS_AUTO_INSTALL="1"
+export VMANGOS_CLIENT_DATA="/home/user/Data"
+export VMANGOS_INSTALL_ROOT="/opt/mangos"
+export VMANGOS_SQL_ADMIN_USER="root"
+export VMANGOS_SQL_ADMIN_PASS="your_secure_password"
+export VMANGOS_DB_USER="mangos"
+export VMANGOS_DB_PASS="your_db_password"
+
+sudo -E bash vmangos_setup.sh
+```
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `VMANGOS_AUTO_INSTALL` | Enable non-interactive mode | (unset) |
+| `VMANGOS_CLIENT_DATA` | Path to WoW client Data folder | `/home/$SUDO_USER/Data` |
+| `VMANGOS_INSTALL_ROOT` | Installation directory | `/opt/mangos` |
+| `VMANGOS_SQL_ADMIN_USER` | MySQL admin username | `root` |
+| `VMANGOS_SQL_ADMIN_PASS` | MySQL admin password | (required) |
+| `VMANGOS_SQL_ADMIN_IP` | MySQL admin IP restriction | `%` |
+| `VMANGOS_WORLD_DB` | World database name | `world` |
+| `VMANGOS_AUTH_DB` | Auth database name | `auth` |
+| `VMANGOS_CHAR_DB` | Characters database name | `characters` |
+| `VMANGOS_DB_USER` | VMANGOS database username | `mangos` |
+| `VMANGOS_DB_PASS` | VMANGOS database password | (required) |
+| `VMANGOS_OS_USER` | Linux user to run server | `mangos` |
+| `VMANGOS_SKIP_SECURE_MYSQL` | Skip mysql_secure_installation | `yes` |
+
 ## What the Script Does
 
 1. **Installs Dependencies** - Required packages for compilation and runtime
-2. **Downloads Source** - Clones the VMaNGOS core and database repositories
+2. **Downloads Source** - Clones the VMaNGOS core and database repositories (with retry logic)
 3. **Compiles** - Builds the auth server, world server, and extractor tools
 4. **Extracts Game Data** - Processes client data (maps, vmaps, mmaps, DBC files)
 5. **Sets Up Database** - Creates databases, users, and imports world data
@@ -60,8 +111,12 @@ sudo systemctl status world
 
 ### Viewing Logs
 ```bash
+# Server logs
 sudo journalctl -u auth -f
 sudo journalctl -u world -f
+
+# Installation log
+sudo tail -f /var/log/vmangos-install.log
 ```
 
 ### Server Console
@@ -96,9 +151,21 @@ sudo screen -r  # or attach to tty3
 
 ## Troubleshooting
 
+### Installation Log
+All installation output is logged to:
+```bash
+sudo tail -f /var/log/vmangos-install.log
+```
+
+### Git Clone Failures
+The installer includes retry logic with exponential backoff for git clones. If cloning still fails:
+- Check network connectivity
+- Verify GitHub is accessible: `curl -I https://github.com`
+- Try manual clone to test: `git clone https://github.com/vmangos/core`
+
 ### Compilation Issues
 - Ensure you have at least 4GB RAM (swap can help)
-- For limited RAM, use fewer parallel jobs: edit `make -j $CPU` to `make -j 1`
+- For limited RAM, edit the script to use fewer parallel jobs: change `make -j $CPU` to `make -j 1`
 
 ### Database Connection Issues
 - Verify MariaDB is running: `sudo systemctl status mariadb`
@@ -111,9 +178,13 @@ sudo screen -r  # or attach to tty3
 
 ## Security Considerations
 
-1. **Firewall**: Limit access to MySQL port (3306) to trusted IPs only
-2. **Database**: Run `mysql_secure_installation` after setup
-3. **Updates**: Keep your server updated with the latest VMaNGOS commits
+1. **Passwords**: When using `auto_install.sh`, passwords are stored securely in `/root/.vmangos-secrets/setup.conf` (mode 600)
+2. **Firewall**: Limit access to MySQL port (3306) to trusted IPs only
+3. **Database**: The auto-installer skips `mysql_secure_installation` by default. Run it manually if desired:
+   ```bash
+   sudo mysql_secure_installation
+   ```
+4. **Updates**: Keep your server updated with the latest VMaNGOS commits
 
 ## Resources
 
