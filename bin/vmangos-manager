@@ -1,0 +1,211 @@
+#!/bin/bash
+# =============================================================================
+# VMANGOS Manager - Main Entry Point
+# =============================================================================
+# CLI tool for managing VMANGOS private server
+# Version: 0.1.0 (Release A - Foundation)
+# =============================================================================
+
+set -euo pipefail
+
+# =============================================================================
+# Setup Paths
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(dirname "$SCRIPT_DIR")/lib"
+
+# Source libraries
+# shellcheck source=../lib/common.sh
+source "$LIB_DIR/common.sh"
+# shellcheck source=../lib/config.sh
+source "$LIB_DIR/config.sh"
+# shellcheck source=../lib/server.sh
+source "$LIB_DIR/server.sh"
+
+# =============================================================================
+# Version & Usage
+# =============================================================================
+
+show_version() {
+    echo "vmangos-manager version $VMANGOS_VERSION"
+    echo "VMANGOS Installation: $VMANGOS_INSTALL_DIR"
+}
+
+show_usage() {
+    cat << EOF
+VMANGOS Manager - CLI tool for managing VMANGOS private server
+
+Usage: vmangos-manager <command> [options]
+
+Commands:
+  server start [auth|world|all]     Start service(s)
+  server stop [auth|world|all]      Stop service(s)
+  server restart [auth|world|all]   Restart service(s)
+  server status [auth|world|all]    Show service status
+  server logs [auth|world] [-f]     Show service logs
+
+Options:
+  -j, --json          Output in JSON format
+  -v, --verbose       Enable verbose logging
+  -h, --help          Show this help message
+  --version           Show version information
+
+Examples:
+  vmangos-manager server start all
+  vmangos-manager server status world --json
+  vmangos-manager server logs auth -f
+
+EOF
+}
+
+# =============================================================================
+# Argument Parsing
+# =============================================================================
+
+parse_global_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -j|--json)
+                export VMANGOS_JSON_OUTPUT="true"
+                shift
+                ;;
+            -v|--verbose)
+                export VMANGOS_LOG_LEVEL=$LOG_LEVEL_DEBUG
+                shift
+                ;;
+            -h|--help)
+                show_usage
+                exit 0
+                ;;
+            --version)
+                show_version
+                exit 0
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+}
+
+# =============================================================================
+# Server Command Handler
+# =============================================================================
+
+handle_server_command() {
+    local action="${1:-}"
+    local target="${2:-}"
+    local format="text"
+    
+    [[ "${VMANGOS_JSON_OUTPUT:-false}" == "true" ]] && format="json"
+    
+    # Validate action
+    case "$action" in
+        start|stop|restart|status|logs) ;;
+        *)
+            error_exit "Unknown server action: $action"
+            ;;
+    esac
+    
+    # Default target
+    [[ -z "$target" ]] && target="all"
+    
+    # Handle logs separately (has extra options)
+    if [[ "$action" == "logs" ]]; then
+        local follow="false"
+        local lines="50"
+        
+        # Check for -f (follow) flag
+        for arg in "$@"; do
+            if [[ "$arg" == "-f" || "$arg" == "--follow" ]]; then
+                follow="true"
+            fi
+        done
+        
+        case "$target" in
+            auth|world)
+                server_logs "$target" "$lines" "$follow"
+                ;;
+            *)
+                error_exit "Logs command requires 'auth' or 'world' target"
+                ;;
+        esac
+        return 0
+    fi
+    
+    # Execute action
+    case "$target" in
+        auth)
+            case "$action" in
+                start) server_start "$SERVICE_AUTH" ;;
+                stop) server_stop "$SERVICE_AUTH" ;;
+                restart) server_restart "$SERVICE_AUTH" ;;
+                status) server_status "$SERVICE_AUTH" "$format" ;;
+            esac
+            ;;
+        world)
+            case "$action" in
+                start) server_start "$SERVICE_WORLD" ;;
+                stop) server_stop "$SERVICE_WORLD" ;;
+                restart) server_restart "$SERVICE_WORLD" ;;
+                status) server_status "$SERVICE_WORLD" "$format" ;;
+            esac
+            ;;
+        all)
+            case "$action" in
+                start) server_start_all ;;
+                stop) server_stop_all ;;
+                restart) server_restart_all ;;
+                status) server_status_all "$format" ;;
+            esac
+            ;;
+        *)
+            error_exit "Unknown target: $target (use auth, world, or all)"
+            ;;
+    esac
+}
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+main() {
+    # Parse global flags
+    parse_global_args "$@"
+    
+    # Shift parsed args
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -j|--json|-v|--verbose)
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    
+    # Get command
+    local command="${1:-}"
+    shift || true
+    
+    # Route to handler
+    case "$command" in
+        server)
+            check_root
+            config_load
+            handle_server_command "$@"
+            ;;
+        ""|-h|--help)
+            show_usage
+            exit 0
+            ;;
+        *)
+            error_exit "Unknown command: $command"
+            ;;
+    esac
+}
+
+# Run main
+main "$@"
