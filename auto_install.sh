@@ -133,11 +133,17 @@ export VMANGOS_DB_USER="$MANGOSDBUSER"
 export VMANGOS_DB_PASS="$MANGOSDBPASS"
 export VMANGOS_OS_USER="$MANGOSOSUSER"
 export VMANGOS_SKIP_SECURE_MYSQL="$SKIP_SECURE_MYSQL"
+export VMANGOS_BACKGROUND_BUILD="1"  # Run compilation in background to prevent timeout
 export INSTALL_LOG="/var/log/vmangos-install.log"
 
 log_info "Starting VMANGOS installation..."
 log_info "Installation log: $INSTALL_LOG"
 log_info "This will take 1-2 hours depending on your system."
+log_info ""
+log_info "IMPORTANT: The compilation runs in the background to prevent timeouts."
+log_info "Monitor progress with: tail -f $INSTALL_LOG"
+log_info ""
+log_info "If disconnected, you can resume by re-running this script."
 echo
 
 # Run the installer
