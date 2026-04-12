@@ -1,0 +1,259 @@
+#!/bin/bash
+# =============================================================================
+# VMANGOS Manager - Main Entry Point
+# =============================================================================
+# CLI tool for managing VMANGOS private server
+# Version: 0.1.0 (Release A - Foundation)
+# =============================================================================
+
+set -uo pipefail
+
+# =============================================================================
+# Setup Paths
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(dirname "$SCRIPT_DIR")/lib"
+
+# Source libraries
+# shellcheck source=../lib/common.sh
+source "$LIB_DIR/common.sh"
+# shellcheck source=../lib/config.sh
+source "$LIB_DIR/config.sh"
+# shellcheck source=../lib/server.sh
+source "$LIB_DIR/server.sh"
+
+# =============================================================================
+# Global State
+# =============================================================================
+
+DRY_RUN=false
+CLEANUP_LOCKS=()
+
+# =============================================================================
+# Signal Handlers
+# =============================================================================
+
+cleanup() {
+    log_debug "Cleaning up..."
+    
+    # Release any held locks
+    for lock_file in "${CLEANUP_LOCKS[@]}"; do
+        if [[ -n "$lock_file" && -d "$lock_file" ]]; then
+            log_debug "Releasing lock: $lock_file"
+            lock_release "$lock_file" || true
+        fi
+    done
+    
+    log_debug "Cleanup complete"
+}
+
+# Trap signals to ensure cleanup
+trap cleanup EXIT
+trap 'log_error "Interrupted"; exit 130' INT TERM
+
+# =============================================================================
+# Version & Usage
+# =============================================================================
+
+show_version() {
+    echo "vmangos-manager version $VMANGOS_VERSION"
+    echo "VMANGOS Installation: $VMANGOS_INSTALL_DIR"
+}
+
+show_usage() {
+    cat << 'EOF'
+VMANGOS Manager - CLI tool for managing VMANGOS private server
+
+Usage: vmangos-manager [global-options] <command> [options]
+
+Global Options:
+  -j, --json          Output in JSON format
+  -v, --verbose       Enable verbose logging
+  -n, --dry-run       Show what would be done without executing
+  -h, --help          Show this help message
+  --version           Show version information
+
+Commands:
+  server start [auth|world|all]     Start service(s)
+  server stop [auth|world|all]      Stop service(s)
+  server restart [auth|world|all]   Restart service(s)
+  server status [auth|world|all]    Show service status
+  server logs [auth|world] [-f]     Show service logs
+
+Examples:
+  vmangos-manager server start all
+  vmangos-manager server status world --json
+  vmangos-manager server logs auth -f
+  vmangos-manager -n server restart all  # Dry run
+
+EOF
+}
+
+# =============================================================================
+# Argument Parsing
+# =============================================================================
+
+parse_global_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -j|--json)
+                export VMANGOS_JSON_OUTPUT="true"
+                shift
+                ;;
+            -v|--verbose)
+                export VMANGOS_LOG_LEVEL=$LOG_LEVEL_DEBUG
+                shift
+                ;;
+            -n|--dry-run)
+                DRY_RUN=true
+                log_info "DRY RUN MODE - No changes will be made"
+                shift
+                ;;
+            -h|--help)
+                show_usage
+                exit 0
+                ;;
+            --version)
+                show_version
+                exit 0
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+}
+
+# =============================================================================
+# Server Command Handler
+# =============================================================================
+
+handle_server_command() {
+    local action="${1:-}"
+    local target="${2:-}"
+    local format="text"
+    
+    [[ "${VMANGOS_JSON_OUTPUT:-false}" == "true" ]] && format="json"
+    
+    # Validate action
+    case "$action" in
+        start|stop|restart|status|logs) ;;
+        *)
+            error_exit "Unknown server action: $action"
+            ;;
+    esac
+    
+    # Default target
+    [[ -z "$target" ]] && target="all"
+    
+    # Handle dry-run for status/logs (these are read-only)
+    if [[ "$DRY_RUN" == "true" && "$action" != "status" && "$action" != "logs" ]]; then
+        log_info "[DRY RUN] Would $action $target"
+        return 0
+    fi
+    
+    # Handle logs separately (has extra options)
+    if [[ "$action" == "logs" ]]; then
+        local follow="false"
+        local lines="50"
+        
+        # Check for -f (follow) flag
+        for arg in "$@"; do
+            if [[ "$arg" == "-f" || "$arg" == "--follow" ]]; then
+                follow="true"
+            fi
+        done
+        
+        case "$target" in
+            auth|world)
+                server_logs "$target" "$lines" "$follow"
+                return $?
+                ;;
+            *)
+                error_exit "Logs command requires 'auth' or 'world' target"
+                ;;
+        esac
+    fi
+    
+    # Execute action
+    local result=0
+    
+    case "$target" in
+        auth)
+            case "$action" in
+                start) server_start "$SERVICE_AUTH" || result=1 ;;
+                stop) server_stop "$SERVICE_AUTH" || result=1 ;;
+                restart) server_restart "$SERVICE_AUTH" || result=1 ;;
+                status) server_status "$SERVICE_AUTH" "$format" || result=1 ;;
+            esac
+            ;;
+        world)
+            case "$action" in
+                start) server_start "$SERVICE_WORLD" || result=1 ;;
+                stop) server_stop "$SERVICE_WORLD" || result=1 ;;
+                restart) server_restart "$SERVICE_WORLD" || result=1 ;;
+                status) server_status "$SERVICE_WORLD" "$format" || result=1 ;;
+            esac
+            ;;
+        all)
+            case "$action" in
+                start) server_start_all || result=1 ;;
+                stop) server_stop_all || result=1 ;;
+                restart) server_restart_all || result=1 ;;
+                status) server_status_all "$format" || result=1 ;;
+            esac
+            ;;
+        *)
+            error_exit "Unknown target: $target (use auth, world, or all)"
+            ;;
+    esac
+    
+    return $result
+}
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+main() {
+    # Parse global flags
+    parse_global_args "$@"
+    
+    # Shift parsed args
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -j|--json|-v|--verbose|-n|--dry-run)
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    
+    # Get command
+    local command="${1:-}"
+    shift || true
+    
+    # Route to handler
+    case "$command" in
+        server)
+            if ! check_root; then
+                error_exit "Root privileges required"
+            fi
+            config_load || true  # Use defaults if config load fails
+            handle_server_command "$@"
+            ;;
+        ""|-h|--help)
+            show_usage
+            exit 0
+            ;;
+        *)
+            error_exit "Unknown command: $command"
+            ;;
+    esac
+}
+
+# Run main
+main "$@"
