@@ -1,7 +1,6 @@
 # Development artifacts - keep repo clean
-.AGENTS.md
+AGENTS.md
 CLAUDE.md
-memory/
 
 # Environment files
 .env
@@ -12,6 +11,7 @@ memory/
 ENG_PLAN_*.md
 DEV_READINESS_*.md
 FRD.md
+PRD.md
 
 # Temporary files
 *.tmp
@@ -28,6 +28,5 @@ Thumbs.db
 .vscode/
 *.sublime-*
 
-# Logs
+# Logs (except examples)
 *.log
-logs/
