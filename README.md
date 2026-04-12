@@ -1,12 +1,23 @@
-# vmangos-setup
+# VMANGOS Manager
 
-A script to automate the installation of a VMaNGOS private World of Warcraft Classic (1.12.1) server on Ubuntu 22.04 LTS.
+A comprehensive administration tool for VMaNGOS (Vanilla World of Warcraft 1.12.1) private servers on Ubuntu 22.04 LTS.
+
+## Overview
+
+VMANGOS Manager provides:
+
+1. **Automated Installer** (`vmangos_setup.sh`, `auto_install.sh`) - One-command installation with retry logic and error handling
+2. **Management CLI** (`vmangos-manager`) - Day-to-day server administration with JSON output support
 
 ## What is VMaNGOS?
 
 VMaNGOS is an independent continuation of the Elysium/LightsHope codebases, focused on delivering the most complete and accurate Vanilla WoW content progression system. It supports multiple patch versions from 1.2 through 1.12.1.
 
-## Prerequisites
+---
+
+## Part 1: Installation
+
+### Prerequisites
 
 1. **Ubuntu 22.04 LTS Server** (fresh installation recommended)
 2. **Static IP address** configured
@@ -14,15 +25,13 @@ VMaNGOS is an independent continuation of the Elysium/LightsHope codebases, focu
 4. **WoW 1.12.1.5875 client** - You need a copy of the game client's `/Data` folder
 5. **Minimum 2 CPU cores and 4GB RAM** (more RAM recommended for faster compilation)
 
-## Quick Start
-
 ### Automated Installation (Recommended)
 
 For a fully automated installation with secure random passwords:
 
 ```bash
-wget https://raw.githubusercontent.com/YOUR_USERNAME/vmangos-setup/main/auto_install.sh
-wget https://raw.githubusercontent.com/YOUR_USERNAME/vmangos-setup/main/vmangos_setup.sh
+wget https://raw.githubusercontent.com/tonymontoya/VMANGOS-Manager/main/auto_install.sh
+wget https://raw.githubusercontent.com/tonymontoya/VMANGOS-Manager/main/vmangos_setup.sh
 sudo bash auto_install.sh
 ```
 
@@ -37,7 +46,7 @@ The auto-installer will:
 2. Download and run the script:
 
 ```bash
-wget https://raw.githubusercontent.com/YOUR_USERNAME/vmangos-setup/main/vmangos_setup.sh
+wget https://raw.githubusercontent.com/tonymontoya/VMANGOS-Manager/main/vmangos_setup.sh
 sudo bash vmangos_setup.sh
 ```
 
@@ -51,147 +60,333 @@ sudo bash vmangos_setup.sh
 set realmlist YOUR_SERVER_IP
 ```
 
-## Automated/Non-Interactive Mode
+### Installation Features
 
-The installer supports non-interactive installation via environment variables:
+- **Git Retry Logic** - Automatic retry with exponential backoff for network failures
+- **Non-Interactive Mode** - Full automation via environment variables
+- **Installation Logging** - Complete logs at `/var/log/vmangos-install.log`
+- **Secure Password Storage** - Credentials stored with mode 600 permissions
+
+---
+
+## Part 2: Management CLI
+
+The `vmangos-manager` command-line tool provides comprehensive server administration.
+
+### Installation of CLI
 
 ```bash
-export VMANGOS_AUTO_INSTALL="1"
-export VMANGOS_CLIENT_DATA="/home/user/Data"
-export VMANGOS_INSTALL_ROOT="/opt/mangos"
-export VMANGOS_SQL_ADMIN_USER="root"
-export VMANGOS_SQL_ADMIN_PASS="your_secure_password"
-export VMANGOS_DB_USER="mangos"
-export VMANGOS_DB_PASS="your_db_password"
+# Clone the repository
+git clone https://github.com/tonymontoya/VMANGOS-Manager.git
+cd VMANGOS-Manager
 
-sudo -E bash vmangos_setup.sh
+# Install to system (optional)
+sudo cp bin/vmangos-manager /usr/local/bin/
+sudo chmod +x /usr/local/bin/vmangos-manager
 ```
 
-### Environment Variables
+### Quick Start
+
+```bash
+# Check server status
+sudo vmangos-manager server status all
+
+# Start servers
+sudo vmangos-manager server start all
+
+# View logs
+sudo vmangos-manager server logs world -f
+```
+
+### Commands
+
+#### Server Control
+
+```bash
+# Start services
+sudo vmangos-manager server start [auth|world|all]
+
+# Stop services
+sudo vmangos-manager server stop [auth|world|all]
+
+# Restart services
+sudo vmangos-manager server restart [auth|world|all]
+
+# Check status
+sudo vmangos-manager server status [auth|world|all]
+
+# View logs
+sudo vmangos-manager server logs [auth|world] [-f]
+```
+
+#### Global Options
+
+| Option | Description |
+|--------|-------------|
+| `-j, --json` | Output in JSON format |
+| `-v, --verbose` | Enable verbose logging |
+| `-n, --dry-run` | Show what would be done without executing |
+| `-h, --help` | Show help message |
+| `--version` | Show version information |
+
+#### Examples
+
+```bash
+# JSON output for scripting
+sudo vmangos-manager --json server status world
+
+# Dry run to preview changes
+sudo vmangos-manager -n server restart all
+
+# Verbose logging for debugging
+sudo vmangos-manager -v server start all
+
+# Follow logs in real-time
+sudo vmangos-manager server logs auth -f
+```
+
+### JSON Output Schema
+
+```json
+{
+  "success": true,
+  "timestamp": "2026-04-12T15:30:00+00:00",
+  "data": {
+    "services": {
+      "auth": {
+        "service": "auth",
+        "active": true,
+        "enabled": true,
+        "uptime": "Sun 2026-04-12 15:25:00 UTC",
+        "memory_bytes": 1524000
+      },
+      "world": {
+        "service": "world",
+        "active": true,
+        "enabled": true,
+        "uptime": "Sun 2026-04-12 15:25:05 UTC",
+        "memory_bytes": 245800000
+      }
+    }
+  },
+  "error": null
+}
+```
+
+---
+
+## Architecture
+
+```
+VMANGOS-Manager/
+├── bin/
+│   └── vmangos-manager      # Main CLI entry point
+├── lib/
+│   ├── common.sh            # Logging, locks, JSON helpers, security
+│   ├── config.sh            # INI parser, config management
+│   └── server.sh            # Service control (start/stop/restart/status)
+├── tests/
+│   └── unit/                # Unit test suite
+├── vmangos_setup.sh         # Interactive installer
+├── auto_install.sh          # Automated installer wrapper
+└── README.md
+```
+
+### Library Modules
+
+#### `lib/common.sh`
+- **Logging** - Structured logging with multiple levels (ERROR, WARN, INFO, DEBUG)
+- **Locks** - PID-verified file locking for concurrent operation safety
+- **JSON** - Escaping and output functions for API compatibility
+- **Security** - Password file permission checking, input validation
+
+#### `lib/config.sh`
+- **INI Parser** - Reads configuration files with section support
+- **Defaults** - Sensible defaults for all configuration values
+- **Validation** - Key and connection string format validation
+
+#### `lib/server.sh`
+- **Service Control** - Start, stop, restart with timeout handling
+- **Status** - Running state, uptime, memory usage
+- **Health Checks** - Verify services are actually responding
+- **Bulk Operations** - All-services operations with proper ordering
+
+---
+
+## Directory Structure (After Installation)
+
+```
+/opt/mangos/                    # Installation root
+├── source/                     # VMaNGOS source code
+├── db/                         # Database files
+├── build/                      # Build directory
+├── run/                        # Compiled binaries and configs
+│   ├── bin/                    # Server executables
+│   │   └── 5875/              # Client data (dbc, maps, vmaps, mmaps)
+│   └── etc/                    # Configuration files
+├── logs/                       # Server logs
+│   ├── mangosd/
+│   ├── realmd/
+│   └── honor/
+└── manager/                    # VMANGOS Manager (if installed)
+    ├── bin/vmangos-manager
+    └── lib/
+```
+
+---
+
+## Configuration
+
+### Environment Variables (Installer)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `VMANGOS_AUTO_INSTALL` | Enable non-interactive mode | (unset) |
 | `VMANGOS_CLIENT_DATA` | Path to WoW client Data folder | `/home/$SUDO_USER/Data` |
 | `VMANGOS_INSTALL_ROOT` | Installation directory | `/opt/mangos` |
-| `VMANGOS_SQL_ADMIN_USER` | MySQL admin username | `root` |
 | `VMANGOS_SQL_ADMIN_PASS` | MySQL admin password | (required) |
-| `VMANGOS_SQL_ADMIN_IP` | MySQL admin IP restriction | `%` |
-| `VMANGOS_WORLD_DB` | World database name | `world` |
-| `VMANGOS_AUTH_DB` | Auth database name | `auth` |
-| `VMANGOS_CHAR_DB` | Characters database name | `characters` |
-| `VMANGOS_DB_USER` | VMANGOS database username | `mangos` |
 | `VMANGOS_DB_PASS` | VMANGOS database password | (required) |
-| `VMANGOS_OS_USER` | Linux user to run server | `mangos` |
-| `VMANGOS_SKIP_SECURE_MYSQL` | Skip mysql_secure_installation | `yes` |
 
-## What the Script Does
+### Manager Config File
 
-1. **Installs Dependencies** - Required packages for compilation and runtime
-2. **Downloads Source** - Clones the VMaNGOS core and database repositories (with retry logic)
-3. **Compiles** - Builds the auth server, world server, and extractor tools
-4. **Extracts Game Data** - Processes client data (maps, vmaps, mmaps, DBC files)
-5. **Sets Up Database** - Creates databases, users, and imports world data
-6. **Configures** - Updates server configuration files with your settings
-7. **Creates Services** - Sets up systemd services for auto-start
+Optional config file at `/opt/mangos/manager/manager.conf`:
 
-## Post-Installation
+```ini
+[database]
+host = localhost
+port = 3306
+manager_user = vmangos_mgr
 
-### Starting the Servers
+[backup]
+enabled = true
+retention_days = 7
+path = /opt/mangos/backups
+```
+
+---
+
+## Testing
+
+### Run Unit Tests
+
 ```bash
-sudo systemctl start auth    # Start auth server
-sudo systemctl start world   # Start world server
+cd VMANGOS-Manager
+bash tests/unit/test_common.sh
+bash tests/unit/test_config.sh
 ```
 
-### Checking Status
-```bash
-sudo systemctl status auth
-sudo systemctl status world
-```
+### Test Coverage
 
-### Viewing Logs
-```bash
-# Server logs
-sudo journalctl -u auth -f
-sudo journalctl -u world -f
+- **32 unit tests** covering core functionality
+- **100% pass rate** required for releases
+- **Shellcheck clean** - Zero warnings or errors
 
-# Installation log
-sudo tail -f /var/log/vmangos-install.log
-```
-
-### Server Console
-The world server runs with a console accessible via:
-```bash
-sudo screen -r  # or attach to tty3
-```
-
-## Directory Structure
-
-```
-/opt/mangos/              # Default installation root
-├── source/               # VMaNGOS source code
-├── db/                   # Database files
-├── build/                # Build directory
-├── run/                  # Compiled binaries and configs
-│   ├── bin/              # Server executables
-│   │   └── 5875/         # Client data (dbc, maps, vmaps, mmaps)
-│   └── etc/              # Configuration files
-└── logs/                 # Log files
-    ├── mangosd/
-    ├── realmd/
-    └── honor/
-```
-
-## Default Database Names
-
-- `auth` - Account and realm information
-- `world` - Game world data (creatures, quests, spells, etc.)
-- `characters` - Character data
-- `logs` - Server logs
+---
 
 ## Troubleshooting
 
-### Installation Log
-All installation output is logged to:
-```bash
-sudo tail -f /var/log/vmangos-install.log
-```
+### Installation Issues
 
-### Git Clone Failures
-The installer includes retry logic with exponential backoff for git clones. If cloning still fails:
+#### Git Clone Failures
+The installer includes retry logic with exponential backoff. If cloning still fails:
 - Check network connectivity
 - Verify GitHub is accessible: `curl -I https://github.com`
-- Try manual clone to test: `git clone https://github.com/vmangos/core`
+- Try manual clone: `git clone https://github.com/vmangos/core`
 
-### Compilation Issues
+#### Compilation Issues
 - Ensure you have at least 4GB RAM (swap can help)
-- For limited RAM, edit the script to use fewer parallel jobs: change `make -j $CPU` to `make -j 1`
+- For limited RAM, edit to use fewer jobs: `make -j 1` instead of `make -j $CPU`
 
-### Database Connection Issues
-- Verify MariaDB is running: `sudo systemctl status mariadb`
-- Check credentials in `/opt/mangos/run/etc/mangosd.conf` and `realmd.conf`
+### Management CLI Issues
 
-### Client Connection Issues
+#### Permission Denied
+The CLI requires root privileges for systemctl operations:
+```bash
+sudo vmangos-manager server status all
+```
+
+#### Lock Timeouts
+If you see "Could not acquire lock" errors:
+- Check if another manager process is running: `ps aux | grep vmangos-manager`
+- Stale locks are automatically cleared after 60 seconds
+
+#### JSON Parsing Errors
+Ensure your system has Python 3 for JSON validation:
+```bash
+python3 --version
+```
+
+### Server Issues
+
+#### Services Won't Start
+```bash
+# Check systemd status
+sudo systemctl status auth
+sudo systemctl status world
+
+# View detailed logs
+sudo journalctl -u auth -n 50
+sudo journalctl -u world -n 50
+```
+
+#### Database Connection Issues
+```bash
+# Verify MariaDB is running
+sudo systemctl status mariadb
+
+# Check credentials in config
+sudo grep -E "DatabaseInfo" /opt/mangos/run/etc/mangosd.conf
+```
+
+#### Client Can't Connect
 - Verify `realmlist.wtf` points to your server IP
-- Check firewall settings: ports 3724 (auth) and 8085 (world) need to be open
-- Verify the realmlist table: `mysql auth -e "SELECT * FROM realmlist;"`
+- Check firewall: ports 3724 (auth) and 8085 (world) must be open
+- Verify realmlist table: `mysql auth -e "SELECT * FROM realmlist;"`
+
+---
 
 ## Security Considerations
 
-1. **Passwords**: When using `auto_install.sh`, passwords are stored securely in `/root/.vmangos-secrets/setup.conf` (mode 600)
-2. **Firewall**: Limit access to MySQL port (3306) to trusted IPs only
-3. **Database**: The auto-installer skips `mysql_secure_installation` by default. Run it manually if desired:
-   ```bash
-   sudo mysql_secure_installation
-   ```
-4. **Updates**: Keep your server updated with the latest VMaNGOS commits
+1. **Password Files** - Always use mode 600, owned by root
+2. **Firewall** - Limit MySQL port (3306) to trusted IPs only
+3. **Updates** - Keep VMANGOS core updated with latest commits
+4. **Backups** - Regular database backups recommended
+
+---
+
+## Roadmap
+
+### Release A (Foundation) - Current
+- ✅ Automated installer with retry logic
+- ✅ Management CLI with JSON output
+- ✅ Service control (start/stop/restart/status)
+- ✅ Comprehensive unit tests
+
+### Release B (Backup & Monitoring)
+- 🔄 Database backup/restore
+- 🔄 Automated backup scheduling
+- 🔄 Player count monitoring
+- 🔄 Service health dashboards
+
+### Release C (Account Management)
+- 🔄 Account CRUD operations
+- 🔄 Ban/unban functionality
+- 🔄 Password management
+- 🔄 GM level management
+
+---
 
 ## Resources
 
 - [VMaNGOS Core](https://github.com/vmangos/core)
 - [VMaNGOS Database](https://github.com/brotalnia/database)
 - [VMaNGOS Wiki](https://github.com/vmangos/wiki/wiki)
+- [Issue Tracker](https://github.com/tonymontoya/VMANGOS-Manager/issues)
 
-## Disclaimer
+---
 
-This script is for educational purposes. Running a private WoW server may violate Blizzard's Terms of Service. Use at your own risk.
+## License & Disclaimer
+
+This project is for educational purposes. Running a private WoW server may violate Blizzard's Terms of Service. Use at your own risk.
+
+VMANGOS Manager is not affiliated with Blizzard Entertainment or the VMaNGOS project. It's an independent administration tool.
