@@ -609,19 +609,40 @@ phase_config_setup() {
         ON DUPLICATE KEY UPDATE \`address\` = '$SERVERIP', \`localAddress\` = '$SERVERIP', \`port\` = 8085, \`realmbuilds\` = '5875 6005 6141';" 2>/dev/null || \
         mysql -u root "$AUTHDB" -e "UPDATE \`realmlist\` SET \`address\` = '$SERVERIP', \`localAddress\` = '$SERVERIP', \`port\` = 8085, \`realmbuilds\` = '5875 6005 6141' WHERE \`id\` = '1';" || true
     
-    # Configure Remote Access (RA) console for account management
-    # Generate a secure random password for RA console access
-    RA_PASSWORD=$(openssl rand -base64 24 2>/dev/null || tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 32)
+    # Ask user if they plan to use VMANGOS Manager for account management
+    log_info ""
+    log_info "VMANGOS Manager can manage accounts via RA/SOAP consoles."
+    log_info "If you plan to use VMANGOS Manager, RA/SOAP will be enabled."
+    log_info "If not, they will remain disabled for security."
+    log_info ""
     
-    log_info "Configuring Remote Access (RA) console..."
-    # Enable RA and set secure password
-    sed -i 's|Ra.Enable = 0|Ra.Enable = 1|' "$INSTALLROOT/run/etc/mangosd.conf"
-    sed -i 's|Ra.IP = "127.0.0.1"|Ra.IP = "0.0.0.0"|' "$INSTALLROOT/run/etc/mangosd.conf"
-    sed -i "s|Ra.Port = 3443|Ra.Port = 3443|" "$INSTALLROOT/run/etc/mangosd.conf"
-    
-    # Store RA password for display at end of installation
-    echo "$RA_PASSWORD" > "$CHECKPOINT_DIR/ra_password.txt"
-    chmod 600 "$CHECKPOINT_DIR/ra_password.txt"
+    if ask_yes_no "Do you plan to use VMANGOS Manager for account management?" "n"; then
+        ENABLE_VMANGOS_MANAGER=true
+        
+        # Configure Remote Access (RA) console for account management
+        # Generate a secure random password for RA console access
+        RA_PASSWORD=$(openssl rand -base64 24 2>/dev/null || tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 32)
+        
+        log_info "Configuring Remote Access (RA) console..."
+        # Enable RA and set secure password
+        sed -i 's|Ra.Enable = 0|Ra.Enable = 1|' "$INSTALLROOT/run/etc/mangosd.conf"
+        sed -i 's|Ra.IP = "127.0.0.1"|Ra.IP = "0.0.0.0"|' "$INSTALLROOT/run/etc/mangosd.conf"
+        
+        # Also enable SOAP for VMANGOS Manager
+        log_info "Configuring SOAP console..."
+        sed -i 's|SOAP.Enabled = 0|SOAP.Enabled = 1|' "$INSTALLROOT/run/etc/mangosd.conf"
+        sed -i 's|SOAP.IP = "127.0.0.1"|SOAP.IP = "0.0.0.0"|' "$INSTALLROOT/run/etc/mangosd.conf"
+        
+        # Store RA password for display at end of installation
+        echo "$RA_PASSWORD" > "$CHECKPOINT_DIR/ra_password.txt"
+        chmod 600 "$CHECKPOINT_DIR/ra_password.txt"
+        
+        log_info "RA/SOAP consoles enabled for VMANGOS Manager."
+    else
+        ENABLE_VMANGOS_MANAGER=false
+        log_info "RA/SOAP consoles will remain disabled."
+        log_info "To enable later, edit $INSTALLROOT/run/etc/mangosd.conf"
+    fi
     
     set_checkpoint "CONFIG_DONE"
 }
@@ -1057,20 +1078,19 @@ EOF
         log_info "Or: tail -50 $INSTALLROOT/logs/mangosd/Server.log"
     fi
     
-    # Display console access information
+    # Display console access information (only if VMANGOS Manager was enabled)
     if [ -f "$CHECKPOINT_DIR/ra_password.txt" ]; then
         RA_PASSWORD=$(cat "$CHECKPOINT_DIR/ra_password.txt")
         rm -f "$CHECKPOINT_DIR/ra_password.txt"
         
         log_info ""
-        log_info "--- Console Access for Account Management ---"
-        log_info "RA Console enabled on port 3443"
-        log_info "Connect: telnet $SERVERIP 3443"
-        log_info "Password: $RA_PASSWORD"
+        log_info "--- VMANGOS Manager Console Access ---"
+        log_info "RA Console:  telnet $SERVERIP 3443"
+        log_info "SOAP Port:   $SERVERIP:7878"
+        log_info "Password:    $RA_PASSWORD"
         log_info ""
-        log_info "To create accounts, connect and type:"
+        log_info "To create accounts via console:"
         log_info "  account create <username> <password>"
-        log_info "  account set gmlevel <username> <level>"
         log_info ""
         log_info "Note: Save this password securely. It will not be shown again."
     fi
@@ -1138,9 +1158,11 @@ main() {
             log_info "  set realmlist $SERVERIP"
             log_info ""
             log_info "--- Account Management ---"
-            log_info "Use RA Console to create accounts:"
-            log_info "  telnet $SERVERIP 3443"
-            log_info "  (password was displayed above)"
+            log_info "If you enabled VMANGOS Manager:"
+            log_info "  RA Console: telnet $SERVERIP 3443"
+            log_info ""
+            log_info "To enable later, edit mangosd.conf and restart:"
+            log_info "  sudo systemctl restart world"
             log_info ""
             log_info "--- Service Commands ---"
             log_info "Start:   sudo systemctl start auth world"
