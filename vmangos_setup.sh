@@ -262,6 +262,82 @@ check_root() {
     fi
 }
 
+show_client_data_help() {
+    log_info ""
+    log_info "========================================================================"
+    log_info "CLIENT DATA REQUIRED"
+    log_info "========================================================================"
+    log_info "VMaNGOS requires WoW 1.12.1 (build 5875) client data for extraction."
+    log_info ""
+    log_info "LEGAL ACQUISITION OPTIONS:"
+    log_info ""
+    log_info "1. INTERNET ARCHIVE (Recommended - Preservation Copy):"
+    log_info "   https://archive.org/details/World-of-Warcraft-1.12.-Vanilla-Pre-BC-2004"
+    log_info "   Look for: World of Warcraft 1.12.1 (enUS or your locale)"
+    log_info ""
+    log_info "2. IF YOU OWN THE GAME:"
+    log_info "   - Install from original CD/DVD media"
+    log_info "   - Copy the Data folder from your installation"
+    log_info ""
+    log_info "3. PRE-EXTRACTED DATA (Community Alternative):"
+    log_info "   Some community repacks provide pre-extracted map files."
+    log_info "   Search: 'vmangos pre-extracted maps' (legally grey area)"
+    log_info ""
+    log_info "REQUIRED FILES IN DATA FOLDER:"
+    log_info "   - dbc.MPQ, terrain.MPQ, wmo.MPQ, model.MPQ"
+    log_info "   - texture.MPQ, sound.MPQ, speech.MPQ"
+    log_info "   - patch.MPQ (should be ~1.9GB for 1.12.1)"
+    log_info ""
+    log_info "NOTE: The installer will attempt extraction but can continue without"
+    log_info "      valid client data (you can extract manually later)."
+    log_info "========================================================================"
+    log_info ""
+}
+
+validate_client_data() {
+    local data_path="$1"
+    local errors=0
+    
+    log_info "Validating client data at: $data_path"
+    
+    # Check for required MPQ files
+    local required_files=("dbc.MPQ" "terrain.MPQ" "wmo.MPQ" "model.MPQ" "texture.MPQ")
+    for file in "${required_files[@]}"; do
+        if [ ! -f "$data_path/$file" ]; then
+            log_warn "Missing required file: $file"
+            ((errors++))
+        fi
+    done
+    
+    # Check patch.MPQ size (should be ~1.9GB for 1.12.1)
+    if [ -f "$data_path/patch.MPQ" ]; then
+        local patch_size=$(stat -c%s "$data_path/patch.MPQ" 2>/dev/null || echo 0)
+        if [ "$patch_size" -lt 1000000000 ]; then
+            log_warn "patch.MPQ seems too small ($patch_size bytes) - expected ~1.9GB"
+            log_warn "This may not be a valid 1.12.1 client"
+            ((errors++))
+        else
+            log_info "patch.MPQ size looks correct ($(numfmt --to=iec $patch_size))"
+        fi
+    else
+        log_warn "Missing patch.MPQ"
+        ((errors++))
+    fi
+    
+    # Test extraction capability with a dry-run
+    if [ -f "$data_path/dbc.MPQ" ]; then
+        log_info "Found dbc.MPQ - basic structure looks valid"
+    fi
+    
+    if [ $errors -gt 0 ]; then
+        log_warn "Client data validation found $errors issues"
+        return 1
+    else
+        log_info "Client data validation passed"
+        return 0
+    fi
+}
+
 check_client_data() {
     if [ -z "$CLIENT_DATA" ]; then
         # Try to auto-detect
@@ -275,13 +351,31 @@ check_client_data() {
     fi
     
     if [ -z "$CLIENT_DATA" ] || [ ! -d "$CLIENT_DATA" ]; then
+        show_client_data_help
         if check_noninteractive; then
-            log_error "Client data not found. Set VMANGOS_CLIENT_DATA environment variable."
-            exit 1
+            log_warn "Client data not found. Set VMANGOS_CLIENT_DATA environment variable."
+            log_warn "Installation will continue but data extraction will be skipped."
+            CLIENT_DATA=""
+            return 0
         else
-            read -rp "Enter path to WoW 1.12.1 client Data folder: " CLIENT_DATA
-            if [ ! -d "$CLIENT_DATA" ]; then
-                log_error "Client data not found at: $CLIENT_DATA"
+            read -rp "Enter path to WoW 1.12.1 client Data folder (or press Enter to skip): " CLIENT_DATA
+            if [ -z "$CLIENT_DATA" ] || [ ! -d "$CLIENT_DATA" ]; then
+                log_warn "No valid client data provided. Data extraction will be skipped."
+                log_warn "You can manually extract data later after providing client files."
+                CLIENT_DATA=""
+                return 0
+            fi
+        fi
+    fi
+    
+    # Validate the client data
+    if ! validate_client_data "$CLIENT_DATA"; then
+        log_warn "Client data may be incompatible or incomplete"
+        if ! check_noninteractive; then
+            read -rp "Continue anyway? Extraction may fail (y/N): " continue_anyway
+            if [[ ! "$continue_anyway" =~ ^[Yy]$ ]]; then
+                show_client_data_help
+                log_info "Please provide valid 1.12.1 client data and run again."
                 exit 1
             fi
         fi
@@ -455,13 +549,25 @@ phase_data_extraction() {
     
     cd "$INSTALLROOT"
     
-    # Copy extractors
+    # Check if client data is available
+    if [ -z "$CLIENT_DATA" ] || [ ! -d "$CLIENT_DATA" ]; then
+        log_warn "No client data available - skipping extraction phase"
+        log_info "To extract data later, place 1.12.1 client Data folder and run:"
+        log_info "  sudo $INSTALLROOT/run/bin/Extractors/mapextractor -i <data_path>"
+        set_checkpoint "DATA_DONE"
+        return 0
+    fi
+    
+    # Copy extractors (handle both lowercase and capitalized names)
     cp "$INSTALLROOT/run/bin/mapextractor" "$INSTALLROOT/" 2>/dev/null || \
-        cp "$INSTALLROOT/run/bin/Extractors/mapextractor" "$INSTALLROOT/" 2>/dev/null || true
+        cp "$INSTALLROOT/run/bin/Extractors/mapextractor" "$INSTALLROOT/" 2>/dev/null || \
+        cp "$INSTALLROOT/run/bin/Extractors/MapExtractor" "$INSTALLROOT/mapextractor" 2>/dev/null || true
     cp "$INSTALLROOT/run/bin/vmap_assembler" "$INSTALLROOT/" 2>/dev/null || \
-        cp "$INSTALLROOT/run/bin/Extractors/vmap_assembler" "$INSTALLROOT/" 2>/dev/null || true
+        cp "$INSTALLROOT/run/bin/Extractors/vmap_assembler" "$INSTALLROOT/" 2>/dev/null || \
+        cp "$INSTALLROOT/run/bin/Extractors/VMapAssembler" "$INSTALLROOT/vmap_assembler" 2>/dev/null || true
     cp "$INSTALLROOT/run/bin/vmapextractor" "$INSTALLROOT/" 2>/dev/null || \
-        cp "$INSTALLROOT/run/bin/Extractors/vmapextractor" "$INSTALLROOT/" 2>/dev/null || true
+        cp "$INSTALLROOT/run/bin/Extractors/vmapextractor" "$INSTALLROOT/" 2>/dev/null || \
+        cp "$INSTALLROOT/run/bin/Extractors/VMapExtractor" "$INSTALLROOT/vmapextractor" 2>/dev/null || true
     cp "$INSTALLROOT/run/bin/MoveMapGen" "$INSTALLROOT/" 2>/dev/null || \
         cp "$INSTALLROOT/run/bin/Extractors/MoveMapGenerator" "$INSTALLROOT/MoveMapGen" 2>/dev/null || true
     
@@ -481,6 +587,8 @@ phase_data_extraction() {
     # Run extractors as mangos user
     cd "$INSTALLROOT"
     
+    local EXTRACTION_FAILED=0
+    
     # Step 1: Extract DBC files and maps (5-10 minutes)
     log_info "====================================================================="
     log_info "STEP 1/4: Extracting DBC files and base maps"
@@ -491,12 +599,25 @@ phase_data_extraction() {
     log_info ""
     
     if [ -f ./mapextractor ]; then
-        log_info "Starting mapextractor..."
-        sudo -u "$MANGOSOSUSER" ./mapextractor 2>&1 | tee -a "$INSTALL_LOG" | \
-            grep -E "Extracting|Processing|Extracted|Done|Error|Fatal" || true
-        log_info "DBC and map extraction completed"
+        log_info "Starting mapextractor with client data: $CLIENT_DATA"
+        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./mapextractor -i '$CLIENT_DATA'" 2>&1 | tee -a "$INSTALL_LOG" | \
+            grep -E "Extracting|Processing|Extracted|Done|Error|Fatal|Invalid"; then
+            : # Extractor output captured
+        fi
+        
+        # Check if extraction succeeded
+        if [ ! -d "$INSTALLROOT/dbc" ] || [ ! -d "$INSTALLROOT/maps" ]; then
+            log_error "Map extraction failed - no output files generated"
+            EXTRACTION_FAILED=1
+        elif [ -z "$(ls -A $INSTALLROOT/dbc 2>/dev/null)" ]; then
+            log_error "Map extraction failed - DBC folder is empty"
+            EXTRACTION_FAILED=1
+        else
+            log_info "DBC and map extraction completed successfully"
+        fi
     else
         log_warn "mapextractor not found, skipping DBC/map extraction"
+        EXTRACTION_FAILED=1
     fi
     
     # Step 2: Extract vmaps (10-20 minutes)
@@ -508,12 +629,15 @@ phase_data_extraction() {
     log_info "Expected time: 10-20 minutes"
     log_info ""
     
-    if [ -f ./vmapextractor ]; then
+    if [ $EXTRACTION_FAILED -eq 0 ] && [ -f ./vmapextractor ]; then
         log_info "Starting vmapextractor..."
-        sudo -u "$MANGOSOSUSER" ./vmapextractor 2>&1 | tee -a "$INSTALL_LOG" || \
-            log_warn "VMap extractor had issues (may be normal if no output)"
+        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmapextractor -i '$CLIENT_DATA'" 2>&1 | tee -a "$INSTALL_LOG"; then
+            log_info "VMap extraction completed"
+        else
+            log_warn "VMap extractor had issues (may be normal)"
+        fi
     else
-        log_warn "vmapextractor not found, skipping vmap extraction"
+        log_warn "Skipping vmap extraction (previous step failed or extractor not found)"
     fi
     
     # Step 3: Assemble vmaps (5-10 minutes)
@@ -525,13 +649,16 @@ phase_data_extraction() {
     log_info "Expected time: 5-10 minutes"
     log_info ""
     
-    if [ -f ./vmap_assembler ]; then
+    if [ $EXTRACTION_FAILED -eq 0 ] && [ -f ./vmap_assembler ]; then
         log_info "Starting vmap_assembler..."
-        sudo -u "$MANGOSOSUSER" ./vmap_assembler 2>&1 | tee -a "$INSTALL_LOG" || \
+        mkdir -p "$INSTALLROOT/vmaps"
+        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmap_assembler '$CLIENT_DATA' '$INSTALLROOT/vmaps'" 2>&1 | tee -a "$INSTALL_LOG"; then
+            log_info "VMap assembly completed"
+        else
             log_warn "VMap assembler had issues"
-        log_info "VMap assembly completed"
+        fi
     else
-        log_warn "vmap_assembler not found, skipping vmap assembly"
+        log_warn "Skipping vmap assembly (previous step failed or assembler not found)"
     fi
     
     # Step 4: Generate movement maps (1-4 hours - the longest step)
@@ -563,7 +690,7 @@ phase_data_extraction() {
     log_info "Starting MoveMapGen at $(date '+%H:%M:%S')..."
     log_info "====================================================================="
     
-    if [ -f ./MoveMapGen ]; then
+    if [ $EXTRACTION_FAILED -eq 0 ] && [ -f ./MoveMapGen ]; then
         # Run with a background progress heartbeat
         {
             while true; do
@@ -589,7 +716,30 @@ phase_data_extraction() {
     fi
     
     log_info ""
-    log_info "All data extraction steps completed!"
+    if [ $EXTRACTION_FAILED -eq 1 ]; then
+        log_warn "========================================="
+        log_warn "DATA EXTRACTION DID NOT COMPLETE FULLY"
+        log_warn "========================================="
+        log_warn ""
+        log_warn "This usually means:"
+        log_warn "  1. The client data is not WoW 1.12.1 (build 5875)"
+        log_warn "  2. The client data is incomplete or corrupted"
+        log_warn "  3. The extractor tools had compatibility issues"
+        log_warn ""
+        log_warn "The server installation will continue, but:"
+        log_warn "  - You will need valid extracted data to run the server"
+        log_warn "  - Place correct 1.12.1 client data and re-run extraction"
+        log_warn ""
+        log_info "Manual extraction commands:"
+        log_info "  cd $INSTALLROOT"
+        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/mapextractor -i <client_data_path>"
+        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/vmapextractor -i <client_data_path>"
+        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/vmap_assembler buildings vmaps"
+        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/MoveMapGenerator"
+        log_warn ""
+    else
+        log_info "All data extraction steps completed successfully!"
+    fi
     
     set_checkpoint "DATA_DONE"
 }
