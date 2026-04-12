@@ -603,43 +603,25 @@ phase_config_setup() {
     
     # Create realmlist entry if it doesn't exist
     log_info "Configuring realmlist..."
+    # localAddress must be the same as address for external clients to connect properly
     mysql -u root -e "INSERT INTO \`$AUTHDB\`.\`realmlist\` (\`id\`, \`name\`, \`address\`, \`localAddress\`, \`localSubnetMask\`, \`port\`, \`icon\`, \`realmflags\`, \`timezone\`, \`allowedSecurityLevel\`, \`population\`, \`gamebuild_min\`, \`gamebuild_max\`, \`flag\`, \`realmbuilds\`) 
-        VALUES (1, 'VMaNGOS', '$SERVERIP', '127.0.0.1', '255.255.255.0', 8085, 0, 0, 1, 0, 0, 5875, 5875, 0, '') 
-        ON DUPLICATE KEY UPDATE \`address\` = '$SERVERIP', \`localAddress\` = '127.0.0.1', \`port\` = 8085;" 2>/dev/null || \
-        mysql -u root "$AUTHDB" -e "UPDATE \`realmlist\` SET \`address\` = '$SERVERIP', \`localaddress\` = '127.0.0.1', \`port\` = 8085 WHERE \`id\` = '1';" || true
+        VALUES (1, 'VMaNGOS', '$SERVERIP', '$SERVERIP', '255.255.255.0', 8085, 0, 0, 1, 0, 0, 5875, 5875, 0, '5875 6005 6141') 
+        ON DUPLICATE KEY UPDATE \`address\` = '$SERVERIP', \`localAddress\` = '$SERVERIP', \`port\` = 8085, \`realmbuilds\` = '5875 6005 6141';" 2>/dev/null || \
+        mysql -u root "$AUTHDB" -e "UPDATE \`realmlist\` SET \`address\` = '$SERVERIP', \`localAddress\` = '$SERVERIP', \`port\` = 8085, \`realmbuilds\` = '5875 6005 6141' WHERE \`id\` = '1';" || true
     
-    # Create test account
-    log_info "Creating test account (tony/REDACTED)..."
-    python3 << PYEOF 2>/dev/null || log_warn "Could not create test account"
-import hashlib
-
-N = int('894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3AC9EBF6E18C71B9B4B29C0D0B58D483B7AE82A6D8A2F422B5FDD5E39E712A7ECE534', 16)
-g = 7
-
-def sha1(s):
-    if isinstance(s, str):
-        s = s.encode('utf-8')
-    return hashlib.sha1(s).digest()
-
-username = "tony"
-password = "REDACTED"
-username_upper = username.upper()
-password_upper = password.upper()
-
-s = hashlib.sha1(username_upper.encode()).digest()[:32]
-identity = f"{username_upper}:{password_upper}".encode()
-x_hash = sha1(identity)
-x_input = s + x_hash
-x = int.from_bytes(sha1(x_input), 'big')
-v = pow(g, x, N)
-
-v_hex = format(v, 'x').zfill(64)
-s_hex = s.hex()
-
-print(f"INSERT INTO account (username, gmlevel, v, s, email, joindate, last_ip, failed_logins, locked, expansion)")
-print(f"VALUES ('{username}', 0, '{v_hex}', '{s_hex}', 'tony@localhost', NOW(), '127.0.0.1', 0, 0, 0)")
-print(f"ON DUPLICATE KEY UPDATE v = '{v_hex}', s = '{s_hex}', gmlevel = 0;")
-PYEOF | mysql -u root "$AUTHDB" 2>/dev/null || log_warn "Test account creation failed (non-critical)"
+    # Configure Remote Access (RA) console for account management
+    # Generate a secure random password for RA console access
+    RA_PASSWORD=$(openssl rand -base64 24 2>/dev/null || tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 32)
+    
+    log_info "Configuring Remote Access (RA) console..."
+    # Enable RA and set secure password
+    sed -i 's|Ra.Enable = 0|Ra.Enable = 1|' "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i 's|Ra.IP = "127.0.0.1"|Ra.IP = "0.0.0.0"|' "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|Ra.Port = 3443|Ra.Port = 3443|" "$INSTALLROOT/run/etc/mangosd.conf"
+    
+    # Store RA password for display at end of installation
+    echo "$RA_PASSWORD" > "$CHECKPOINT_DIR/ra_password.txt"
+    chmod 600 "$CHECKPOINT_DIR/ra_password.txt"
     
     set_checkpoint "CONFIG_DONE"
 }
@@ -1075,6 +1057,24 @@ EOF
         log_info "Or: tail -50 $INSTALLROOT/logs/mangosd/Server.log"
     fi
     
+    # Display console access information
+    if [ -f "$CHECKPOINT_DIR/ra_password.txt" ]; then
+        RA_PASSWORD=$(cat "$CHECKPOINT_DIR/ra_password.txt")
+        rm -f "$CHECKPOINT_DIR/ra_password.txt"
+        
+        log_info ""
+        log_info "--- Console Access for Account Management ---"
+        log_info "RA Console enabled on port 3443"
+        log_info "Connect: telnet $SERVERIP 3443"
+        log_info "Password: $RA_PASSWORD"
+        log_info ""
+        log_info "To create accounts, connect and type:"
+        log_info "  account create <username> <password>"
+        log_info "  account set gmlevel <username> <level>"
+        log_info ""
+        log_info "Note: Save this password securely. It will not be shown again."
+    fi
+    
     set_checkpoint "SERVICES_DONE"
 }
 
@@ -1137,9 +1137,10 @@ main() {
             log_info "Edit your WoW client's realmlist.wtf:"
             log_info "  set realmlist $SERVERIP"
             log_info ""
-            log_info "--- Test Account ---"
-            log_info "Username: tony"
-            log_info "Password: REDACTED"
+            log_info "--- Account Management ---"
+            log_info "Use RA Console to create accounts:"
+            log_info "  telnet $SERVERIP 3443"
+            log_info "  (password was displayed above)"
             log_info ""
             log_info "--- Service Commands ---"
             log_info "Start:   sudo systemctl start auth world"
