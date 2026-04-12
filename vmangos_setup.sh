@@ -1,10 +1,121 @@
 #!/bin/bash
 set -e
 
-HOME=$(pwd)
+# =============================================================================
+# VMANGOS Setup Script - Fixed Version
+# =============================================================================
+# Fixes:
+# - Added git clone retry logic with timeout
+# - Added non-interactive mode (via environment variables)
+# - Better error handling for network operations
+# - Fixed silent failures on world DB download
+# - Added progress logging
+# =============================================================================
 
+HOME=$(pwd)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Log file for installation
+INSTALL_LOG="${INSTALL_LOG:-/var/log/vmangos-install.log}"
+
+# Create log directory if needed
+mkdir -p "$(dirname "$INSTALL_LOG")" 2>/dev/null || true
+
+echo "Logging installation to: $INSTALL_LOG"
+exec 1> >(tee -a "$INSTALL_LOG")
+exec 2>&1
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+# Git clone with retry logic
+clone_with_retry() {
+    local repo_url="$1"
+    local target_dir="$2"
+    local branch="${3:-}"
+    local max_retries=3
+    local retry_delay=10
+    local attempt=1
+    
+    if [ -d "$target_dir/.git" ]; then
+        echo "Directory $target_dir already exists and is a git repo. Skipping clone."
+        return 0
+    fi
+    
+    # Remove incomplete directory if exists
+    if [ -d "$target_dir" ]; then
+        echo "Removing incomplete directory: $target_dir"
+        rm -rf "$target_dir"
+    fi
+    
+    while [ $attempt -le $max_retries ]; do
+        echo "Cloning $repo_url (attempt $attempt/$max_retries)..."
+        
+        if [ -n "$branch" ]; then
+            if timeout 300 git clone -b "$branch" "$repo_url" "$target_dir" 2>&1; then
+                echo "Successfully cloned $repo_url"
+                return 0
+            fi
+        else
+            if timeout 300 git clone "$repo_url" "$target_dir" 2>&1; then
+                echo "Successfully cloned $repo_url"
+                return 0
+            fi
+        fi
+        
+        echo "Clone failed, waiting ${retry_delay}s before retry..."
+        sleep $retry_delay
+        attempt=$((attempt + 1))
+        retry_delay=$((retry_delay * 2))  # Exponential backoff
+    done
+    
+    echo "ERROR: Failed to clone $repo_url after $max_retries attempts"
+    return 1
+}
+
+# Download with retry and better error handling
+download_with_retry() {
+    local url="$1"
+    local output="$2"
+    local max_retries=3
+    local retry_delay=5
+    local attempt=1
+    
+    while [ $attempt -le $max_retries ]; do
+        echo "Downloading $url (attempt $attempt/$max_retries)..."
+        
+        if timeout 300 wget -O "$output" "$url" 2>&1; then
+            if [ -f "$output" ] && [ -s "$output" ]; then
+                echo "Successfully downloaded to $output"
+                return 0
+            fi
+        fi
+        
+        echo "Download failed, waiting ${retry_delay}s before retry..."
+        rm -f "$output"
+        sleep $retry_delay
+        attempt=$((attempt + 1))
+        retry_delay=$((retry_delay * 2))
+    done
+    
+    echo "ERROR: Failed to download $url after $max_retries attempts"
+    return 1
+}
+
+# Check if running in non-interactive mode
+check_noninteractive() {
+    if [ -n "$VMANGOS_AUTO_INSTALL" ]; then
+        echo "Running in non-interactive mode (VMANGOS_AUTO_INSTALL is set)"
+        return 0
+    fi
+    return 1
+}
+
+# =============================================================================
 # Script introduction and setup instructions
-# ASCII Art by: http://www.patorjk.com/software/taag/
+# =============================================================================
+
 echo "###########################################################################################"
 echo "This script will install Classic World of Warcraft by VMaNGOS."
 echo "###########################################################################################"
@@ -27,7 +138,6 @@ cat << "EOF"
   \/  \/ \___/ \/  \/         
                               
 EOF
-read -p "Press any key to continue"
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then 
@@ -38,15 +148,82 @@ fi
 # Set the number of processor cores
 CPU=$(nproc)
 
-echo ""
-echo "==========================================================================================="
-echo "Please upload a copy of the 1.12 client /Data folder to this server before continuing."
-echo "The Data folder should contain: dbc, maps, mmaps, and vmaps subdirectories after extraction."
-echo "==========================================================================================="
-echo ""
+# =============================================================================
+# Configuration Phase
+# =============================================================================
 
-read -p "Enter the path to the 1.12 client Data folder [/home/$SUDO_USER/Data]: " CLIENTDATA
-CLIENTDATA=${CLIENTDATA:-/home/$SUDO_USER/Data}
+if check_noninteractive; then
+    # Non-interactive mode - use environment variables or defaults
+    echo "Using configuration from environment variables..."
+    
+    CLIENTDATA="${VMANGOS_CLIENT_DATA:-/home/$SUDO_USER/Data}"
+    INSTALLROOT="${VMANGOS_INSTALL_ROOT:-/opt/mangos}"
+    SQLADMINUSER="${VMANGOS_SQL_ADMIN_USER:-root}"
+    SQLADMINIP="${VMANGOS_SQL_ADMIN_IP:-%}"
+    SQLADMINPASS="${VMANGOS_SQL_ADMIN_PASS:-}"
+    WORLDDB="${VMANGOS_WORLD_DB:-world}"
+    AUTHDB="${VMANGOS_AUTH_DB:-auth}"
+    CHARACTERDB="${VMANGOS_CHAR_DB:-characters}"
+    MANGOSDBUSER="${VMANGOS_DB_USER:-mangos}"
+    MANGOSDBPASS="${VMANGOS_DB_PASS:-}"
+    MANGOSOSUSER="${VMANGOS_OS_USER:-mangos}"
+    SKIP_SECURE_MYSQL="${VMANGOS_SKIP_SECURE_MYSQL:-yes}"
+    
+    # Validate required passwords
+    if [ -z "$SQLADMINPASS" ]; then
+        echo "ERROR: VMANGOS_SQL_ADMIN_PASS must be set in non-interactive mode"
+        exit 1
+    fi
+    if [ -z "$MANGOSDBPASS" ]; then
+        echo "ERROR: VMANGOS_DB_PASS must be set in non-interactive mode"
+        exit 1
+    fi
+    
+    echo "Configuration loaded from environment variables."
+else
+    # Interactive mode
+    read -p "Press any key to continue"
+    
+    echo ""
+    echo "==========================================================================================="
+    echo "Please upload a copy of the 1.12 client /Data folder to this server before continuing."
+    echo "The Data folder should contain: dbc, maps, mmaps, and vmaps subdirectories after extraction."
+    echo "==========================================================================================="
+    echo ""
+    
+    read -p "Enter the path to the 1.12 client Data folder [/home/$SUDO_USER/Data]: " CLIENTDATA
+    CLIENTDATA=${CLIENTDATA:-/home/$SUDO_USER/Data}
+    
+    read -p "Where would you like VMaNGOS to be installed to? [/opt/mangos]: " INSTALLROOT
+    INSTALLROOT=${INSTALLROOT:-/opt/mangos}
+    
+    read -p "Set a user name for the database server admin account [root]: " SQLADMINUSER
+    SQLADMINUSER=${SQLADMINUSER:-root}
+    
+    read -p "Choose an IP range to restrict the SQL Admin user to log in from (Use % as a wildcard) [%]: " SQLADMINIP
+    SQLADMINIP=${SQLADMINIP:-%}
+    
+    read -sp "Choose a password for the database admin user (${SQLADMINUSER}): " SQLADMINPASS
+    echo ""
+    
+    read -p "Choose a name for the World Database [world]: " WORLDDB
+    WORLDDB=${WORLDDB:-world}
+    
+    read -p "Choose a name for the Auth Database [auth]: " AUTHDB
+    AUTHDB=${AUTHDB:-auth}
+    
+    read -p "Choose a name for the Characters Database [characters]: " CHARACTERDB
+    CHARACTERDB=${CHARACTERDB:-characters}
+    
+    read -p "Choose a database user account that will be used by the VMaNGOS server [mangos]: " MANGOSDBUSER
+    MANGOSDBUSER=${MANGOSDBUSER:-mangos}
+    
+    read -sp "Choose a password for the ${MANGOSDBUSER} database user account: " MANGOSDBPASS
+    echo ""
+    
+    read -p "Choose a Linux OS user account to run the MaNGOS server processes [mangos]: " MANGOSOSUSER
+    MANGOSOSUSER=${MANGOSOSUSER:-mangos}
+fi
 
 # Verify the client data exists
 if [ ! -d "$CLIENTDATA" ]; then
@@ -54,36 +231,6 @@ if [ ! -d "$CLIENTDATA" ]; then
     echo "Please ensure the WoW 1.12.1 client Data folder is uploaded to the server."
     exit 1
 fi
-
-read -p "Where would you like VMaNGOS to be installed to? [/opt/mangos]: " INSTALLROOT
-INSTALLROOT=${INSTALLROOT:-/opt/mangos}
-
-read -p "Set a user name for the database server admin account [root]: " SQLADMINUSER
-SQLADMINUSER=${SQLADMINUSER:-root}
-
-read -p "Choose an IP range to restrict the SQL Admin user to log in from (Use % as a wildcard) [%]: " SQLADMINIP
-SQLADMINIP=${SQLADMINIP:-%}
-
-read -sp "Choose a password for the database admin user (${SQLADMINUSER}): " SQLADMINPASS
-echo ""
-
-read -p "Choose a name for the World Database [world]: " WORLDDB
-WORLDDB=${WORLDDB:-world}
-
-read -p "Choose a name for the Auth Database [auth]: " AUTHDB
-AUTHDB=${AUTHDB:-auth}
-
-read -p "Choose a name for the Characters Database [characters]: " CHARACTERDB
-CHARACTERDB=${CHARACTERDB:-characters}
-
-read -p "Choose a database user account that will be used by the VMaNGOS server [mangos]: " MANGOSDBUSER
-MANGOSDBUSER=${MANGOSDBUSER:-mangos}
-
-read -sp "Choose a password for the ${MANGOSDBUSER} database user account: " MANGOSDBPASS
-echo ""
-
-read -p "Choose a Linux OS user account to run the MaNGOS server processes [mangos]: " MANGOSOSUSER
-MANGOSOSUSER=${MANGOSOSUSER:-mangos}
 
 # Detect the Server's IP Address
 SERVERIP=$(ip route get 1 | awk '{print $7; exit}')
@@ -176,16 +323,34 @@ elif [ -f "/etc/mysql/my.cnf" ]; then
 fi
 systemctl restart mysql.service
 
-# Clone the VMaNGOS git repos
-if [ ! -d "$INSTALLROOT/source" ]; then
-    git clone -b development https://github.com/vmangos/core "$INSTALLROOT/source"
-fi
+# =============================================================================
+# Clone the VMaNGOS git repos (with retry logic)
+# =============================================================================
 
-if [ ! -d "$INSTALLROOT/db" ]; then
-    git clone https://github.com/brotalnia/database "$INSTALLROOT/db"
-fi
+echo "######################################################################################################"
+echo "Cloning VMaNGOS repositories"
+echo "######################################################################################################"
 
+# Clone core repository
+clone_with_retry "https://github.com/vmangos/core" "$INSTALLROOT/source" "development" || {
+    echo "ERROR: Failed to clone VMaNGOS core repository"
+    exit 1
+}
+
+# Clone database repository
+clone_with_retry "https://github.com/brotalnia/database" "$INSTALLROOT/db" || {
+    echo "ERROR: Failed to clone database repository"
+    exit 1
+}
+
+# =============================================================================
 # Compile the VMaNGOS source code
+# =============================================================================
+
+echo "######################################################################################################"
+echo "Compiling VMaNGOS source code"
+echo "######################################################################################################"
+
 cd "$INSTALLROOT/build"
 cmake "$INSTALLROOT/source" \
     -DUSE_EXTRACTORS=1 \
@@ -279,7 +444,7 @@ GRANT ALL PRIVILEGES ON \`logs\`.* TO '$MANGOSDBUSER'@'$SERVERIP';
 
 GRANT ALL PRIVILEGES ON \`$AUTHDB\`.* TO '$MANGOSDBUSER'@'localhost';
 GRANT ALL PRIVILEGES ON \`$WORLDDB\`.* TO '$MANGOSDBUSER'@'localhost';
-GRANT ALL PRIVILEGES ON \`$CHARACTERDB\`.* TO '$MANGOSDBUSER'@'localhost';
+GRANT ALL PRIVILEGES ON \`CHARACTERDB\`.* TO '$MANGOSDBUSER'@'localhost';
 GRANT ALL PRIVILEGES ON \`logs\`.* TO '$MANGOSDBUSER'@'localhost';
 
 GRANT ALL PRIVILEGES ON \`$AUTHDB\`.* TO '$MANGOSDBUSER'@'%';
@@ -304,20 +469,34 @@ cd "$INSTALLROOT/db"
 # Try to find the latest world DB dump
 WORLD_DB_URL="https://github.com/brotalnia/database/releases/download/latest/world_full_14_june_2021.7z"
 echo "Downloading world database..."
-if ! wget -O world_full.7z "$WORLD_DB_URL" 2>/dev/null; then
+
+WORLD_DB_DOWNLOADED=false
+if download_with_retry "$WORLD_DB_URL" "world_full.7z"; then
+    WORLD_DB_DOWNLOADED=true
+else
     # Fallback to the raw file URL
-    wget -O world_full.7z "https://github.com/brotalnia/database/blob/master/world_full_14_june_2021.7z?raw=true" || true
+    echo "Primary download failed, trying fallback URL..."
+    FALLBACK_URL="https://github.com/brotalnia/database/blob/master/world_full_14_june_2021.7z?raw=true"
+    if download_with_retry "$FALLBACK_URL" "world_full.7z"; then
+        WORLD_DB_DOWNLOADED=true
+    fi
 fi
 
-if [ -f "world_full.7z" ]; then
+if [ "$WORLD_DB_DOWNLOADED" = true ] && [ -f "world_full.7z" ]; then
+    echo "Extracting world database..."
     7z x world_full.7z -aoa
     # Find and import the SQL file
     WORLD_SQL=$(find . -name "world_full*.sql" -type f | head -n1)
     if [ -n "$WORLD_SQL" ]; then
         echo "Importing world database (this may take a while)..."
         mysql "$WORLDDB" < "$WORLD_SQL"
+        echo "World database imported successfully."
+    else
+        echo "WARNING: Could not find world_full*.sql file after extraction"
     fi
     rm -f world_full.7z
+else
+    echo "WARNING: Failed to download world database. You may need to import it manually."
 fi
 
 # Populate the Characters, Auth, and Logs databases from the source directory
@@ -433,14 +612,23 @@ EOF
 # Reload systemd to pick up new services
 systemctl daemon-reload
 
-# Secure the MariaDB installation (optional - prompt user)
-echo ""
-echo "######################################################################################################"
-echo "Would you like to run mysql_secure_installation to secure your MariaDB installation?"
-echo "This is recommended for production servers. (y/n)"
-read -r SECURE_MYSQL
-if [ "$SECURE_MYSQL" = "y" ] || [ "$SECURE_MYSQL" = "Y" ]; then
-    mysql_secure_installation
+# Secure the MariaDB installation (optional - prompt user in interactive mode)
+if ! check_noninteractive; then
+    echo ""
+    echo "######################################################################################################"
+    echo "Would you like to run mysql_secure_installation to secure your MariaDB installation?"
+    echo "This is recommended for production servers. (y/n)"
+    read -r SECURE_MYSQL
+    if [ "$SECURE_MYSQL" = "y" ] || [ "$SECURE_MYSQL" = "Y" ]; then
+        mysql_secure_installation
+    fi
+else
+    if [ "$SKIP_SECURE_MYSQL" != "yes" ]; then
+        echo "Running mysql_secure_installation..."
+        mysql_secure_installation
+    else
+        echo "Skipping mysql_secure_installation (VMANGOS_SKIP_SECURE_MYSQL=yes)"
+    fi
 fi
 
 # Enable the new services
@@ -472,6 +660,8 @@ echo ""
 echo "To view logs:"
 echo "  sudo journalctl -u auth -f"
 echo "  sudo journalctl -u world -f"
+echo ""
+echo "Installation log saved to: $INSTALL_LOG"
 echo ""
 echo "Please update your WoW Game client's realmlist.wtf to:"
 echo "  set realmlist $SERVERIP"
