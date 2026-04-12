@@ -94,6 +94,10 @@ if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 else
     generate_config
+    # Source the newly created config to set variables in current shell
+    log_info "Loading generated configuration..."
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
 fi
 
 # Verify client data exists
