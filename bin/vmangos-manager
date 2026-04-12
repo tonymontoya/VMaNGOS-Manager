@@ -6,7 +6,7 @@
 # Version: 0.1.0 (Release A - Foundation)
 # =============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 # =============================================================================
 # Setup Paths
@@ -24,6 +24,35 @@ source "$LIB_DIR/config.sh"
 source "$LIB_DIR/server.sh"
 
 # =============================================================================
+# Global State
+# =============================================================================
+
+DRY_RUN=false
+CLEANUP_LOCKS=()
+
+# =============================================================================
+# Signal Handlers
+# =============================================================================
+
+cleanup() {
+    log_debug "Cleaning up..."
+    
+    # Release any held locks
+    for lock_file in "${CLEANUP_LOCKS[@]}"; do
+        if [[ -n "$lock_file" && -d "$lock_file" ]]; then
+            log_debug "Releasing lock: $lock_file"
+            lock_release "$lock_file" || true
+        fi
+    done
+    
+    log_debug "Cleanup complete"
+}
+
+# Trap signals to ensure cleanup
+trap cleanup EXIT
+trap 'log_error "Interrupted"; exit 130' INT TERM
+
+# =============================================================================
 # Version & Usage
 # =============================================================================
 
@@ -33,10 +62,17 @@ show_version() {
 }
 
 show_usage() {
-    cat << EOF
+    cat << 'EOF'
 VMANGOS Manager - CLI tool for managing VMANGOS private server
 
-Usage: vmangos-manager <command> [options]
+Usage: vmangos-manager [global-options] <command> [options]
+
+Global Options:
+  -j, --json          Output in JSON format
+  -v, --verbose       Enable verbose logging
+  -n, --dry-run       Show what would be done without executing
+  -h, --help          Show this help message
+  --version           Show version information
 
 Commands:
   server start [auth|world|all]     Start service(s)
@@ -45,16 +81,11 @@ Commands:
   server status [auth|world|all]    Show service status
   server logs [auth|world] [-f]     Show service logs
 
-Options:
-  -j, --json          Output in JSON format
-  -v, --verbose       Enable verbose logging
-  -h, --help          Show this help message
-  --version           Show version information
-
 Examples:
   vmangos-manager server start all
   vmangos-manager server status world --json
   vmangos-manager server logs auth -f
+  vmangos-manager -n server restart all  # Dry run
 
 EOF
 }
@@ -72,6 +103,11 @@ parse_global_args() {
                 ;;
             -v|--verbose)
                 export VMANGOS_LOG_LEVEL=$LOG_LEVEL_DEBUG
+                shift
+                ;;
+            -n|--dry-run)
+                DRY_RUN=true
+                log_info "DRY RUN MODE - No changes will be made"
                 shift
                 ;;
             -h|--help)
@@ -111,6 +147,12 @@ handle_server_command() {
     # Default target
     [[ -z "$target" ]] && target="all"
     
+    # Handle dry-run for status/logs (these are read-only)
+    if [[ "$DRY_RUN" == "true" && "$action" != "status" && "$action" != "logs" ]]; then
+        log_info "[DRY RUN] Would $action $target"
+        return 0
+    fi
+    
     # Handle logs separately (has extra options)
     if [[ "$action" == "logs" ]]; then
         local follow="false"
@@ -126,44 +168,48 @@ handle_server_command() {
         case "$target" in
             auth|world)
                 server_logs "$target" "$lines" "$follow"
+                return $?
                 ;;
             *)
                 error_exit "Logs command requires 'auth' or 'world' target"
                 ;;
         esac
-        return 0
     fi
     
     # Execute action
+    local result=0
+    
     case "$target" in
         auth)
             case "$action" in
-                start) server_start "$SERVICE_AUTH" ;;
-                stop) server_stop "$SERVICE_AUTH" ;;
-                restart) server_restart "$SERVICE_AUTH" ;;
-                status) server_status "$SERVICE_AUTH" "$format" ;;
+                start) server_start "$SERVICE_AUTH" || result=1 ;;
+                stop) server_stop "$SERVICE_AUTH" || result=1 ;;
+                restart) server_restart "$SERVICE_AUTH" || result=1 ;;
+                status) server_status "$SERVICE_AUTH" "$format" || result=1 ;;
             esac
             ;;
         world)
             case "$action" in
-                start) server_start "$SERVICE_WORLD" ;;
-                stop) server_stop "$SERVICE_WORLD" ;;
-                restart) server_restart "$SERVICE_WORLD" ;;
-                status) server_status "$SERVICE_WORLD" "$format" ;;
+                start) server_start "$SERVICE_WORLD" || result=1 ;;
+                stop) server_stop "$SERVICE_WORLD" || result=1 ;;
+                restart) server_restart "$SERVICE_WORLD" || result=1 ;;
+                status) server_status "$SERVICE_WORLD" "$format" || result=1 ;;
             esac
             ;;
         all)
             case "$action" in
-                start) server_start_all ;;
-                stop) server_stop_all ;;
-                restart) server_restart_all ;;
-                status) server_status_all "$format" ;;
+                start) server_start_all || result=1 ;;
+                stop) server_stop_all || result=1 ;;
+                restart) server_restart_all || result=1 ;;
+                status) server_status_all "$format" || result=1 ;;
             esac
             ;;
         *)
             error_exit "Unknown target: $target (use auth, world, or all)"
             ;;
     esac
+    
+    return $result
 }
 
 # =============================================================================
@@ -177,7 +223,7 @@ main() {
     # Shift parsed args
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -j|--json|-v|--verbose)
+            -j|--json|-v|--verbose|-n|--dry-run)
                 shift
                 ;;
             *)
@@ -193,8 +239,10 @@ main() {
     # Route to handler
     case "$command" in
         server)
-            check_root
-            config_load
+            if ! check_root; then
+                error_exit "Root privileges required"
+            fi
+            config_load || true  # Use defaults if config load fails
             handle_server_command "$@"
             ;;
         ""|-h|--help)

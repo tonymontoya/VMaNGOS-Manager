@@ -3,7 +3,8 @@
 # Unit Tests for lib/common.sh
 # =============================================================================
 
-# Source the library
+set -uo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../lib/common.sh"
 
@@ -89,26 +90,25 @@ test_json_output_valid_format() {
 test_validate_username_valid() {
     local result
     result=$(validate_username "TestUser123")
-    [[ "$result" == "TestUser123" ]]
+    [[ "$result" == "TestUser123" ]] && [[ $? -eq 0 ]]
 }
 
 test_validate_username_too_short() {
-    # Test that short username fails - run in subshell to catch exit
-    (validate_username "a" 2>/dev/null)
-    local exit_code=$?
-    [[ $exit_code -ne 0 ]]
+    local result
+    result=$(validate_username "a" 2>&1)
+    [[ $? -ne 0 ]]
 }
 
 test_validate_username_too_long() {
-    (validate_username "thisusernameiswaytoolongtobevalid" 2>/dev/null)
-    local exit_code=$?
-    [[ $exit_code -ne 0 ]]
+    local result
+    result=$(validate_username "thisusernameiswaytoolongtobevalid" 2>&1)
+    [[ $? -ne 0 ]]
 }
 
 test_validate_username_invalid_chars() {
-    (validate_username "user@name" 2>/dev/null)
-    local exit_code=$?
-    [[ $exit_code -ne 0 ]]
+    local result
+    result=$(validate_username "user@name" 2>&1)
+    [[ $? -ne 0 ]]
 }
 
 # =============================================================================
@@ -122,10 +122,115 @@ test_validate_gm_level_valid() {
     [[ "$r1" == "0" && "$r2" == "3" ]]
 }
 
-test_validate_gm_level_invalid() {
-    (validate_gm_level "4" 2>/dev/null)
+test_validate_gm_level_invalid_high() {
+    validate_gm_level "4" 2>/dev/null
+    [[ $? -ne 0 ]]
+}
+
+test_validate_gm_level_invalid_negative() {
+    validate_gm_level "-1" 2>/dev/null
+    [[ $? -ne 0 ]]
+}
+
+# =============================================================================
+# check_root Tests
+# =============================================================================
+
+test_check_root() {
+    # This will pass if running as root, fail otherwise
+    # Just verify it returns consistent results
+    if [[ $EUID -eq 0 ]]; then
+        check_root
+        [[ $? -eq 0 ]]
+    else
+        check_root 2>/dev/null
+        [[ $? -ne 0 ]]
+    fi
+}
+
+# =============================================================================
+# get_password_from_file Tests
+# =============================================================================
+
+test_get_password_from_file_mode_600() {
+    local test_file="/tmp/test_pass_600_$$"
+    echo "testpassword123" > "$test_file"
+    chmod 600 "$test_file"
+    
+    local result
+    result=$(get_password_from_file "$test_file")
     local exit_code=$?
+    
+    rm -f "$test_file"
+    [[ $exit_code -eq 0 && "$result" == "testpassword123" ]]
+}
+
+test_get_password_from_file_mode_644() {
+    local test_file="/tmp/test_pass_644_$$"
+    echo "testpassword123" > "$test_file"
+    chmod 644 "$test_file"
+    
+    get_password_from_file "$test_file" 2>/dev/null
+    local exit_code=$?
+    
+    rm -f "$test_file"
     [[ $exit_code -ne 0 ]]
+}
+
+test_get_password_from_file_nonexistent() {
+    get_password_from_file "/tmp/nonexistent_pass_$$" 2>/dev/null
+    [[ $? -ne 0 ]]
+}
+
+test_get_password_from_file_too_short() {
+    local test_file="/tmp/test_pass_short_$$"
+    echo "short" > "$test_file"
+    chmod 600 "$test_file"
+    
+    get_password_from_file "$test_file" 2>/dev/null
+    local exit_code=$?
+    
+    rm -f "$test_file"
+    [[ $exit_code -ne 0 ]]
+}
+
+# =============================================================================
+# Lock Tests
+# =============================================================================
+
+test_lock_acquire_and_release() {
+    local lock_file
+    lock_file=$(lock_acquire "test_lock_$$" 5)
+    local acquire_result=$?
+    
+    local release_result=0
+    if [[ $acquire_result -eq 0 && -d "$lock_file" ]]; then
+        lock_release "$lock_file"
+        release_result=$?
+    fi
+    
+    [[ $acquire_result -eq 0 && $release_result -eq 0 ]]
+}
+
+test_lock_prevents_double_acquire() {
+    local lock_file1 lock_file2
+    local result=0
+    
+    # First acquire should succeed
+    lock_file1=$(lock_acquire "test_lock_double_$$" 2)
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    
+    # Second acquire with short timeout should fail
+    lock_file2=$(lock_acquire "test_lock_double_$$" 1)
+    if [[ $? -eq 0 ]]; then
+        result=1
+    fi
+    
+    # Cleanup
+    lock_release "$lock_file1"
+    [[ $result -eq 0 ]]
 }
 
 # =============================================================================
@@ -162,7 +267,27 @@ echo ""
 
 # validate_gm_level tests
 run_test "validate_gm_level accepts valid" test_validate_gm_level_valid
-run_test "validate_gm_level rejects invalid" test_validate_gm_level_invalid
+run_test "validate_gm_level rejects too high" test_validate_gm_level_invalid_high
+run_test "validate_gm_level rejects negative" test_validate_gm_level_invalid_negative
+
+echo ""
+
+# check_root tests
+run_test "check_root" test_check_root
+
+echo ""
+
+# get_password_from_file tests
+run_test "get_password_from_file mode 600" test_get_password_from_file_mode_600
+run_test "get_password_from_file rejects mode 644" test_get_password_from_file_mode_644
+run_test "get_password_from_file rejects nonexistent" test_get_password_from_file_nonexistent
+run_test "get_password_from_file rejects short password" test_get_password_from_file_too_short
+
+echo ""
+
+# Lock tests
+run_test "lock acquire and release" test_lock_acquire_and_release
+run_test "lock prevents double acquire" test_lock_prevents_double_acquire
 
 echo ""
 echo "=================================="
