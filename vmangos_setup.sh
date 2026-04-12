@@ -396,6 +396,36 @@ check_client_data() {
         # The extractor will use the path as-is, it expects Data/ subdirectory
         CLIENT_DATA_EXTRACT_ROOT="$CLIENT_DATA"
     fi
+    
+    # Check if mangos user can read the client data
+    # Extraction runs as mangos user for security, so we need readable permissions
+    if ! sudo -u "$MANGOSOSUSER" test -r "$CLIENT_DATA_EXTRACT_ROOT/dbc.MPQ" 2>/dev/null; then
+        log_warn "Client data is not accessible by $MANGOSOSUSER user"
+        log_info "Copying client data to $INSTALLROOT/client-data for extraction..."
+        
+        # Create temp location and copy data
+        mkdir -p "$INSTALLROOT/client-data"
+        
+        # Copy all MPQ files and required directories
+        cp -r "$CLIENT_DATA_EXTRACT_ROOT"/*.MPQ "$INSTALLROOT/client-data/" 2>/dev/null || true
+        cp -r "$CLIENT_DATA_EXTRACT_ROOT"/*.mpq "$INSTALLROOT/client-data/" 2>/dev/null || true
+        
+        # Copy Interface directory if it exists (contains Cinematics, etc)
+        if [ -d "$CLIENT_DATA_EXTRACT_ROOT/Interface" ]; then
+            cp -r "$CLIENT_DATA_EXTRACT_ROOT/Interface" "$INSTALLROOT/client-data/" 2>/dev/null || true
+        fi
+        
+        # Set ownership for mangos user
+        chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT/client-data"
+        
+        # Create the Data/Data symlink in the copy
+        if [ ! -e "$INSTALLROOT/client-data/Data" ]; then
+            ln -sf . "$INSTALLROOT/client-data/Data" 2>/dev/null || true
+        fi
+        
+        CLIENT_DATA_EXTRACT_ROOT="$INSTALLROOT/client-data"
+        log_info "Client data copied to: $CLIENT_DATA_EXTRACT_ROOT"
+    fi
 }
 
 # =============================================================================
@@ -614,7 +644,7 @@ phase_data_extraction() {
     
     if [ -f ./mapextractor ]; then
         log_info "Starting mapextractor with client data: $CLIENT_DATA"
-        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./mapextractor -i '$CLIENT_DATA'" 2>&1 | tee -a "$INSTALL_LOG" | \
+        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./mapextractor -i '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG" | \
             grep -E "Extracting|Processing|Extracted|Done|Error|Fatal|Invalid"; then
             : # Extractor output captured
         fi
@@ -645,7 +675,7 @@ phase_data_extraction() {
     
     if [ $EXTRACTION_FAILED -eq 0 ] && [ -f ./vmapextractor ]; then
         log_info "Starting vmapextractor..."
-        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmapextractor -i '$CLIENT_DATA'" 2>&1 | tee -a "$INSTALL_LOG"; then
+        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmapextractor -i '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG"; then
             log_info "VMap extraction completed"
         else
             log_warn "VMap extractor had issues (may be normal)"
