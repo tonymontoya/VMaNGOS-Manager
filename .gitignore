@@ -1,0 +1,33 @@
+# Development artifacts - keep repo clean
+.AGENTS.md
+CLAUDE.md
+memory/
+
+# Environment files
+.env
+.env.local
+.env.*
+
+# Development plans (stored in /home/tony/dev-plans/)
+ENG_PLAN_*.md
+DEV_READINESS_*.md
+FRD.md
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+.vscode/
+*.sublime-*
+
+# Logs
+*.log
+logs/
