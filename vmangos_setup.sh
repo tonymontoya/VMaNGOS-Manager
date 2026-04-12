@@ -1,575 +1,469 @@
 #!/bin/bash
+# =============================================================================
+# VMANGOS Setup Script - Ubuntu 22.04 LTS
+# =============================================================================
+# This script automates the installation of VMaNGOS (Vanilla MaNGOS)
+# onto Ubuntu 22.04 LTS. It includes:
+# - Retry logic for network operations
+# - Resume capability for interrupted installations
+# - Background execution support for long builds
+# - Comprehensive logging
+# =============================================================================
+
 set -e
 
 # =============================================================================
-# VMANGOS Setup Script - Fixed Version
-# =============================================================================
-# Fixes:
-# - Added git clone retry logic with timeout
-# - Added non-interactive mode (via environment variables)
-# - Better error handling for network operations
-# - Fixed silent failures on world DB download
-# - Added progress logging
+# CONFIGURATION - Can be overridden via environment variables
 # =============================================================================
 
-HOME=$(pwd)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Non-interactive mode detection
+VMANGOS_AUTO_INSTALL="${VMANGOS_AUTO_INSTALL:-0}"
 
-# Log file for installation
+# Installation paths
+INSTALLROOT="${VMANGOS_INSTALL_ROOT:-/opt/mangos}"
+CLIENT_DATA="${VMANGOS_CLIENT_DATA:-}"
+
+# Database settings
+SQLADMINUSER="${VMANGOS_SQL_ADMIN_USER:-root}"
+SQLADMINIP="${VMANGOS_SQL_ADMIN_IP:-%}"
+SQLADMINPASS="${VMANGOS_SQL_ADMIN_PASS:-}"
+AUTHDB="${VMANGOS_AUTH_DB:-auth}"
+WORLDDB="${VMANGOS_WORLD_DB:-world}"
+CHARACTERDB="${VMANGOS_CHAR_DB:-characters}"
+LOGSDB="${VMANGOS_LOGS_DB:-logs}"
+MANGOSDBUSER="${VMANGOS_DB_USER:-mangos}"
+MANGOSDBPASS="${VMANGOS_DB_PASS:-mangos}"
+MANGOSOSUSER="${VMANGOS_OS_USER:-mangos}"
+
+# Feature flags
+SKIP_SECURE_MYSQL="${VMANGOS_SKIP_SECURE_MYSQL:-no}"
+
+# Checkpoint/Resume settings
+CHECKPOINT_DIR="${INSTALLROOT}/.install-checkpoints"
+CHECKPOINT_FILE="${CHECKPOINT_DIR}/checkpoint"
 INSTALL_LOG="${INSTALL_LOG:-/var/log/vmangos-install.log}"
+BUILD_IN_BACKGROUND="${VMANGOS_BACKGROUND_BUILD:-0}"
+
+# =============================================================================
+# LOGGING FUNCTIONS
+# =============================================================================
 
 # Create log directory if needed
 mkdir -p "$(dirname "$INSTALL_LOG")" 2>/dev/null || true
 
-echo "Logging installation to: $INSTALL_LOG"
-exec 1> >(tee -a "$INSTALL_LOG")
-exec 2>&1
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-# Git clone with retry logic
-clone_with_retry() {
-    local repo_url="$1"
-    local target_dir="$2"
-    local branch="${3:-}"
-    local max_retries=3
-    local retry_delay=10
-    local attempt=1
-    
-    if [ -d "$target_dir/.git" ]; then
-        echo "Directory $target_dir already exists and is a git repo. Skipping clone."
-        return 0
-    fi
-    
-    # Remove incomplete directory if exists
-    if [ -d "$target_dir" ]; then
-        echo "Removing incomplete directory: $target_dir"
-        rm -rf "$target_dir"
-    fi
-    
-    while [ $attempt -le $max_retries ]; do
-        echo "Cloning $repo_url (attempt $attempt/$max_retries)..."
-        
-        if [ -n "$branch" ]; then
-            if timeout 300 git clone -b "$branch" "$repo_url" "$target_dir" 2>&1; then
-                echo "Successfully cloned $repo_url"
-                return 0
-            fi
-        else
-            if timeout 300 git clone "$repo_url" "$target_dir" 2>&1; then
-                echo "Successfully cloned $repo_url"
-                return 0
-            fi
-        fi
-        
-        echo "Clone failed, waiting ${retry_delay}s before retry..."
-        sleep $retry_delay
-        attempt=$((attempt + 1))
-        retry_delay=$((retry_delay * 2))  # Exponential backoff
-    done
-    
-    echo "ERROR: Failed to clone $repo_url after $max_retries attempts"
-    return 1
+log_info() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] $1" | tee -a "$INSTALL_LOG"
 }
 
-# Download with retry and better error handling
+log_warn() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN] $1" | tee -a "$INSTALL_LOG"
+}
+
+log_error() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] $1" | tee -a "$INSTALL_LOG"
+}
+
+log_section() {
+    echo "" | tee -a "$INSTALL_LOG"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ==========================================" | tee -a "$INSTALL_LOG"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$INSTALL_LOG"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ==========================================" | tee -a "$INSTALL_LOG"
+}
+
+# =============================================================================
+# CHECKPOINT FUNCTIONS
+# =============================================================================
+
+init_checkpoints() {
+    mkdir -p "$CHECKPOINT_DIR"
+    if [ ! -f "$CHECKPOINT_FILE" ]; then
+        echo "START" > "$CHECKPOINT_FILE"
+    fi
+}
+
+set_checkpoint() {
+    echo "$1" > "$CHECKPOINT_FILE"
+    log_info "Checkpoint: $1"
+}
+
+get_checkpoint() {
+    if [ -f "$CHECKPOINT_FILE" ]; then
+        cat "$CHECKPOINT_FILE"
+    else
+        echo "START"
+    fi
+}
+
+clear_checkpoint() {
+    rm -f "$CHECKPOINT_FILE"
+    rm -rf "$CHECKPOINT_DIR"
+    log_info "Installation complete - checkpoints cleared"
+}
+
+# =============================================================================
+# RETRY FUNCTIONS
+# =============================================================================
+
 download_with_retry() {
     local url="$1"
     local output="$2"
     local max_retries=3
     local retry_delay=5
-    local attempt=1
     
-    while [ $attempt -le $max_retries ]; do
-        echo "Downloading $url (attempt $attempt/$max_retries)..."
-        
-        if timeout 300 wget -O "$output" "$url" 2>&1; then
-            if [ -f "$output" ] && [ -s "$output" ]; then
-                echo "Successfully downloaded to $output"
-                return 0
-            fi
+    for i in $(seq 1 $max_retries); do
+        log_info "Download attempt $i/$max_retries: $url"
+        if timeout 300 wget --tries=3 --timeout=60 -O "$output" "$url" 2>&1 | tee -a "$INSTALL_LOG"; then
+            log_info "Download successful"
+            return 0
         fi
-        
-        echo "Download failed, waiting ${retry_delay}s before retry..."
-        rm -f "$output"
+        log_warn "Download failed, waiting ${retry_delay}s before retry..."
         sleep $retry_delay
-        attempt=$((attempt + 1))
         retry_delay=$((retry_delay * 2))
     done
     
-    echo "ERROR: Failed to download $url after $max_retries attempts"
+    log_error "Download failed after $max_retries attempts"
     return 1
 }
 
-# Check if running in non-interactive mode
-check_noninteractive() {
-    if [ -n "$VMANGOS_AUTO_INSTALL" ]; then
-        echo "Running in non-interactive mode (VMANGOS_AUTO_INSTALL is set)"
+git_clone_with_retry() {
+    local repo_url="$1"
+    local target_dir="$2"
+    local branch="${3:-}"
+    local max_retries=3
+    local retry_delay=5
+    
+    for i in $(seq 1 $max_retries); do
+        log_info "Git clone attempt $i/$max_retries: $repo_url"
+        rm -rf "$target_dir"
+        if [ -n "$branch" ]; then
+            if timeout 300 git clone -b "$branch" "$repo_url" "$target_dir" 2>&1 | tee -a "$INSTALL_LOG"; then
+                log_info "Clone successful"
+                return 0
+            fi
+        else
+            if timeout 300 git clone "$repo_url" "$target_dir" 2>&1 | tee -a "$INSTALL_LOG"; then
+                log_info "Clone successful"
+                return 0
+            fi
+        fi
+        log_warn "Clone failed, waiting ${retry_delay}s before retry..."
+        sleep $retry_delay
+        retry_delay=$((retry_delay * 2))
+    done
+    
+    log_error "Git clone failed after $max_retries attempts"
+    return 1
+}
+
+# =============================================================================
+# BACKGROUND BUILD FUNCTIONS
+# =============================================================================
+
+start_background_build() {
+    log_section "STARTING BACKGROUND BUILD"
+    log_info "The compilation will run in the background due to long build time (1-2 hours)"
+    log_info "Monitor progress with: tail -f ${INSTALL_LOG}"
+    log_info "Check build status with: cat ${CHECKPOINT_DIR}/build-status"
+    
+    # Create build script
+    cat > "$CHECKPOINT_DIR/build.sh" << 'BUILDEOF'
+#!/bin/bash
+set -e
+BUILD_LOG="$1"
+CPU="$2"
+INSTALLROOT="$3"
+
+echo "RUNNING" > "${INSTALLROOT}/.install-checkpoints/build-status"
+
+cd "${INSTALLROOT}/build"
+if make -j "$CPU" 2>&1 | tee -a "$BUILD_LOG"; then
+    echo "COMPLETED" > "${INSTALLROOT}/.install-checkpoints/build-status"
+    exit 0
+else
+    echo "FAILED" > "${INSTALLROOT}/.install-checkpoints/build-status"
+    exit 1
+fi
+BUILDEOF
+    chmod +x "$CHECKPOINT_DIR/build.sh"
+    
+    # Start build in background with nohup
+    nohup "$CHECKPOINT_DIR/build.sh" "$INSTALL_LOG" "$(nproc)" "$INSTALLROOT" > /dev/null 2>&1 &
+    BUILD_PID=$!
+    echo "$BUILD_PID" > "$CHECKPOINT_DIR/build.pid"
+    
+    log_info "Build started with PID: $BUILD_PID"
+    log_info "Waiting for build to complete..."
+    
+    # Wait for build to complete
+    if wait $BUILD_PID; then
+        log_info "Background build completed successfully"
         return 0
-    fi
-    return 1
-}
-
-# =============================================================================
-# Script introduction and setup instructions
-# =============================================================================
-
-echo "###########################################################################################"
-echo "This script will install Classic World of Warcraft by VMaNGOS."
-echo "###########################################################################################"
-echo " "
-echo "1. The World, Auth, and Database server will all be installed locally on this machine"
-echo "2. This script must be run as root (sudo) for it to work properly. (sudo bash script.sh)"
-echo "3. This script has been tested on Ubuntu 22.04 LTS - Server."
-echo ""
-cat << "EOF"
-   ___ _               _      
-  / __\ | __ _ ___ ___(_) ___ 
- / /  | |/ _` / __/ __| |/ __|
-/ /___| | (_| \__ \__ \ | (__ 
-\____/|_|\__,_|___/___/_|\___|
-                              
- __    __     __    __        
-/ / /\ \ \___/ / /\ \ \       
-\ \/  \/ / _ \ \/  \/ /       
- \  /\  / (_) \  /\  /        
-  \/  \/ \___/ \/  \/         
-                              
-EOF
-
-# Check if running as root
-if [ "$EUID" -ne 0 ]; then 
-    echo "Please run as root (use sudo)"
-    exit 1
-fi
-
-# Set the number of processor cores
-CPU=$(nproc)
-
-# =============================================================================
-# Configuration Phase
-# =============================================================================
-
-if check_noninteractive; then
-    # Non-interactive mode - use environment variables or defaults
-    echo "Using configuration from environment variables..."
-    
-    CLIENTDATA="${VMANGOS_CLIENT_DATA:-/home/$SUDO_USER/Data}"
-    INSTALLROOT="${VMANGOS_INSTALL_ROOT:-/opt/mangos}"
-    SQLADMINUSER="${VMANGOS_SQL_ADMIN_USER:-root}"
-    SQLADMINIP="${VMANGOS_SQL_ADMIN_IP:-%}"
-    SQLADMINPASS="${VMANGOS_SQL_ADMIN_PASS:-}"
-    WORLDDB="${VMANGOS_WORLD_DB:-world}"
-    AUTHDB="${VMANGOS_AUTH_DB:-auth}"
-    CHARACTERDB="${VMANGOS_CHAR_DB:-characters}"
-    MANGOSDBUSER="${VMANGOS_DB_USER:-mangos}"
-    MANGOSDBPASS="${VMANGOS_DB_PASS:-}"
-    MANGOSOSUSER="${VMANGOS_OS_USER:-mangos}"
-    SKIP_SECURE_MYSQL="${VMANGOS_SKIP_SECURE_MYSQL:-yes}"
-    
-    # Validate required passwords
-    if [ -z "$SQLADMINPASS" ]; then
-        echo "ERROR: VMANGOS_SQL_ADMIN_PASS must be set in non-interactive mode"
-        exit 1
-    fi
-    if [ -z "$MANGOSDBPASS" ]; then
-        echo "ERROR: VMANGOS_DB_PASS must be set in non-interactive mode"
-        exit 1
-    fi
-    
-    echo "Configuration loaded from environment variables."
-else
-    # Interactive mode
-    read -p "Press any key to continue"
-    
-    echo ""
-    echo "==========================================================================================="
-    echo "Please upload a copy of the 1.12 client /Data folder to this server before continuing."
-    echo "The Data folder should contain: dbc, maps, mmaps, and vmaps subdirectories after extraction."
-    echo "==========================================================================================="
-    echo ""
-    
-    read -p "Enter the path to the 1.12 client Data folder [/home/$SUDO_USER/Data]: " CLIENTDATA
-    CLIENTDATA=${CLIENTDATA:-/home/$SUDO_USER/Data}
-    
-    read -p "Where would you like VMaNGOS to be installed to? [/opt/mangos]: " INSTALLROOT
-    INSTALLROOT=${INSTALLROOT:-/opt/mangos}
-    
-    read -p "Set a user name for the database server admin account [root]: " SQLADMINUSER
-    SQLADMINUSER=${SQLADMINUSER:-root}
-    
-    read -p "Choose an IP range to restrict the SQL Admin user to log in from (Use % as a wildcard) [%]: " SQLADMINIP
-    SQLADMINIP=${SQLADMINIP:-%}
-    
-    read -sp "Choose a password for the database admin user (${SQLADMINUSER}): " SQLADMINPASS
-    echo ""
-    
-    read -p "Choose a name for the World Database [world]: " WORLDDB
-    WORLDDB=${WORLDDB:-world}
-    
-    read -p "Choose a name for the Auth Database [auth]: " AUTHDB
-    AUTHDB=${AUTHDB:-auth}
-    
-    read -p "Choose a name for the Characters Database [characters]: " CHARACTERDB
-    CHARACTERDB=${CHARACTERDB:-characters}
-    
-    read -p "Choose a database user account that will be used by the VMaNGOS server [mangos]: " MANGOSDBUSER
-    MANGOSDBUSER=${MANGOSDBUSER:-mangos}
-    
-    read -sp "Choose a password for the ${MANGOSDBUSER} database user account: " MANGOSDBPASS
-    echo ""
-    
-    read -p "Choose a Linux OS user account to run the MaNGOS server processes [mangos]: " MANGOSOSUSER
-    MANGOSOSUSER=${MANGOSOSUSER:-mangos}
-fi
-
-# Verify the client data exists
-if [ ! -d "$CLIENTDATA" ]; then
-    echo "ERROR: Client Data directory not found at $CLIENTDATA"
-    echo "Please ensure the WoW 1.12.1 client Data folder is uploaded to the server."
-    exit 1
-fi
-
-# Detect the Server's IP Address
-SERVERIP=$(ip route get 1 | awk '{print $7; exit}')
-if [ -z "$SERVERIP" ]; then
-    SERVERIP=$(hostname -I | awk '{print $1}')
-fi
-if [ -z "$SERVERIP" ]; then
-    SERVERIP="0.0.0.0"
-fi
-
-echo " "
-echo " "
-echo "=============================================== NOTE ================================================"
-echo "I detected this machine's IP address as: ${SERVERIP}."
-echo " "
-echo "Resuming installation in 3 seconds..."
-sleep 3
-
-# Create the VMaNGOS directory(s)
-mkdir -p "$INSTALLROOT"
-mkdir -p "$INSTALLROOT/run"
-mkdir -p "$INSTALLROOT/run/5875"
-mkdir -p "$INSTALLROOT/build"
-mkdir -p "$INSTALLROOT/logs"
-mkdir -p "$INSTALLROOT/logs/mangosd"
-mkdir -p "$INSTALLROOT/logs/realmd"
-mkdir -p "$INSTALLROOT/logs/honor"
-cd "$INSTALLROOT"
-
-echo "######################################################################################################"
-echo "Updating package list and installing required software."
-echo "######################################################################################################"
-
-# Update package list
-apt-get update
-
-# Install Base Software Requirements
-apt-get install -y \
-    net-tools \
-    libace-dev \
-    libtbb-dev \
-    openssl \
-    libssl-dev \
-    libmysqlclient-dev \
-    p7zip-full \
-    ntp \
-    ntpdate \
-    checkinstall \
-    build-essential \
-    gcc \
-    g++ \
-    automake \
-    git-core \
-    autoconf \
-    make \
-    patch \
-    libmysql++-dev \
-    mariadb-server \
-    libtool \
-    grep \
-    binutils \
-    zlib1g-dev \
-    libbz2-dev \
-    cmake \
-    libboost-all-dev \
-    unzip \
-    wget \
-    curl
-
-export ACE_ROOT=/usr/include/ace
-export TBB_ROOT_DIR=/usr/include/tbb
-
-# Start and enable MariaDB service
-systemctl start mariadb
-systemctl enable mariadb
-
-# Create the VMANGOS OS user if it doesn't exist
-if ! id "$MANGOSOSUSER" &>/dev/null; then
-    useradd -m -d "/home/$MANGOSOSUSER" -c "VMaNGOS" -s /bin/bash -U "$MANGOSOSUSER"
-fi
-
-# Copy the client Data directory to the install path
-cp -r "$CLIENTDATA" "$INSTALLROOT/"
-
-# Allow the MariaDB Server to accept remote connections
-if [ -f "/etc/mysql/mariadb.conf.d/50-server.cnf" ]; then
-    sed -i "s/bind-address.*=.*/bind-address = $SERVERIP/" /etc/mysql/mariadb.conf.d/50-server.cnf
-elif [ -f "/etc/mysql/my.cnf" ]; then
-    sed -i "s/bind-address.*=.*/bind-address = $SERVERIP/" /etc/mysql/my.cnf
-fi
-systemctl restart mysql.service
-
-# =============================================================================
-# Clone the VMaNGOS git repos (with retry logic)
-# =============================================================================
-
-echo "######################################################################################################"
-echo "Cloning VMaNGOS repositories"
-echo "######################################################################################################"
-
-# Clone core repository
-clone_with_retry "https://github.com/vmangos/core" "$INSTALLROOT/source" "development" || {
-    echo "ERROR: Failed to clone VMaNGOS core repository"
-    exit 1
-}
-
-# Clone database repository
-clone_with_retry "https://github.com/brotalnia/database" "$INSTALLROOT/db" || {
-    echo "ERROR: Failed to clone database repository"
-    exit 1
-}
-
-# =============================================================================
-# Compile the VMaNGOS source code
-# =============================================================================
-
-echo "######################################################################################################"
-echo "Compiling VMaNGOS source code"
-echo "######################################################################################################"
-
-cd "$INSTALLROOT/build"
-cmake "$INSTALLROOT/source" \
-    -DUSE_EXTRACTORS=1 \
-    -DSUPPORTED_CLIENT_BUILD=5875 \
-    -DCMAKE_INSTALL_PREFIX="$INSTALLROOT/run"
-
-make -j "$CPU"
-make install
-
-# Rename the Config files
-cp "$INSTALLROOT/run/etc/mangosd.conf.dist" "$INSTALLROOT/run/etc/mangosd.conf"
-cp "$INSTALLROOT/run/etc/realmd.conf.dist" "$INSTALLROOT/run/etc/realmd.conf"
-
-echo " "
-echo "######################################################################################################"
-echo "Extracting the client data"
-echo "######################################################################################################"
-
-# Copy the extractor tools to where they are needed
-cp "$INSTALLROOT/run/bin/mapextractor" "$INSTALLROOT/"
-cp "$INSTALLROOT/run/bin/vmap_assembler" "$INSTALLROOT/"
-cp "$INSTALLROOT/run/bin/vmapextractor" "$INSTALLROOT/"
-cp "$INSTALLROOT/run/bin/MoveMapGen" "$INSTALLROOT/"
-
-if [ -f "$INSTALLROOT/source/contrib/mmap/offmesh.txt" ]; then
-    cp "$INSTALLROOT/source/contrib/mmap/offmesh.txt" "$INSTALLROOT/"
-fi
-
-# Set proper ownership for extraction
-chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT"
-
-# Run the extraction process as the mangos user
-cd "$INSTALLROOT"
-
-# Run map extractor
-echo "Extracting DBC and map files..."
-./mapextractor || true
-
-# Run vmap extractors
-echo "Extracting vmaps..."
-./vmapextractor || true
-./vmap_assembler || true
-
-# Run mmaps generator
-echo "Generating movement maps (this may take a while)..."
-./MoveMapGen --offMeshInput offmesh.txt || true
-
-# Move the extracted content to where the server can read them
-mkdir -p "$INSTALLROOT/run/bin/5875"
-
-if [ -d "$INSTALLROOT/dbc" ]; then
-    mv "$INSTALLROOT/dbc" "$INSTALLROOT/run/bin/5875/"
-fi
-if [ -d "$INSTALLROOT/maps" ]; then
-    mv "$INSTALLROOT/maps" "$INSTALLROOT/run/bin/"
-fi
-if [ -d "$INSTALLROOT/mmaps" ]; then
-    mv "$INSTALLROOT/mmaps" "$INSTALLROOT/run/bin/"
-fi
-if [ -d "$INSTALLROOT/vmaps" ]; then
-    mv "$INSTALLROOT/vmaps" "$INSTALLROOT/run/bin/"
-fi
-
-# Cleanup unused asset directories
-rm -rf "$INSTALLROOT/Buildings" 2>/dev/null || true
-rm -rf "$INSTALLROOT/Cameras" 2>/dev/null || true
-
-# Set proper ownership
-chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT"
-
-echo " "
-echo "######################################################################################################"
-echo "Starting the Database setup"
-echo "######################################################################################################"
-
-# Create the SQL script that creates the databases & db users
-cat << EOF > "$INSTALLROOT/db-setup.sql"
-CREATE DATABASE IF NOT EXISTS \`$AUTHDB\` DEFAULT CHARSET utf8 COLLATE utf8_general_ci;
-CREATE DATABASE IF NOT EXISTS \`$WORLDDB\` DEFAULT CHARSET utf8 COLLATE utf8_general_ci;
-CREATE DATABASE IF NOT EXISTS \`$CHARACTERDB\` DEFAULT CHARSET utf8 COLLATE utf8_general_ci;
-CREATE DATABASE IF NOT EXISTS \`logs\` DEFAULT CHARSET utf8 COLLATE utf8_general_ci;
-
-CREATE USER IF NOT EXISTS '$MANGOSDBUSER'@'$SERVERIP' IDENTIFIED BY '$MANGOSDBPASS';
-CREATE USER IF NOT EXISTS '$MANGOSDBUSER'@'localhost' IDENTIFIED BY '$MANGOSDBPASS';
-CREATE USER IF NOT EXISTS '$MANGOSDBUSER'@'%' IDENTIFIED BY '$MANGOSDBPASS';
-
-GRANT ALL PRIVILEGES ON \`$AUTHDB\`.* TO '$MANGOSDBUSER'@'$SERVERIP';
-GRANT ALL PRIVILEGES ON \`$WORLDDB\`.* TO '$MANGOSDBUSER'@'$SERVERIP';
-GRANT ALL PRIVILEGES ON \`$CHARACTERDB\`.* TO '$MANGOSDBUSER'@'$SERVERIP';
-GRANT ALL PRIVILEGES ON \`logs\`.* TO '$MANGOSDBUSER'@'$SERVERIP';
-
-GRANT ALL PRIVILEGES ON \`$AUTHDB\`.* TO '$MANGOSDBUSER'@'localhost';
-GRANT ALL PRIVILEGES ON \`$WORLDDB\`.* TO '$MANGOSDBUSER'@'localhost';
-GRANT ALL PRIVILEGES ON \`CHARACTERDB\`.* TO '$MANGOSDBUSER'@'localhost';
-GRANT ALL PRIVILEGES ON \`logs\`.* TO '$MANGOSDBUSER'@'localhost';
-
-GRANT ALL PRIVILEGES ON \`$AUTHDB\`.* TO '$MANGOSDBUSER'@'%';
-GRANT ALL PRIVILEGES ON \`$WORLDDB\`.* TO '$MANGOSDBUSER'@'%';
-GRANT ALL PRIVILEGES ON \`$CHARACTERDB\`.* TO '$MANGOSDBUSER'@'%';
-GRANT ALL PRIVILEGES ON \`logs\`.* TO '$MANGOSDBUSER'@'%';
-
--- Create admin user if different from root
-GRANT ALL PRIVILEGES ON *.* TO '$SQLADMINUSER'@'$SQLADMINIP' WITH GRANT OPTION;
-FLUSH PRIVILEGES;
-EOF
-
-# Run the db setup SQL script to create the new databases and user accounts.
-mysql < "$INSTALLROOT/db-setup.sql"
-
-# Clean-up the SQL script so we don't expose any passwords.
-rm -f "$INSTALLROOT/db-setup.sql"
-
-# Download and extract the latest full world DB
-cd "$INSTALLROOT/db"
-
-# Try to find the latest world DB dump
-WORLD_DB_URL="https://github.com/brotalnia/database/releases/download/latest/world_full_14_june_2021.7z"
-echo "Downloading world database..."
-
-WORLD_DB_DOWNLOADED=false
-if download_with_retry "$WORLD_DB_URL" "world_full.7z"; then
-    WORLD_DB_DOWNLOADED=true
-else
-    # Fallback to the raw file URL
-    echo "Primary download failed, trying fallback URL..."
-    FALLBACK_URL="https://github.com/brotalnia/database/blob/master/world_full_14_june_2021.7z?raw=true"
-    if download_with_retry "$FALLBACK_URL" "world_full.7z"; then
-        WORLD_DB_DOWNLOADED=true
-    fi
-fi
-
-if [ "$WORLD_DB_DOWNLOADED" = true ] && [ -f "world_full.7z" ]; then
-    echo "Extracting world database..."
-    7z x world_full.7z -aoa
-    # Find and import the SQL file
-    WORLD_SQL=$(find . -name "world_full*.sql" -type f | head -n1)
-    if [ -n "$WORLD_SQL" ]; then
-        echo "Importing world database (this may take a while)..."
-        mysql "$WORLDDB" < "$WORLD_SQL"
-        echo "World database imported successfully."
     else
-        echo "WARNING: Could not find world_full*.sql file after extraction"
+        log_error "Background build failed"
+        return 1
     fi
-    rm -f world_full.7z
-else
-    echo "WARNING: Failed to download world database. You may need to import it manually."
-fi
+}
 
-# Populate the Characters, Auth, and Logs databases from the source directory
-echo "Creating characters database structure..."
-mysql "$CHARACTERDB" < "$INSTALLROOT/source/sql/characters.sql"
+check_build_status() {
+    if [ -f "$CHECKPOINT_DIR/build-status" ]; then
+        cat "$CHECKPOINT_DIR/build-status"
+    else
+        echo "UNKNOWN"
+    fi
+}
 
-echo "Creating logs database structure..."
-mysql "logs" < "$INSTALLROOT/source/sql/logs.sql"
+# =============================================================================
+# PREREQUISITE CHECKS
+# =============================================================================
 
-echo "Creating auth database structure..."
-mysql "$AUTHDB" < "$INSTALLROOT/source/sql/logon.sql"
+check_noninteractive() {
+    [ "$VMANGOS_AUTO_INSTALL" = "1" ] || [ "$VMANGOS_AUTO_INSTALL" = "true" ]
+}
 
-# Run migrations against the databases
-echo "Running database migrations..."
-if [ -d "$INSTALLROOT/source/sql/migrations" ]; then
-    cd "$INSTALLROOT/source/sql/migrations"
-    if [ -f "merge.sh" ]; then
-        chmod +x merge.sh
-        ./merge.sh || true
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        log_error "Please run as root (use sudo)"
+        exit 1
+    fi
+}
+
+check_client_data() {
+    if [ -z "$CLIENT_DATA" ]; then
+        # Try to auto-detect
+        for user_home in /home/*; do
+            if [ -d "$user_home/Data" ]; then
+                CLIENT_DATA="$user_home/Data"
+                log_info "Auto-detected client data at: $CLIENT_DATA"
+                break
+            fi
+        done
     fi
     
-    # Apply migration files if they exist
-    if [ -f "world_db_updates.sql" ]; then
-        mysql "$WORLDDB" < world_db_updates.sql || true
+    if [ -z "$CLIENT_DATA" ] || [ ! -d "$CLIENT_DATA" ]; then
+        if check_noninteractive; then
+            log_error "Client data not found. Set VMANGOS_CLIENT_DATA environment variable."
+            exit 1
+        else
+            read -rp "Enter path to WoW 1.12.1 client Data folder: " CLIENT_DATA
+            if [ ! -d "$CLIENT_DATA" ]; then
+                log_error "Client data not found at: $CLIENT_DATA"
+                exit 1
+            fi
+        fi
     fi
-    if [ -f "logs_db_updates.sql" ]; then
-        mysql "logs" < logs_db_updates.sql || true
+    
+    log_info "Using client data from: $CLIENT_DATA"
+}
+
+# =============================================================================
+# INSTALLATION PHASES
+# =============================================================================
+
+phase_prerequisites() {
+    log_section "PHASE: Installing Prerequisites"
+    
+    apt-get update
+    apt-get install -y build-essential cmake git libmariadb-dev libssl-dev \
+        libbz2-dev libreadline-dev libncurses-dev libboost-all-dev \
+        p7zip-full wget zlib1g-dev
+    
+    set_checkpoint "PREREQS_DONE"
+}
+
+phase_database_setup() {
+    log_section "PHASE: Database Setup"
+    
+    # Create databases
+    mysql -e "CREATE DATABASE IF NOT EXISTS \`$WORLDDB\`;" || true
+    mysql -e "CREATE DATABASE IF NOT EXISTS \`$AUTHDB\`;" || true
+    mysql -e "CREATE DATABASE IF NOT EXISTS \`$CHARACTERDB\`;" || true
+    mysql -e "CREATE DATABASE IF NOT EXISTS \`$LOGSDB\`;" || true
+    
+    # Create user
+    mysql -e "CREATE USER IF NOT EXISTS '$MANGOSDBUSER'@'$SQLADMINIP' IDENTIFIED BY '$MANGOSDBPASS';" || true
+    mysql -e "GRANT ALL PRIVILEGES ON \`$WORLDDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
+    mysql -e "GRANT ALL PRIVILEGES ON \`$AUTHDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
+    mysql -e "GRANT ALL PRIVILEGES ON \`$CHARACTERDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
+    mysql -e "GRANT ALL PRIVILEGES ON \`$LOGSDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
+    mysql -e "FLUSH PRIVILEGES;"
+    
+    set_checkpoint "DATABASE_DONE"
+}
+
+phase_source_download() {
+    log_section "PHASE: Downloading Source Code"
+    
+    mkdir -p "$INSTALLROOT"
+    cd "$INSTALLROOT"
+    
+    # Clone VMaNGOS core
+    if [ ! -d "source" ]; then
+        git_clone_with_retry "https://github.com/vmangos/core" "source"
+    else
+        log_info "Source directory exists, skipping clone"
     fi
-    if [ -f "characters_db_updates.sql" ]; then
-        mysql "$CHARACTERDB" < characters_db_updates.sql || true
+    
+    # Get server IP
+    SERVERIP=$(hostname -I | awk '{print $1}')
+    log_info "Detected server IP: $SERVERIP"
+    
+    set_checkpoint "SOURCE_DONE"
+}
+
+phase_build() {
+    log_section "PHASE: Building VMaNGOS"
+    
+    cd "$INSTALLROOT"
+    CPU=$(nproc)
+    log_info "Building with $CPU parallel jobs"
+    
+    # Create build directory
+    mkdir -p build
+    cd build
+    
+    # Configure
+    cmake ../source -DCMAKE_INSTALL_PREFIX="$INSTALLROOT/run" \
+        -DCONF_DIR="$INSTALLROOT/run/etc" \
+        -DDEBUG=0 2>&1 | tee -a "$INSTALL_LOG"
+    
+    # Build - with background support if enabled
+    if [ "$BUILD_IN_BACKGROUND" = "1" ]; then
+        start_background_build
+    else
+        log_info "Starting compilation (this will take 1-2 hours)..."
+        log_info "To run in background, set VMANGOS_BACKGROUND_BUILD=1"
+        make -j "$CPU" 2>&1 | tee -a "$INSTALL_LOG"
     fi
-    if [ -f "logon_db_updates.sql" ]; then
-        mysql "$AUTHDB" < logon_db_updates.sql || true
+    
+    # Install
+    make install 2>&1 | tee -a "$INSTALL_LOG"
+    
+    set_checkpoint "BUILD_DONE"
+}
+
+phase_config_setup() {
+    log_section "PHASE: Configuration Setup"
+    
+    cd "$INSTALLROOT"
+    
+    # Copy config files
+    cp "$INSTALLROOT/run/etc/mangosd.conf.dist" "$INSTALLROOT/run/etc/mangosd.conf"
+    cp "$INSTALLROOT/run/etc/realmd.conf.dist" "$INSTALLROOT/run/etc/realmd.conf"
+    
+    # Update database connections
+    sed -i "s|127.0.0.1;3306;mangos;mangos;realmd|$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$AUTHDB|g" "$INSTALLROOT/run/etc/realmd.conf"
+    sed -i "s|BindIP = \"0.0.0.0\"|BindIP = \"$SERVERIP\"|g" "$INSTALLROOT/run/etc/realmd.conf"
+    
+    # Update World server config
+    sed -i "s|127.0.0.1;3306;mangos;mangos;realmd|$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$AUTHDB|g" "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|127.0.0.1;3306;mangos;mangos;mangos|$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$WORLDDB|g" "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|127.0.0.1;3306;mangos;mangos;characters|$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$CHARACTERDB|g" "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|127.0.0.1;3306;mangos;mangos;logs|$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$LOGSDB|g" "$INSTALLROOT/run/etc/mangosd.conf"
+    
+    # Update log directories
+    sed -i "s|LogsDir = \"\"|LogsDir = \"$INSTALLROOT/logs/mangosd/\"|g" "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|HonorDir = \"\"|HonorDir = \"$INSTALLROOT/logs/honor/\"|g" "$INSTALLROOT/run/etc/mangosd.conf"
+    
+    # Update realmlist
+    mysql "$AUTHDB" -e "UPDATE \`realmlist\` SET \`address\` = '$SERVERIP', \`localaddress\` = '127.0.0.1' WHERE \`id\` = '1';" || true
+    
+    set_checkpoint "CONFIG_DONE"
+}
+
+phase_data_extraction() {
+    log_section "PHASE: Data Extraction"
+    
+    cd "$INSTALLROOT"
+    
+    # Copy extractors
+    cp "$INSTALLROOT/run/bin/mapextractor" "$INSTALLROOT/" || true
+    cp "$INSTALLROOT/run/bin/vmap_assembler" "$INSTALLROOT/" || true
+    cp "$INSTALLROOT/run/bin/vmapextractor" "$INSTALLROOT/" || true
+    cp "$INSTALLROOT/run/bin/MoveMapGen" "$INSTALLROOT/" || true
+    
+    if [ -f "$INSTALLROOT/source/contrib/mmap/offmesh.txt" ]; then
+        cp "$INSTALLROOT/source/contrib/mmap/offmesh.txt" "$INSTALLROOT/"
     fi
-fi
+    
+    # Create directories
+    mkdir -p "$INSTALLROOT/run/bin/5875"
+    mkdir -p "$INSTALLROOT/logs/mangosd"
+    mkdir -p "$INSTALLROOT/logs/honor"
+    mkdir -p "$INSTALLROOT/logs/realmd"
+    
+    # Set ownership for extraction
+    chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT"
+    
+    # Run extractors as mangos user
+    cd "$INSTALLROOT"
+    
+    log_info "Extracting DBC and map files..."
+    sudo -u "$MANGOSOSUSER" ./mapextractor || log_warn "Map extractor had issues"
+    
+    log_info "Extracting vmaps..."
+    sudo -u "$MANGOSOSUSER" ./vmapextractor || log_warn "VMap extractor had issues"
+    sudo -u "$MANGOSOSUSER" ./vmap_assembler || log_warn "VMap assembler had issues"
+    
+    log_info "Generating movement maps (this may take a while)..."
+    sudo -u "$MANGOSOSUSER" ./MoveMapGen --offMeshInput offmesh.txt || log_warn "MoveMapGen had issues"
+    
+    set_checkpoint "DATA_DONE"
+}
 
-echo "######################################################################################################"
-echo "Updating the VMaNGOS config files so the World and Auth servers can access the database(s)"
-echo "######################################################################################################"
+phase_database_import() {
+    log_section "PHASE: Database Import"
+    
+    cd "$INSTALLROOT"
+    
+    # Download and import world database
+    WORLD_DB_URL="https://github.com/brotalnia/database/releases/download/latest/world_full_14_june_2021.7z"
+    log_info "Downloading world database..."
+    
+    if download_with_retry "$WORLD_DB_URL" "world_full.7z"; then
+        log_info "Extracting world database..."
+        7z x world_full.7z -aoa 2>&1 | tee -a "$INSTALL_LOG"
+        
+        WORLD_SQL=$(find . -name "world_full*.sql" -type f | head -n1)
+        if [ -n "$WORLD_SQL" ]; then
+            log_info "Importing world database (this may take a while)..."
+            mysql "$WORLDDB" < "$WORLD_SQL"
+            log_info "World database imported successfully"
+        fi
+        rm -f world_full.7z
+    else
+        log_warn "Failed to download world database - you may need to import manually"
+    fi
+    
+    # Import base schemas
+    log_info "Creating characters database structure..."
+    mysql "$CHARACTERDB" < "$INSTALLROOT/source/sql/characters.sql" || log_warn "Characters schema import issue"
+    
+    log_info "Creating logs database structure..."
+    mysql "$LOGSDB" < "$INSTALLROOT/source/sql/logs.sql" || log_warn "Logs schema import issue"
+    
+    log_info "Creating auth database structure..."
+    mysql "$AUTHDB" < "$INSTALLROOT/source/sql/logon.sql" || log_warn "Auth schema import issue"
+    
+    # Apply migrations
+    log_info "Running database migrations..."
+    if [ -d "$INSTALLROOT/source/sql/migrations" ]; then
+        cd "$INSTALLROOT/source/sql/migrations"
+        [ -f "merge.sh" ] && chmod +x merge.sh && ./merge.sh 2>&1 | tee -a "$INSTALL_LOG" || true
+        
+        [ -f "world_db_updates.sql" ] && mysql "$WORLDDB" < world_db_updates.sql || true
+        [ -f "logs_db_updates.sql" ] && mysql "$LOGSDB" < logs_db_updates.sql || true
+        [ -f "characters_db_updates.sql" ] && mysql "$CHARACTERDB" < characters_db_updates.sql || true
+        [ -f "logon_db_updates.sql" ] && mysql "$AUTHDB" < logon_db_updates.sql || true
+    fi
+    
+    set_checkpoint "DB_IMPORT_DONE"
+}
 
-# Update the Auth server configuration file
-# Format: host;port;user;password;database
-sed -i "s|127.0.0.1;3306;mangos;mangos;realmd|$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$AUTHDB|g" "$INSTALLROOT/run/etc/realmd.conf"
-sed -i "s|BindIP = \"0.0.0.0\"|BindIP = \"$SERVERIP\"|g" "$INSTALLROOT/run/etc/realmd.conf"
-
-# Update the World server configuration file
-# Format: host;port;user;password;database
-sed -i "s|127.0.0.1;3306;mangos;mangos;realmd|$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$AUTHDB|g" "$INSTALLROOT/run/etc/mangosd.conf"
-sed -i "s|127.0.0.1;3306;mangos;mangos;mangos|$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$WORLDDB|g" "$INSTALLROOT/run/etc/mangosd.conf"
-sed -i "s|127.0.0.1;3306;mangos;mangos;characters|$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$CHARACTERDB|g" "$INSTALLROOT/run/etc/mangosd.conf"
-sed -i "s|127.0.0.1;3306;mangos;mangos;logs|$SERVERIP;3306;$MANGOSDBUSER;$MANGOSDBPASS;$LOGSDB|g" "$INSTALLROOT/run/etc/mangosd.conf"
-
-# Update the log & honor directory setting in the World Server config file
-sed -i "s|LogsDir = \"\"|LogsDir = \"$INSTALLROOT/logs/mangosd/\"|g" "$INSTALLROOT/run/etc/mangosd.conf"
-sed -i "s|HonorDir = \"\"|HonorDir = \"$INSTALLROOT/logs/honor/\"|g" "$INSTALLROOT/run/etc/mangosd.conf"
-
-echo "######################################################################################################"
-echo "Updating the 'realmlist' table in the Auth DB so VMaNGOS knows what IP address to give clients."
-echo "######################################################################################################"
-
-# Update the realmlist table with the server IP
-mysql "$AUTHDB" -e "UPDATE \`realmlist\` SET \`address\` = '$SERVERIP', \`localaddress\` = '127.0.0.1' WHERE \`id\` = '1';" || true
-
-# Fix file system permissions
-chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT"
-
-echo "######################################################################################################"
-echo "Creating & starting the system services to run the World and Realm server services."
-echo "######################################################################################################"
-cd "$HOME"
-
-# Create the Auth service definition
-cat << EOF > /etc/systemd/system/auth.service
+phase_service_setup() {
+    log_section "PHASE: Service Setup"
+    
+    # Create systemd services
+    cat > /etc/systemd/system/auth.service << EOF
 [Unit]
 Description=VMaNGOS Auth Server (Classic WoW)
 After=network.target mysql.service
@@ -587,8 +481,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# Create the World service definition
-cat << EOF > /etc/systemd/system/world.service
+    cat > /etc/systemd/system/world.service << EOF
 [Unit]
 Description=VMaNGOS World Server (Classic WoW)
 After=network.target mysql.service
@@ -610,61 +503,78 @@ TTYVHangup=yes
 WantedBy=multi-user.target
 EOF
 
-# Reload systemd to pick up new services
-systemctl daemon-reload
+    systemctl daemon-reload
+    systemctl enable auth.service
+    systemctl enable world.service
+    
+    # Fix permissions
+    chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT"
+    
+    set_checkpoint "SERVICES_DONE"
+}
 
-# Secure the MariaDB installation (optional - prompt user in interactive mode)
-if ! check_noninteractive; then
-    echo ""
-    echo "######################################################################################################"
-    echo "Would you like to run mysql_secure_installation to secure your MariaDB installation?"
-    echo "This is recommended for production servers. (y/n)"
-    read -r SECURE_MYSQL
-    if [ "$SECURE_MYSQL" = "y" ] || [ "$SECURE_MYSQL" = "Y" ]; then
-        mysql_secure_installation
-    fi
-else
-    if [ "$SKIP_SECURE_MYSQL" != "yes" ]; then
-        echo "Running mysql_secure_installation..."
-        mysql_secure_installation
-    else
-        echo "Skipping mysql_secure_installation (VMANGOS_SKIP_SECURE_MYSQL=yes)"
-    fi
-fi
+# =============================================================================
+# MAIN EXECUTION
+# =============================================================================
 
-# Enable the new services
-systemctl enable auth.service
-systemctl enable world.service
+main() {
+    log_section "VMANGOS Installation Started"
+    log_info "Installation directory: $INSTALLROOT"
+    log_info "Log file: $INSTALL_LOG"
+    log_info "Resume support enabled - checkpoints stored in: $CHECKPOINT_DIR"
+    
+    check_root
+    init_checkpoints
+    
+    # Get current checkpoint
+    CHECKPOINT=$(get_checkpoint)
+    log_info "Resuming from checkpoint: $CHECKPOINT"
+    
+    # Execute phases based on checkpoint
+    case "$CHECKPOINT" in
+        START)
+            phase_prerequisites
+            ;&
+        PREREQS_DONE)
+            check_client_data
+            phase_database_setup
+            ;&
+        DATABASE_DONE)
+            phase_source_download
+            ;&
+        SOURCE_DONE)
+            phase_build
+            ;&
+        BUILD_DONE)
+            phase_config_setup
+            ;&
+        CONFIG_DONE)
+            phase_data_extraction
+            ;&
+        DATA_DONE)
+            phase_database_import
+            ;&
+        DB_IMPORT_DONE)
+            phase_service_setup
+            ;&
+        SERVICES_DONE)
+            log_section "Installation Complete!"
+            log_info "To start the servers:"
+            log_info "  sudo systemctl start auth"
+            log_info "  sudo systemctl start world"
+            log_info ""
+            log_info "Update your WoW client's realmlist.wtf:"
+            log_info "  set realmlist $SERVERIP"
+            clear_checkpoint
+            ;;
+        *)
+            log_error "Unknown checkpoint: $CHECKPOINT"
+            log_info "Resetting to START"
+            echo "START" > "$CHECKPOINT_FILE"
+            exit 1
+            ;;
+    esac
+}
 
-echo ""
-echo ""
-echo "######################################################################################################"
-echo "Installation completed successfully!"
-echo "######################################################################################################"
-echo ""
-echo "Summary:"
-echo "--------"
-echo "Installation Directory: $INSTALLROOT"
-echo "Server IP: $SERVERIP"
-echo "Auth Database: $AUTHDB"
-echo "World Database: $WORLDDB"
-echo "Characters Database: $CHARACTERDB"
-echo ""
-echo "To start the servers:"
-echo "  sudo systemctl start auth"
-echo "  sudo systemctl start world"
-echo ""
-echo "To check server status:"
-echo "  sudo systemctl status auth"
-echo "  sudo systemctl status world"
-echo ""
-echo "To view logs:"
-echo "  sudo journalctl -u auth -f"
-echo "  sudo journalctl -u world -f"
-echo ""
-echo "Installation log saved to: $INSTALL_LOG"
-echo ""
-echo "Please update your WoW Game client's realmlist.wtf to:"
-echo "  set realmlist $SERVERIP"
-echo ""
-echo "######################################################################################################"
+# Run main function
+main "$@"
