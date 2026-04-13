@@ -236,6 +236,35 @@ EOF
     chmod +x "$mock_dir/systemctl" "$mock_dir/ps" "$mock_dir/mysql" "$mock_dir/df" "$mock_dir/sleep"
 }
 
+setup_config_detect_mock_bin() {
+    local mock_dir="$1"
+
+    cat > "$mock_dir/systemctl" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+cmd="${1:-}"
+
+case "$cmd" in
+    list-unit-files)
+        if [[ -f "${VMANGOS_DETECT_SYSTEMCTL_UNITS_FILE:-}" ]]; then
+            cat "$VMANGOS_DETECT_SYSTEMCTL_UNITS_FILE"
+        fi
+        ;;
+    show)
+        unit="${@: -1}"
+        if [[ -n "${VMANGOS_DETECT_SYSTEMCTL_SHOW_DIR:-}" && -f "${VMANGOS_DETECT_SYSTEMCTL_SHOW_DIR}/${unit}" ]]; then
+            cat "${VMANGOS_DETECT_SYSTEMCTL_SHOW_DIR}/${unit}"
+        fi
+        ;;
+    *)
+        ;;
+esac
+EOF
+
+    chmod +x "$mock_dir/systemctl"
+}
+
 # ============================================================================
 # ORIGINAL TESTS
 # ============================================================================
@@ -308,6 +337,150 @@ test_config_create() {
     return $all_passed
 }
 
+test_config_detect_installer_layout() {
+    local all_passed=0
+    local temp_dir mock_dir show_dir units_file install_root output
+    temp_dir=$(mktemp -d)
+    mock_dir="$temp_dir/mockbin"
+    show_dir="$temp_dir/systemctl-show"
+    units_file="$temp_dir/units.txt"
+    install_root="$temp_dir/opt/mangos"
+
+    mkdir -p "$mock_dir" "$show_dir" "$install_root/run/etc"
+    setup_config_detect_mock_bin "$mock_dir"
+
+    cat > "$install_root/run/etc/realmd.conf" << EOF
+LoginDatabaseInfo = "10.0.1.6;3306;mangos;secret;auth"
+EOF
+
+    cat > "$install_root/run/etc/mangosd.conf" << EOF
+LoginDatabase.Info = "10.0.1.6;3306;mangos;secret;auth"
+WorldDatabase.Info = "10.0.1.6;3306;mangos;secret;world"
+CharacterDatabase.Info = "10.0.1.6;3306;mangos;secret;characters"
+LogsDatabase.Info = "10.0.1.6;3306;mangos;secret;logs"
+EOF
+
+    cat > "$units_file" << 'EOF'
+auth.service enabled
+world.service enabled
+EOF
+
+    cat > "$show_dir/auth.service" << EOF
+Id=auth.service
+ExecStart={ path=$install_root/run/bin/realmd ; argv[]=$install_root/run/bin/realmd ; }
+EOF
+
+    cat > "$show_dir/world.service" << EOF
+Id=world.service
+ExecStart={ path=$install_root/run/bin/mangosd ; argv[]=$install_root/run/bin/mangosd ; }
+EOF
+
+    output=$(PATH="$mock_dir:$PATH" \
+        VMANGOS_DETECT_SEARCH_ROOTS="$temp_dir/opt" \
+        VMANGOS_DETECT_SYSTEMCTL_UNITS_FILE="$units_file" \
+        VMANGOS_DETECT_SYSTEMCTL_SHOW_DIR="$show_dir" \
+        bash "$MANAGER_DIR/bin/vmangos-manager" config detect 2>/dev/null)
+
+    assert_true "[[ \$output == *'Candidates found: 1'* ]]" "config detect finds installer-layout candidate" || all_passed=1
+    assert_true "[[ \$output == *\"Selected install root: $install_root\"* ]]" "config detect selects installer-layout root" || all_passed=1
+    assert_true "[[ \$output == *'Services: auth=auth, world=world'* ]]" "config detect keeps default installer service names" || all_passed=1
+    assert_true "[[ \$output == *'host = 10.0.1.6'* && \$output == *'world_db = world'* ]]" "config detect emits parsed DB settings in proposed config" || all_passed=1
+
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
+test_config_detect_custom_path_json() {
+    local all_passed=0
+    local temp_dir mock_dir show_dir units_file install_root output compact_output
+    temp_dir=$(mktemp -d)
+    mock_dir="$temp_dir/mockbin"
+    show_dir="$temp_dir/systemctl-show"
+    units_file="$temp_dir/units.txt"
+    install_root="$temp_dir/custom/vmangos-live"
+
+    mkdir -p "$mock_dir" "$show_dir" "$install_root/run/etc"
+    setup_config_detect_mock_bin "$mock_dir"
+
+    cat > "$install_root/run/etc/realmd.conf" << EOF
+LoginDatabaseInfo = "192.168.50.10;3307;vmuser;secret;auth_custom"
+EOF
+
+    cat > "$install_root/run/etc/mangosd.conf" << EOF
+LoginDatabase.Info = "192.168.50.10;3307;vmuser;secret;auth_custom"
+WorldDatabase.Info = "192.168.50.10;3307;vmuser;secret;world_custom"
+CharacterDatabase.Info = "192.168.50.10;3307;vmuser;secret;chars_custom"
+LogsDatabase.Info = "192.168.50.10;3307;vmuser;secret;logs_custom"
+EOF
+
+    cat > "$units_file" << 'EOF'
+vmangos-authd.service enabled
+vmangos-worldd.service enabled
+EOF
+
+    cat > "$show_dir/vmangos-authd.service" << EOF
+Id=vmangos-authd.service
+ExecStart={ path=$install_root/run/bin/realmd ; argv[]=$install_root/run/bin/realmd ; }
+EOF
+
+    cat > "$show_dir/vmangos-worldd.service" << EOF
+Id=vmangos-worldd.service
+ExecStart={ path=$install_root/run/bin/mangosd ; argv[]=$install_root/run/bin/mangosd ; }
+EOF
+
+    output=$(PATH="$mock_dir:$PATH" \
+        VMANGOS_DETECT_SEARCH_ROOTS="$temp_dir/custom" \
+        VMANGOS_DETECT_SYSTEMCTL_UNITS_FILE="$units_file" \
+        VMANGOS_DETECT_SYSTEMCTL_SHOW_DIR="$show_dir" \
+        bash "$MANAGER_DIR/bin/vmangos-manager" config detect --format json 2>/dev/null)
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+
+    assert_true "[[ \$compact_output == *\"\\\"selected_install_root\\\":\\\"$install_root\\\"\"* ]]" "config detect json selects custom install root" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"auth\":\"vmangos-authd\"'* && \$compact_output == *'\"world\":\"vmangos-worldd\"'* ]]" "config detect json keeps custom systemd service names" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"auth_db\":\"auth_custom\"'* && \$compact_output == *'\"world_db\":\"world_custom\"'* ]]" "config detect json keeps custom DB names" || all_passed=1
+
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
+test_config_detect_reports_multiple_candidates() {
+    local all_passed=0
+    local temp_dir root_one root_two output compact_output
+    temp_dir=$(mktemp -d)
+    root_one="$temp_dir/alpha"
+    root_two="$temp_dir/bravo"
+
+    mkdir -p "$root_one/run/etc" "$root_two/run/etc"
+
+    cat > "$root_one/run/etc/realmd.conf" << 'EOF'
+LoginDatabaseInfo = "127.0.0.1;3306;mangos;secret;auth"
+EOF
+    cat > "$root_one/run/etc/mangosd.conf" << 'EOF'
+WorldDatabase.Info = "127.0.0.1;3306;mangos;secret;world"
+CharacterDatabase.Info = "127.0.0.1;3306;mangos;secret;characters"
+LogsDatabase.Info = "127.0.0.1;3306;mangos;secret;logs"
+EOF
+
+    cat > "$root_two/run/etc/realmd.conf" << 'EOF'
+LoginDatabaseInfo = "127.0.0.1;3306;mangos;secret;auth"
+EOF
+    cat > "$root_two/run/etc/mangosd.conf" << 'EOF'
+WorldDatabase.Info = "127.0.0.1;3306;mangos;secret;world"
+CharacterDatabase.Info = "127.0.0.1;3306;mangos;secret;characters"
+LogsDatabase.Info = "127.0.0.1;3306;mangos;secret;logs"
+EOF
+
+    output=$(VMANGOS_DETECT_SEARCH_ROOTS="$temp_dir" bash "$MANAGER_DIR/bin/vmangos-manager" config detect --format json 2>/dev/null)
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+
+    assert_true "[[ \$compact_output == *'\"candidate_count\":2'* ]]" "config detect json reports multiple candidates" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"multiple_candidates\":true'* ]]" "config detect json marks multiple candidate discovery" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"ambiguous\":true'* && \$compact_output == *'\"selected_install_root\":null'* ]]" "config detect json leaves selection empty on tied candidates" || all_passed=1
+
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
 test_cli_parsing() {
     local all_passed=0
     assert_file_exists "$MANAGER_DIR/bin/vmangos-manager" "CLI binary exists" || all_passed=1
@@ -318,6 +491,7 @@ test_cli_parsing() {
     assert_true "[[ \$output == *'server'* ]]" "CLI --help lists server command" || all_passed=1
     assert_true "[[ \$output == *'account'* ]]" "CLI --help lists account command" || all_passed=1
     assert_true "[[ \$output == *'update'* ]]" "CLI --help lists update command" || all_passed=1
+    assert_true "[[ \$output == *'config [create|validate|show|detect]'* ]]" "CLI --help lists config detect command" || all_passed=1
     return $all_passed
 }
 
@@ -1622,6 +1796,9 @@ main() {
     run_test "Config: Loading" test_config_loading
     run_test "Config: Manager root resolution" test_config_resolve_manager_root
     run_test "Config: Creation" test_config_create
+    run_test "Config: Detect installer layout" test_config_detect_installer_layout
+    run_test "Config: Detect custom path JSON" test_config_detect_custom_path_json
+    run_test "Config: Detect multiple candidates" test_config_detect_reports_multiple_candidates
     run_test "CLI: Parsing" test_cli_parsing
     run_test "Account: Validation" test_account_validation
     run_test "Account: Hash vector" test_account_hash_known_vector

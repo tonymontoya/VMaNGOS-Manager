@@ -170,9 +170,12 @@ vmangos-manager update apply --backup-first
 
 ```bash
 vmangos-manager config create [--path FILE]
+vmangos-manager config detect [--format text|json]
 vmangos-manager config validate [--format text|json]
 vmangos-manager config show [--format text|json]
 ```
+
+`config detect` is an explicit adoption helper for existing VMANGOS hosts. It inspects likely install roots, looks for `mangosd.conf` and `realmd.conf`, matches auth/world service names from `systemd` when possible, and emits a reviewable proposed `manager.conf`. It does not silently change runtime behavior or overwrite your existing config.
 
 #### Backup
 

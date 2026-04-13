@@ -45,7 +45,7 @@ COMMANDS:
       status options: [--format text|json] [--watch] [--interval SECONDS]
     account [create|list|setgm|ban|unban|password] [OPTIONS]
     update [check|plan|apply] [OPTIONS]
-    config [create|validate|show] [OPTIONS]
+    config [create|validate|show|detect] [OPTIONS]
     backup [now|list|verify|restore|clean|schedule] [OPTIONS]
 EOF
 }
@@ -266,10 +266,29 @@ cmd_config() {
             done
             config_show "$CONFIG_FILE" "$fmt"
             ;;
+
+        detect)
+            local fmt="text"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --format) fmt="$2"; shift 2 ;;
+                    --) shift; break ;;
+                    -*)
+                        echo "Unknown option: $1" >&2
+                        exit 2
+                        ;;
+                    *)
+                        echo "Error: config detect does not accept positional arguments" >&2
+                        exit 2
+                        ;;
+                esac
+            done
+            config_detect "$fmt"
+            ;;
             
         *)
             echo "Error: Unknown config subcommand: $subcmd" >&2
-            echo "Valid subcommands: create, validate, show" >&2
+            echo "Valid subcommands: create, validate, show, detect" >&2
             exit 2
             ;;
     esac

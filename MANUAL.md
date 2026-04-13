@@ -9,6 +9,8 @@ Release A ships the `vmangos-manager` CLI for:
 - backup workflows
 - read-only update checks
 
+Release B adds explicit config detection for adopting existing VMANGOS installs without changing the runtime model to implicit autodetection.
+
 Default installed paths:
 
 - binary: `/opt/mangos/manager/bin/vmangos-manager`
@@ -96,9 +98,17 @@ vmangos-manager backup schedule --weekly "Sun 04:00"
 
 ```bash
 vmangos-manager config create [--path FILE]
+vmangos-manager config detect [--format text|json]
 vmangos-manager config validate [--format text|json]
 vmangos-manager config show [--format text|json]
 ```
+
+Behavior:
+
+- `config detect` inspects likely VMANGOS install roots and parses `mangosd.conf` / `realmd.conf` when found
+- `config detect` attempts to match auth/world service names from `systemd`
+- `config detect` prints a proposed `manager.conf` and reports confidence, assumptions, and ambiguity
+- `config detect` is read-only; it does not overwrite `manager.conf`
 
 ## Update Check
 
