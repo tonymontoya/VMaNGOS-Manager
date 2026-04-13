@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+#
+# VMANGOS Manager - Main entry point
+# Unified CLI for VMANGOS server management
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
+readonly LIB_DIR
+
+# Source libraries
+source "$LIB_DIR/common.sh"
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/server.sh"
+
+# ============================================================================
+# VERSION
+# ============================================================================
+
+readonly VERSION="0.1.0"
+readonly PROGRAM_NAME="vmangos-manager"
+
+# ============================================================================
+# USAGE
+# ============================================================================
+
+usage() {
+    cat << EOF
+VMANGOS Manager v${VERSION}
+
+Usage: ${PROGRAM_NAME} [GLOBAL_OPTIONS] <command> [COMMAND_OPTIONS]
+
+Global Options:
+    -v, --verbose       Enable verbose output
+    -f, --format        Output format: text (default) | json
+    -c, --config        Config file path (default: /opt/mangos/manager/config/manager.conf)
+    -h, --help          Show this help message
+    --version           Show version
+
+Commands:
+    server              Server control operations
+    config              Configuration management
+
+Server Commands:
+    ${PROGRAM_NAME} server start [--wait]
+    ${PROGRAM_NAME} server stop [--graceful|--force]
+    ${PROGRAM_NAME} server restart
+    ${PROGRAM_NAME} server status [--format json]
+
+Config Commands:
+    ${PROGRAM_NAME} config create
+    ${PROGRAM_NAME} config validate
+    ${PROGRAM_NAME} config show
+
+Examples:
+    ${PROGRAM_NAME} server start --wait
+    ${PROGRAM_NAME} server status --format json
+    ${PROGRAM_NAME} -v server restart
+
+EOF
+}
+
+# ============================================================================
+# GLOBAL OPTIONS
+# ============================================================================
+
+VERBOSE=0
+OUTPUT_FORMAT="text"
+CONFIG_FILE="/opt/mangos/manager/config/manager.conf"
+
+parse_global_options() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -v|--verbose)
+                VERBOSE=1
+                shift
+                ;;
+            -f|--format)
+                OUTPUT_FORMAT="$2"
+                shift 2
+                ;;
+            -c|--config)
+                CONFIG_FILE="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --version)
+                echo "${PROGRAM_NAME} v${VERSION}"
+                exit 0
+                ;;
+            -*)
+                error_exit "Unknown option: $1"
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+}
+
+# ============================================================================
+# COMMAND: SERVER
+# ============================================================================
+
+cmd_server() {
+    local subcommand="${1:-}"
+    shift || true
+    
+    case "$subcommand" in
+        start)
+            local wait_flag=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --wait) wait_flag=true; shift ;;
+                    *) error_exit "Unknown option: $1" ;;
+                esac
+            done
+            check_root
+            server_start "$wait_flag"
+            ;;
+            
+        stop)
+            local graceful=true force=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --graceful) graceful=true; shift ;;
+                    --force) force=true; shift ;;
+                    *) error_exit "Unknown option: $1" ;;
+                esac
+            done
+            check_root
+            server_stop "$graceful" "$force"
+            ;;
+            
+        restart)
+            check_root
+            server_restart
+            ;;
+            
+        status)
+            local format="text"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --format) format="$2"; shift 2 ;;
+                    *) error_exit "Unknown option: $1" ;;
+                esac
+            done
+            
+            if [[ "$format" == "json" ]]; then
+                server_status_json
+            else
+                server_status_text
+            fi
+            ;;
+            
+        *)
+            error_exit "Unknown server command: $subcommand"
+            ;;
+    esac
+}
+
+# ============================================================================
+# COMMAND: CONFIG
+# ============================================================================
+
+cmd_config() {
+    local subcommand="${1:-}"
+    shift || true
+    
+    case "$subcommand" in
+        create)
+            config_create "$CONFIG_FILE"
+            ;;
+            
+        validate)
+            if config_validate "$CONFIG_FILE"; then
+                log_info "✓ Configuration is valid"
+            else
+                error_exit "Configuration validation failed"
+            fi
+            ;;
+            
+        show)
+            if [[ -f "$CONFIG_FILE" ]]; then
+                cat "$CONFIG_FILE"
+            else
+                error_exit "Config file not found: $CONFIG_FILE"
+            fi
+            ;;
+            
+        *)
+            error_exit "Unknown config command: $subcommand"
+            ;;
+    esac
+}
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+main() {
+    # Parse global options
+    parse_global_options "$@"
+    
+    # Shift parsed options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -v|--verbose|-f|--format|-c|--config)
+                if [[ "$1" == -*f* ]] || [[ "$1" == -*c* ]]; then
+                    shift 2
+                else
+                    shift
+                fi
+                ;;
+            -h|--help|--version)
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    
+    # Get command
+    local command="${1:-}"
+    shift || true
+    
+    case "$command" in
+        server)
+            cmd_server "$@"
+            ;;
+        config)
+            cmd_config "$@"
+            ;;
+        "")
+            usage
+            exit 1
+            ;;
+        *)
+            error_exit "Unknown command: $command"
+            ;;
+    esac
+}
+
+# Run main
+main "$@"
