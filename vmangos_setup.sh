@@ -24,6 +24,7 @@ VMANGOS_AUTO_INSTALL="${VMANGOS_AUTO_INSTALL:-0}"
 # Installation paths
 INSTALLROOT="${VMANGOS_INSTALL_ROOT:-/opt/mangos}"
 CLIENT_DATA="${VMANGOS_CLIENT_DATA:-}"
+SERVERIP="${VMANGOS_SERVER_IP:-}"
 
 # Database settings
 SQLADMINUSER="${VMANGOS_SQL_ADMIN_USER:-root}"
@@ -126,6 +127,21 @@ clear_checkpoint() {
     rm -f "$CHECKPOINT_FILE"
     rm -rf "$CHECKPOINT_DIR"
     log_info "Installation complete - checkpoints cleared"
+}
+
+ensure_server_ip() {
+    if [ -n "$SERVERIP" ]; then
+        log_info "Using server IP: $SERVERIP"
+        return 0
+    fi
+
+    SERVERIP=$(hostname -I | awk '{print $1}')
+    if [ -z "$SERVERIP" ]; then
+        log_error "Unable to determine server IP. Set VMANGOS_SERVER_IP and rerun the installer."
+        return 1
+    fi
+
+    log_info "Detected server IP: $SERVERIP"
 }
 
 # =============================================================================
@@ -504,10 +520,6 @@ phase_source_download() {
         log_info "Source directory exists, skipping clone"
     fi
     
-    # Get server IP
-    SERVERIP=$(hostname -I | awk '{print $1}')
-    log_info "Detected server IP: $SERVERIP"
-    
     set_checkpoint "SOURCE_DONE"
 }
 
@@ -629,14 +641,6 @@ phase_config_setup() {
     sed -i "s|vmap.enableHeight = 1|vmap.enableHeight = 0|" "$INSTALLROOT/run/etc/mangosd.conf"
     sed -i "s|vmap.enableIndoorCheck = 1|vmap.enableIndoorCheck = 0|" "$INSTALLROOT/run/etc/mangosd.conf"
     
-    # Create realmlist entry if it doesn't exist
-    log_info "Configuring realmlist..."
-    # localAddress must be the same as address for external clients to connect properly
-    mysql -u root -e "INSERT INTO \`$AUTHDB\`.\`realmlist\` (\`id\`, \`name\`, \`address\`, \`localAddress\`, \`localSubnetMask\`, \`port\`, \`icon\`, \`realmflags\`, \`timezone\`, \`allowedSecurityLevel\`, \`population\`, \`gamebuild_min\`, \`gamebuild_max\`, \`flag\`, \`realmbuilds\`) 
-        VALUES (1, 'VMaNGOS', '$SERVERIP', '$SERVERIP', '255.255.255.0', 8085, 0, 0, 1, 0, 0, 5875, 5875, 0, '5875 6005 6141') 
-        ON DUPLICATE KEY UPDATE \`address\` = '$SERVERIP', \`localAddress\` = '$SERVERIP', \`port\` = 8085, \`realmbuilds\` = '5875 6005 6141';" 2>/dev/null || \
-        mysql -u root "$AUTHDB" -e "UPDATE \`realmlist\` SET \`address\` = '$SERVERIP', \`localAddress\` = '$SERVERIP', \`port\` = 8085, \`realmbuilds\` = '5875 6005 6141' WHERE \`id\` = '1';" || true
-    
     # Ask whether bundled VMANGOS Manager files/config should be provisioned
     log_info ""
     log_info "VMANGOS Manager Release A does not require RA/SOAP."
@@ -706,6 +710,23 @@ EOF
     fi
     
     set_checkpoint "CONFIG_DONE"
+}
+
+ensure_realmlist_entry() {
+    local realm_count
+
+    log_info "Configuring realmlist..."
+
+    # localAddress must match address so external clients resolve the advertised realm correctly.
+    mysql -u root -e "INSERT INTO \`$AUTHDB\`.\`realmlist\` (\`id\`, \`name\`, \`address\`, \`localAddress\`, \`localSubnetMask\`, \`port\`, \`icon\`, \`realmflags\`, \`timezone\`, \`allowedSecurityLevel\`, \`population\`, \`gamebuild_min\`, \`gamebuild_max\`, \`flag\`, \`realmbuilds\`)
+        VALUES (1, 'VMaNGOS', '$SERVERIP', '$SERVERIP', '255.255.255.0', 8085, 0, 0, 1, 0, 0, 5875, 5875, 0, '5875 6005 6141')
+        ON DUPLICATE KEY UPDATE \`name\` = 'VMaNGOS', \`address\` = '$SERVERIP', \`localAddress\` = '$SERVERIP', \`localSubnetMask\` = '255.255.255.0', \`port\` = 8085, \`icon\` = 0, \`realmflags\` = 0, \`timezone\` = 1, \`allowedSecurityLevel\` = 0, \`population\` = 0, \`gamebuild_min\` = 5875, \`gamebuild_max\` = 5875, \`flag\` = 0, \`realmbuilds\` = '5875 6005 6141';"
+
+    realm_count=$(mysql -u root -N -B -e "SELECT COUNT(*) FROM \`$AUTHDB\`.\`realmlist\`;" 2>/dev/null || printf '0')
+    if [ "$realm_count" -lt 1 ]; then
+        log_error "Failed to seed \`$AUTHDB\`.realmlist; auth service would have no valid realms."
+        return 1
+    fi
 }
 
 phase_data_extraction() {
@@ -1052,6 +1073,8 @@ phase_database_import() {
             log_info "Skipping migrations (using pre-built database or no migrations table)"
         fi
     fi
+
+    ensure_realmlist_entry
     
     set_checkpoint "DB_IMPORT_DONE"
 }
@@ -1154,6 +1177,7 @@ main() {
     
     check_root
     init_checkpoints
+    ensure_server_ip
     
     # Get current checkpoint
     CHECKPOINT=$(get_checkpoint)
