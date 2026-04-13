@@ -244,9 +244,22 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
+args="$*"
+
+if [[ "$args" == *"--output short-iso"* ]]; then
+    if [[ -n "${STATUS_TEST_EVENTS_FILE:-}" && -f "${STATUS_TEST_EVENTS_FILE:-}" ]]; then
+        cat "${STATUS_TEST_EVENTS_FILE}"
+    elif [[ "${STATUS_TEST_EVENTS_MODE:-default}" == "default" ]]; then
+        cat <<'JOURNALEOF'
+2026-04-13T10:15:00+00:00 host world[222]: World lag spike detected
+2026-04-13T10:16:00+00:00 host auth[111]: Login queue stabilized
+JOURNALEOF
+    fi
+    exit 0
+fi
+
 service=""
 prev=""
-
 for arg in "$@"; do
     if [[ "$prev" == "-u" ]]; then
         service="$arg"
@@ -268,7 +281,70 @@ while [[ "$i" -lt "$count" ]]; do
 done
 EOF
 
-    chmod +x "$mock_dir/systemctl" "$mock_dir/ps" "$mock_dir/mysql" "$mock_dir/df" "$mock_dir/sleep" "$mock_dir/journalctl"
+    cat > "$mock_dir/top" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${STATUS_TEST_TOP_FILE:-}" && -f "${STATUS_TEST_TOP_FILE:-}" ]]; then
+    cat "${STATUS_TEST_TOP_FILE}"
+    exit 0
+fi
+cat <<'TOPEOF'
+top - 10:10:10 up 1 day,  1:23,  1 user,  load average: 0.50, 0.40, 0.30
+Tasks: 100 total,   1 running, 99 sleeping,   0 stopped,   0 zombie
+%Cpu(s): 12.5 us,  5.0 sy,  0.0 ni, 82.5 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+TOPEOF
+EOF
+
+    cat > "$mock_dir/getconf" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "_NPROCESSORS_ONLN" ]]; then
+    echo "${STATUS_TEST_CPU_CORES:-8}"
+fi
+EOF
+
+    cat > "$mock_dir/iostat" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${STATUS_TEST_IOSTAT_MODE:-present}" == "absent" ]]; then
+    exit 127
+fi
+
+if [[ -n "${STATUS_TEST_IOSTAT_FILE:-}" && -f "${STATUS_TEST_IOSTAT_FILE:-}" ]]; then
+    cat "${STATUS_TEST_IOSTAT_FILE}"
+    exit 0
+fi
+
+cat <<'IOSTATEOF'
+Linux 6.8.0 (mockhost)
+
+Device            r/s     rkB/s   rrqm/s  %rrqm  r_await  rareq-sz     w/s     wkB/s   wrqm/s  %wrqm  w_await  wareq-sz     aqu-sz  %util
+mock              1.50    24.00     0.00   0.00     0.40     16.00    2.50    40.00     0.00   0.00     0.90     16.00       0.01   35.50
+
+Device            r/s     rkB/s   rrqm/s  %rrqm  r_await  rareq-sz     w/s     wkB/s   wrqm/s  %wrqm  w_await  wareq-sz     aqu-sz  %util
+mock              3.25    52.00     0.00   0.00     0.55     16.00    4.75    76.00     0.00   0.00     1.10     16.00       0.02   61.25
+IOSTATEOF
+EOF
+
+    chmod +x "$mock_dir/systemctl" "$mock_dir/ps" "$mock_dir/mysql" "$mock_dir/df" "$mock_dir/sleep" "$mock_dir/journalctl" "$mock_dir/top" "$mock_dir/getconf" "$mock_dir/iostat"
+}
+
+setup_status_proc_root() {
+    local proc_root="$1"
+    mkdir -p "$proc_root"
+
+    cat > "$proc_root/meminfo" << 'EOF'
+MemTotal:       8192000 kB
+MemFree:        1024000 kB
+MemAvailable:   4096000 kB
+Buffers:         256000 kB
+Cached:         1024000 kB
+EOF
+
+    cat > "$proc_root/loadavg" << 'EOF'
+0.50 0.40 0.30 1/100 12345
+EOF
 }
 
 setup_logs_mock_bin() {
@@ -1778,16 +1854,18 @@ EOF
 
 test_cli_status_json_with_mocks() {
     local all_passed=0
-    local temp_dir mock_dir config_file output compact_output
+    local temp_dir mock_dir proc_root config_file output compact_output
     temp_dir=$(mktemp -d)
     mock_dir="$temp_dir/mockbin"
+    proc_root="$temp_dir/proc"
     mkdir -p "$mock_dir"
     config_file="$temp_dir/manager.conf"
 
     create_test_config "$config_file"
     setup_status_mock_bin "$mock_dir"
+    setup_status_proc_root "$proc_root"
 
-    output=$(PATH="$mock_dir:$PATH" MANAGER_CONFIG="$config_file" bash "$MANAGER_DIR/bin/vmangos-manager" server status --format json 2>/dev/null)
+    output=$(PATH="$mock_dir:$PATH" MANAGER_CONFIG="$config_file" VMANGOS_PROC_ROOT="$proc_root" bash "$MANAGER_DIR/bin/vmangos-manager" server status --format json 2>/dev/null)
     compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
 
     assert_true "[[ \$compact_output == *'\"success\":true'* ]]" "CLI status json reports success" || all_passed=1
@@ -1796,6 +1874,66 @@ test_cli_status_json_with_mocks() {
     assert_true "[[ \$compact_output == *'\"available_kb\":1536000'* ]]" "CLI status json includes disk availability" || all_passed=1
     assert_true "[[ \$compact_output == *'\"health\":\"healthy\"'* ]]" "CLI status json includes service health labels" || all_passed=1
     assert_true "[[ \$compact_output == *'\"restart_count_1h\":0'* ]]" "CLI status json includes restart count field" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"cpu\":{\"usage_percent\":17.5,\"status\":\"ok\",\"cores\":8}'* ]]" "CLI status json includes host CPU metrics" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"memory\":{\"total_kb\":8192000,\"used_kb\":4096000,\"available_kb\":4096000,\"used_percent\":50.0,\"status\":\"ok\"}'* ]]" "CLI status json includes host memory metrics" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"storage_io\":{\"available\":true,\"device\":\"mock\"'* && \$compact_output == *'\"util_percent\":61.25'* ]]" "CLI status json includes disk I/O metrics when iostat is available" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"alerts\":{\"status\":\"healthy\",\"active\":[]'* ]]" "CLI status json includes healthy alert summary" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"recent_events\":[{\"timestamp\":\"2026-04-13T10:15:00+00:00\",\"service\":\"world\"'* ]]" "CLI status json includes recent events feed" || all_passed=1
+
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
+test_cli_status_json_degrades_without_iostat_and_raises_alerts() {
+    local all_passed=0
+    local temp_dir mock_dir proc_root config_file events_file top_file output compact_output
+    temp_dir=$(mktemp -d)
+    mock_dir="$temp_dir/mockbin"
+    proc_root="$temp_dir/proc"
+    mkdir -p "$mock_dir" "$proc_root"
+    config_file="$temp_dir/manager.conf"
+    events_file="$temp_dir/events.log"
+    top_file="$temp_dir/top.txt"
+
+    create_test_config "$config_file"
+    setup_status_mock_bin "$mock_dir"
+
+    cat > "$proc_root/meminfo" << 'EOF'
+MemTotal:       1000000 kB
+MemFree:          20000 kB
+MemAvailable:     50000 kB
+Buffers:          10000 kB
+Cached:           20000 kB
+EOF
+
+    cat > "$proc_root/loadavg" << 'EOF'
+9.50 8.00 7.00 2/100 12345
+EOF
+
+    cat > "$top_file" << 'EOF'
+top - 10:10:10 up 1 day,  1:23,  1 user,  load average: 9.50, 8.00, 7.00
+Tasks: 100 total,   1 running, 99 sleeping,   0 stopped,   0 zombie
+%Cpu(s): 70.0 us, 25.0 sy,  0.0 ni, 5.0 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+EOF
+
+    cat > "$events_file" << 'EOF'
+2026-04-13T11:01:00+00:00 host world[222]: High latency detected
+EOF
+
+    output=$(PATH="$mock_dir:$PATH" \
+        MANAGER_CONFIG="$config_file" \
+        VMANGOS_PROC_ROOT="$proc_root" \
+        STATUS_TEST_TOP_FILE="$top_file" \
+        STATUS_TEST_CPU_CORES="4" \
+        STATUS_TEST_IOSTAT_MODE="absent" \
+        STATUS_TEST_EVENTS_FILE="$events_file" \
+        bash "$MANAGER_DIR/bin/vmangos-manager" server status --format json 2>/dev/null)
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+
+    assert_true "[[ \$compact_output == *'\"storage_io\":{\"available\":false'* && \$compact_output == *'\"status\":\"unavailable\"'* ]]" "CLI status json degrades cleanly when iostat is unavailable" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"alerts\":{\"status\":\"critical\"'* ]]" "CLI status json raises critical overall alert state for stressed host metrics" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"source\":\"host.cpu\"'* && \$compact_output == *'\"source\":\"host.memory\"'* && \$compact_output == *'\"source\":\"host.load\"'* ]]" "CLI status json emits threshold-derived alerts" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"recent_events\":[{\"timestamp\":\"2026-04-13T11:01:00+00:00\",\"service\":\"world\",\"message\":\"Highlatencydetected\"'* ]]" "CLI status json keeps recent events when alerts are present" || all_passed=1
 
     rm -rf "$temp_dir"
     return $all_passed
@@ -2689,6 +2827,7 @@ main() {
     run_test "Server: Graceful stop timeout" test_server_stop_respects_timeout_without_force
     run_test "Server: Crash loop detection" test_server_crash_loop_detection
     run_test "CLI: Status JSON" test_cli_status_json_with_mocks
+    run_test "CLI: Status JSON alerts/iostat fallback" test_cli_status_json_degrades_without_iostat_and_raises_alerts
     run_test "CLI: Status watch" test_cli_status_watch_single_iteration
     run_test "CLI: Watch rejects JSON" test_cli_status_watch_rejects_json
     run_test "Logs: Config rendering" test_logs_render_config_includes_issue17_policy
