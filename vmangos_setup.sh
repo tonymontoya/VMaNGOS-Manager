@@ -482,7 +482,7 @@ phase_prerequisites() {
     apt-get update
     apt-get install -y build-essential cmake git libmariadb-dev libssl-dev \
         libbz2-dev libreadline-dev libncurses-dev libboost-all-dev \
-        p7zip-full sysstat wget zlib1g-dev
+        p7zip-full python3 python3-pip python3-venv sysstat wget zlib1g-dev
     
     set_checkpoint "PREREQS_DONE"
 }
@@ -664,8 +664,10 @@ phase_config_setup() {
             log_info "Installing bundled VMANGOS Manager sources into $manager_root"
             cp "$SCRIPT_DIR/manager/bin/vmangos-manager" "$manager_root/bin/"
             cp "$SCRIPT_DIR/manager/lib/"*.sh "$manager_root/lib/"
+            cp "$SCRIPT_DIR/manager/lib/"*.py "$manager_root/lib/" 2>/dev/null || true
             cp "$SCRIPT_DIR/manager/tests/"*.sh "$manager_root/tests/" 2>/dev/null || true
             cp "$SCRIPT_DIR/manager/Makefile" "$manager_root/" 2>/dev/null || true
+            cp "$SCRIPT_DIR/manager/dashboard-requirements.txt" "$manager_root/" 2>/dev/null || true
             chmod +x "$manager_root/bin/vmangos-manager"
         else
             log_warn "Bundled manager sources not found next to vmangos_setup.sh; creating config only"
@@ -704,6 +706,14 @@ EOF
         printf '%s\n' "$MANGOSDBPASS" > "$manager_password_file"
         chmod 600 "$manager_config_file" "$manager_password_file"
         log_info "Manager config written to $manager_config_file"
+
+        if [ -x "$manager_root/bin/vmangos-manager" ]; then
+            if "$manager_root/bin/vmangos-manager" -c "$manager_config_file" dashboard --bootstrap >/dev/null 2>&1; then
+                log_info "Manager dashboard dependencies bootstrapped"
+            else
+                log_warn "Manager dashboard bootstrap failed; run '$manager_root/bin/vmangos-manager -c $manager_config_file dashboard --bootstrap' after install"
+            fi
+        fi
     else
         ENABLE_VMANGOS_MANAGER=false
         log_info "Bundled VMANGOS Manager provisioning skipped."

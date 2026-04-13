@@ -1,4 +1,4 @@
-# TROUBLESHOOTING
+# Troubleshooting
 
 ## Config Problems
 
@@ -12,13 +12,41 @@ Check the path passed with `-c` or install the default config at:
 
 ### Config or password file permissions are wrong
 
-Release A expects mode `600` for:
+Manager expects mode `600` for:
 
 - `manager.conf`
 - `.dbpass`
 - password files passed with `--password-file`
 
-## Update Check Problems
+## Dashboard Problems
+
+### `Textual runtime import failed`
+
+Bootstrap the dashboard environment first:
+
+```bash
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
+```
+
+If the venv cannot be created on Ubuntu, verify the required packages are installed:
+
+```bash
+sudo apt-get install -y python3 python3-pip python3-venv
+```
+
+### Dashboard opens but data is missing
+
+Validate the same backend surfaces directly:
+
+```bash
+sudo /opt/mangos/manager/bin/vmangos-manager server status --format json
+sudo /opt/mangos/manager/bin/vmangos-manager logs status --format json
+sudo /opt/mangos/manager/bin/vmangos-manager account list --online --format json
+```
+
+If `account list --online` fails for a non-root operator, check that `manager.conf` and `.dbpass` are readable by the account running the dashboard.
+
+## Update Problems
 
 ### `Update check requires a VMANGOS-Manager git checkout`
 
@@ -72,11 +100,11 @@ Check:
 - `database.password_file`
 - MariaDB listener/bind settings
 
-On the Ubuntu host, this is a useful comparison:
+Useful comparison:
 
 ```bash
 sudo cat /opt/mangos/manager/config/.dbpass
-mysql -h 10.0.1.6 -P 3306 -u mangos -p'<password>' -N -B -e "SELECT 1" auth
+mysql -h 127.0.0.1 -P 3306 -u mangos -p'<password>' -N -B -e "SELECT 1" auth
 ```
 
 ## Account Problems
@@ -95,7 +123,7 @@ Mode must still be `600`.
 
 Check:
 
-- auth schema matches the Release A baseline
+- auth schema matches the expected VMANGOS baseline
 - DB credentials in `manager.conf`
 - `auth.account`, `auth.account_access`, `auth.account_banned`, and `auth.realmcharacters` are writable by the manager DB user
 
@@ -103,11 +131,11 @@ Check:
 
 ### Verify fails because metadata is missing
 
-Release A backup verify is fail-closed for missing metadata. Recreate the backup or repair the metadata sidecar before trusting the archive.
+Backup verify is fail-closed for missing metadata. Recreate the backup or repair the metadata sidecar before trusting the archive.
 
 ### Restore requires privileged credentials
 
-Release A restore intentionally refuses to guess privileged DB credentials. Supply the required credentials explicitly before running a real restore.
+Restore intentionally refuses to guess privileged DB credentials. Supply the required credentials explicitly before running a real restore.
 
 ## Validation Commands
 

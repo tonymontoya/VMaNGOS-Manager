@@ -46,6 +46,7 @@ COMMANDS:
       stop options: [--graceful|--force] [--timeout SECONDS]
       restart options: [--timeout SECONDS]
       status options: [--format text|json] [--watch] [--interval SECONDS]
+    dashboard [--refresh SECONDS] [--theme dark|light] [--bootstrap]
     logs [status|rotate|test-config] [OPTIONS]
     account [create|list|setgm|ban|unban|password] [OPTIONS]
     update [check|inspect|plan|apply] [OPTIONS]
@@ -131,6 +132,8 @@ source "$LIB_DIR/schedule.sh"
 source "$LIB_DIR/backup.sh"
 # shellcheck source=lib/logs.sh
 source "$LIB_DIR/logs.sh"
+# shellcheck source=lib/dashboard.sh
+source "$LIB_DIR/dashboard.sh"
 
 # Export globals for library use
 export VERBOSE
@@ -355,6 +358,53 @@ cmd_logs() {
             exit 2
             ;;
     esac
+}
+
+cmd_dashboard() {
+    local refresh=2
+    local theme="dark"
+    local bootstrap=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --refresh|--interval)
+                if [[ -n "${2:-}" ]]; then
+                    refresh="$2"
+                    shift 2
+                else
+                    echo "Error: $1 requires an argument" >&2
+                    exit 2
+                fi
+                ;;
+            --theme)
+                if [[ -n "${2:-}" ]]; then
+                    theme="$2"
+                    shift 2
+                else
+                    echo "Error: --theme requires an argument" >&2
+                    exit 2
+                fi
+                ;;
+            --bootstrap)
+                bootstrap=true
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                echo "Unknown option: $1" >&2
+                exit 2
+                ;;
+            *)
+                echo "Error: dashboard does not accept positional arguments" >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    dashboard_run "$SCRIPT_DIR/vmangos-manager" "$refresh" "$theme" "$bootstrap"
 }
 
 cmd_schedule() {
@@ -1124,6 +1174,9 @@ main() {
     case "$command_name" in
         server)
             cmd_server "$@"
+            ;;
+        dashboard)
+            cmd_dashboard "$@"
             ;;
         logs)
             cmd_logs "$@"

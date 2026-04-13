@@ -1,8 +1,8 @@
-# SECURITY
+# Security
 
-## Release A Security Model
+## Security Model
 
-VMANGOS Manager Release A is intentionally conservative:
+VMANGOS Manager is intentionally conservative:
 
 - passwords are not accepted as positional CLI arguments
 - password files must be mode `600`
@@ -26,7 +26,7 @@ Unsupported by design:
 
 ## Database Access
 
-Release A account management operates directly against the VMANGOS auth schema. This was chosen because Release A needs:
+Manager account management operates directly against the VMANGOS auth schema. This was chosen because the tool needs:
 
 - full account listing
 - GM level state
@@ -34,30 +34,29 @@ Release A account management operates directly against the VMANGOS auth schema. 
 - schema-aware password/verifier updates
 - deterministic test coverage
 
-The manager should use a least-privileged DB user that can perform the required operations on:
+Use a least-privileged DB user that can perform the required operations on:
 
 - `auth`
 - `characters`
 - `world`
 - `logs`
 
-## Git Update Model
+## Update Model
 
-Release A only provides `update check`.
+Manager's update workflow is intentionally non-atomic. Operators should review incoming changes, take a verified backup, test them, and then reinstall intentionally.
 
-It does not apply updates automatically. The command:
+The update surface:
 
 - fetches remote metadata
 - compares local and remote commits
-- prints manual steps
-
-This non-atomic model is deliberate. Operators should review incoming changes, test them, then reinstall manager files intentionally.
+- prints or executes explicit steps
+- fails closed when SQL changes fall outside the supported migration shape
 
 ## Operational Guidance
 
 - keep `/opt/mangos/manager/config/.dbpass` readable only by trusted operators
 - restrict MySQL network exposure to trusted hosts
-- prefer running service-control commands with `sudo`
+- prefer running service-control and dashboard commands with `sudo`
 - review audit output after account changes
 - run `make test` before installing from a source checkout
 

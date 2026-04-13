@@ -360,6 +360,37 @@ EOF
     chmod +x "$mock_dir/logrotate"
 }
 
+setup_dashboard_mock_python() {
+    local mock_python="$1"
+
+    cat > "$mock_python" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >> "${DASHBOARD_TEST_LOG:-/dev/null}"
+
+if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then
+    venv_dir="${3:-}"
+    mkdir -p "$venv_dir/bin"
+    cp "$0" "$venv_dir/bin/python3"
+    chmod +x "$venv_dir/bin/python3"
+    exit 0
+fi
+
+if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then
+    exit 0
+fi
+
+if [[ "${1:-}" == "-c" ]]; then
+    exit 0
+fi
+
+printf '%s\n' "$*" > "${DASHBOARD_TEST_RUN_ARGS:-/dev/null}"
+EOF
+
+    chmod +x "$mock_python"
+}
+
 setup_config_detect_mock_bin() {
     local mock_dir="$1"
 
@@ -624,6 +655,7 @@ test_cli_parsing() {
     assert_true "[[ \$output == *'server'* ]]" "CLI --help lists server command" || all_passed=1
     assert_true "[[ \$output == *'logs [status|rotate|test-config]'* ]]" "CLI --help lists logs command" || all_passed=1
     assert_true "[[ \$output == *'account'* ]]" "CLI --help lists account command" || all_passed=1
+    assert_true "[[ \$output == *'dashboard [--refresh SECONDS] [--theme dark|light] [--bootstrap]'* ]]" "CLI --help lists dashboard command" || all_passed=1
     assert_true "[[ \$output == *'update'* ]]" "CLI --help lists update command" || all_passed=1
     assert_true "[[ \$output == *'schedule [honor|restart|list|cancel|simulate]'* ]]" "CLI --help lists schedule command" || all_passed=1
     assert_true "[[ \$output == *'update [check|inspect|plan|apply]'* ]]" "CLI --help lists update inspect command" || all_passed=1
@@ -1601,13 +1633,113 @@ test_make_install_and_uninstall_targets() {
 
     assert_file_exists "$install_root/bin/vmangos-manager" "make install copies binary" || all_passed=1
     assert_file_exists "$install_root/lib/update.sh" "make install copies update module" || all_passed=1
+    assert_file_exists "$install_root/lib/dashboard.sh" "make install copies dashboard shell module" || all_passed=1
+    assert_file_exists "$install_root/lib/dashboard.py" "make install copies dashboard python app" || all_passed=1
+    assert_file_exists "$install_root/dashboard-requirements.txt" "make install copies dashboard requirements" || all_passed=1
     assert_file_exists "$install_root/tests/run_tests.sh" "make install copies tests" || all_passed=1
 
     make -C "$MANAGER_DIR" uninstall DESTDIR="$temp_dir" PREFIX=/opt/mangos/manager >/dev/null
 
     assert_true "[[ ! -e \"$install_root/bin/vmangos-manager\" ]]" "make uninstall removes binary" || all_passed=1
     assert_true "[[ ! -e \"$install_root/lib/update.sh\" ]]" "make uninstall removes library files" || all_passed=1
+    assert_true "[[ ! -e \"$install_root/lib/dashboard.py\" ]]" "make uninstall removes dashboard python app" || all_passed=1
+    assert_true "[[ ! -e \"$install_root/dashboard-requirements.txt\" ]]" "make uninstall removes dashboard requirements" || all_passed=1
     assert_true "[[ -f \"$install_root/config/manager.conf\" ]]" "make uninstall preserves config files" || all_passed=1
+
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
+test_dashboard_bootstrap_and_run() {
+    # shellcheck source=../lib/dashboard.sh
+    source "$LIB_DIR/dashboard.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local temp_dir config_file mock_python manager_bin log_file run_args_file output
+    temp_dir=$(mktemp -d)
+    config_file="$temp_dir/manager.conf"
+    mock_python="$temp_dir/mock-python3"
+    manager_bin="$temp_dir/vmangos-manager"
+    log_file="$temp_dir/dashboard.log"
+    run_args_file="$temp_dir/dashboard.run"
+
+    create_test_config "$config_file"
+    setup_dashboard_mock_python "$mock_python"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$manager_bin"
+    chmod +x "$manager_bin"
+
+    CONFIG_FILE="$config_file"
+    output=$(DASHBOARD_TEST_LOG="$log_file" \
+        DASHBOARD_TEST_RUN_ARGS="$run_args_file" \
+        VMANGOS_DASHBOARD_VENV_DIR="$temp_dir/.venv-dashboard" \
+        VMANGOS_DASHBOARD_BOOTSTRAP_PYTHON="$mock_python" \
+        dashboard_run "$manager_bin" 3 light true 2>&1)
+
+    assert_true "[[ \$(cat \"$log_file\") == *'-m venv $temp_dir/.venv-dashboard'* ]]" "dashboard bootstrap creates virtual environment" || all_passed=1
+    assert_true "[[ \$(cat \"$log_file\") == *'-m pip install -r '*'dashboard-requirements.txt'* ]]" "dashboard bootstrap installs requirements with pip" || all_passed=1
+    assert_true "[[ ! -e \"$run_args_file\" ]]" "dashboard --bootstrap exits after dependency install" || all_passed=1
+    assert_true "[[ \$output == *'Dashboard dependencies installed'* ]]" "dashboard bootstrap reports dependency install" || all_passed=1
+
+    DASHBOARD_TEST_LOG="$log_file" \
+    DASHBOARD_TEST_RUN_ARGS="$run_args_file" \
+    VMANGOS_DASHBOARD_VENV_DIR="$temp_dir/.venv-dashboard" \
+    dashboard_run "$manager_bin" 3 light false >/dev/null 2>&1
+    assert_true "[[ \$(cat \"$run_args_file\") == *'--manager-bin $manager_bin --config $config_file --refresh 3 --theme light'* ]]" "dashboard run launches python app with parsed arguments" || all_passed=1
+
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
+test_dashboard_snapshot_json_aggregates_backend() {
+    local all_passed=0
+    local temp_dir config_file mock_manager output compact_output
+    temp_dir=$(mktemp -d)
+    config_file="$temp_dir/manager.conf"
+    mock_manager="$temp_dir/mock-manager"
+
+    create_test_config "$config_file"
+
+    cat > "$mock_manager" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+args="$*"
+
+if [[ "$args" == *"server status"* ]]; then
+    cat <<'JSON'
+{"success":true,"timestamp":"2026-04-13T22:00:00+00:00","data":{"services":{"auth":{"service":"auth","state":"active","running":true,"pid":111,"uptime_seconds":3600,"uptime_human":"1h 0m","memory_mb":32,"cpu_percent":0.2,"health":"healthy","restart_count_1h":0,"crash_loop_detected":false},"world":{"service":"world","state":"active","running":true,"pid":222,"uptime_seconds":7200,"uptime_human":"2h 0m","memory_mb":512,"cpu_percent":11.5,"health":"healthy","restart_count_1h":0,"crash_loop_detected":false}},"checks":{"database_connectivity":{"ok":true,"message":"ok"},"disk_space":{"ok":true,"path":"/opt/mangos","filesystem":"/dev/mock","total_kb":2000000,"used_kb":500000,"available_kb":1500000,"used_percent":25,"status":"ok"}},"players":{"online":1,"query_ok":true,"source":"auth.account.online"},"host":{"cpu":{"usage_percent":12.5,"status":"ok","cores":8},"memory":{"total_kb":8192000,"used_kb":4096000,"available_kb":4096000,"used_percent":50.0,"status":"ok"},"load":{"load_1":0.50,"load_5":0.40,"load_15":0.30,"status":"ok"}},"storage_io":{"available":true,"device":"mock","source":"/dev/mock","read_ops_per_sec":1.25,"write_ops_per_sec":2.75,"read_kbps":32.0,"write_kbps":48.0,"await_ms":0.8,"util_percent":42.0,"status":"ok"},"alerts":{"status":"healthy","active":[],"recent_events":[{"timestamp":"2026-04-13T21:55:00+00:00","service":"world","message":"World stable","raw":"2026-04-13T21:55:00+00:00 host world[222]: World stable"}]}},"error":null}
+JSON
+    exit 0
+fi
+
+if [[ "$args" == *"logs status"* ]]; then
+    cat <<'JSON'
+{"success":true,"timestamp":"2026-04-13T22:00:00+00:00","data":{"status":"healthy","log_root":"/opt/mangos/logs","config":{"path":"/etc/logrotate.d/vmangos","present":true,"in_sync":true},"logs":{"active_files":4,"active_size_bytes":2048,"rotated_files":2,"rotated_size_bytes":1024,"sensitive_files":2,"sensitive_permissions_ok":true},"disk":{"path":"/opt/mangos/logs","ok":true,"total_kb":2000000,"used_kb":500000,"available_kb":1500000,"used_percent":25,"required_free_kb":512000},"policy":{"copytruncate":true,"retention_days":30,"sensitive_retention_days":90,"max_size":"100M","min_size":"1M"}},"error":null}
+JSON
+    exit 0
+fi
+
+if [[ "$args" == *"account list --online"* ]]; then
+    cat <<'JSON'
+{"success":true,"timestamp":"2026-04-13T22:00:00+00:00","data":{"accounts":[{"id":7,"username":"PLAYERONE","gm_level":0,"online":true,"banned":false}]},"error":null}
+JSON
+    exit 0
+fi
+
+echo "unexpected command: $args" >&2
+exit 1
+EOF
+
+    chmod +x "$mock_manager"
+
+    output=$(python3 "$MANAGER_DIR/lib/dashboard.py" --manager-bin "$mock_manager" --config "$config_file" --snapshot-json)
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+
+    assert_true "[[ \$compact_output == *'\"server\":{\"ok\":true'* ]]" "dashboard snapshot records server payload" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"logs\":{\"ok\":true'* ]]" "dashboard snapshot records logs payload" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"players\":[{\"id\":7,\"username\":\"PLAYERONE\"'* ]]" "dashboard snapshot flattens online player list" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"captured_at\":\"'* ]]" "dashboard snapshot includes capture timestamp" || all_passed=1
 
     rm -rf "$temp_dir"
     return $all_passed

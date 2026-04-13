@@ -2,6 +2,7 @@
 AGENTS.md
 CLAUDE.md
 .local-tools/
+manager/.venv-dashboard/
 
 # Environment files
 .env
