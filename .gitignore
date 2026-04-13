@@ -1,6 +1,7 @@
 # Development artifacts - keep repo clean
 AGENTS.md
 CLAUDE.md
+.local-tools/
 
 # Environment files
 .env
