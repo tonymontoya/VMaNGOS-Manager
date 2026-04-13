@@ -53,9 +53,9 @@ sudo make uninstall PREFIX=/opt/mangos/manager
 ## Server Commands
 
 ```bash
-vmangos-manager server start [--wait]
-vmangos-manager server stop [--graceful|--force]
-vmangos-manager server restart
+vmangos-manager server start [--wait] [--timeout SECONDS]
+vmangos-manager server stop [--graceful|--force] [--timeout SECONDS]
+vmangos-manager server restart [--timeout SECONDS]
 vmangos-manager server status [--format text|json] [--watch] [--interval SECONDS]
 ```
 

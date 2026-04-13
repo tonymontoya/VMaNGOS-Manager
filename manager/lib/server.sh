@@ -22,6 +22,7 @@ DB_PORT=""
 DB_USER=""
 DB_PASS=""
 AUTH_DB=""
+SERVER_CRASH_LOOP_THRESHOLD="${SERVER_CRASH_LOOP_THRESHOLD:-3}"
 
 # ============================================================================
 # CONFIG LOADING
@@ -93,6 +94,123 @@ get_online_player_count() {
     printf '%s\n' "${result%%|*}"
 }
 
+server_validate_positive_integer() {
+    local value="${1:-}"
+    [[ "$value" =~ ^[1-9][0-9]*$ ]]
+}
+
+server_validate_timeout() {
+    server_validate_positive_integer "$1"
+}
+
+server_wait_for_active() {
+    local service="$1"
+    local timeout="$2"
+    local elapsed=0
+
+    while [[ "$elapsed" -lt "$timeout" ]]; do
+        if service_active "$service"; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    service_active "$service"
+}
+
+server_wait_for_inactive() {
+    local service="$1"
+    local timeout="$2"
+    local elapsed=0
+
+    while [[ "$elapsed" -lt "$timeout" ]]; do
+        if ! service_active "$service"; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    ! service_active "$service"
+}
+
+server_kill_service() {
+    local service="$1"
+    local signal="$2"
+    systemctl kill -s "$signal" "$service" 2>/dev/null || true
+}
+
+server_get_systemctl_property() {
+    local service="$1"
+    local property="$2"
+    systemctl show -p "$property" "$service" 2>/dev/null | cut -d= -f2-
+}
+
+server_get_restart_count_1h() {
+    local service="$1"
+    local count
+
+    count=$(journalctl -u "$service" --since "1 hour ago" --no-pager 2>/dev/null | \
+        awk '/Scheduled restart job/ {count++} END {print count+0}' || true)
+
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    printf '%s\n' "$count"
+}
+
+server_is_crash_loop_detected() {
+    local service="$1"
+    local restart_count
+
+    restart_count=$(server_get_restart_count_1h "$service")
+    [[ "$restart_count" =~ ^[0-9]+$ ]] || restart_count=0
+    [[ "$restart_count" -ge "$SERVER_CRASH_LOOP_THRESHOLD" ]]
+}
+
+server_verify_running_health() {
+    local timeout="$1"
+
+    if ! server_wait_for_active "$AUTH_SERVICE" 10; then
+        log_error "Auth service failed to reach active state within 10s"
+        return 1
+    fi
+
+    if ! server_wait_for_active "$WORLD_SERVICE" "$timeout"; then
+        log_error "World service failed to reach active state within ${timeout}s"
+        return 1
+    fi
+
+    # Give systemd a brief moment to settle so a fast crash is visible.
+    sleep 2
+
+    if ! service_active "$AUTH_SERVICE"; then
+        log_error "Auth service is not active after start"
+        return 1
+    fi
+
+    if ! service_active "$WORLD_SERVICE"; then
+        log_error "World service is not active after start"
+        return 1
+    fi
+
+    if ! db_check_connection; then
+        log_error "Database connectivity check failed after start"
+        return 1
+    fi
+
+    if server_is_crash_loop_detected "$AUTH_SERVICE"; then
+        log_error "Auth service shows crash-loop behavior in recent systemd history"
+        return 1
+    fi
+
+    if server_is_crash_loop_detected "$WORLD_SERVICE"; then
+        log_error "World service shows crash-loop behavior in recent systemd history"
+        return 1
+    fi
+
+    return 0
+}
+
 # ============================================================================
 # PRE-FLIGHT CHECKS (Config-driven paths)
 # ============================================================================
@@ -147,6 +265,10 @@ server_start() {
     log_section "Starting VMANGOS Server"
     
     server_load_config || error_exit "Failed to load configuration" "$E_CONFIG_ERROR"
+
+    if ! server_validate_timeout "$timeout"; then
+        error_exit "Invalid start timeout: $timeout" "$E_INVALID_ARGS"
+    fi
     
     if ! preflight_check; then
         error_exit "Pre-flight checks failed" "$E_SERVICE_ERROR"
@@ -160,19 +282,6 @@ server_start() {
         if ! service_start "$AUTH_SERVICE"; then
             error_exit "Failed to start auth service" "$E_SERVICE_ERROR"
         fi
-        
-        if [[ "$wait" == "true" ]]; then
-            log_info "Waiting for auth service to be ready..."
-            local count=0
-            while ! service_active "$AUTH_SERVICE" && [[ $count -lt 10 ]]; do
-                sleep 1
-                count=$((count + 1))
-            done
-            
-            if ! service_active "$AUTH_SERVICE"; then
-                error_exit "Auth service failed to start within 10s" "$E_SERVICE_ERROR"
-            fi
-        fi
     fi
     
     # Start world service
@@ -183,30 +292,18 @@ server_start() {
         if ! service_start "$WORLD_SERVICE"; then
             error_exit "Failed to start world service" "$E_SERVICE_ERROR"
         fi
-        
-        if [[ "$wait" == "true" ]]; then
-            log_info "Waiting for world service to initialize..."
-            local count=0
-            while [[ $count -lt $timeout ]]; do
-                sleep 1
-                count=$((count + 1))
-                
-                if service_active "$WORLD_SERVICE"; then
-                    sleep 2
-                    if service_active "$WORLD_SERVICE"; then
-                        log_info "World service is running"
-                        break
-                    fi
-                fi
-            done
-            
-            if ! service_active "$WORLD_SERVICE"; then
-                error_exit "World service failed to start within ${timeout}s" "$E_SERVICE_ERROR"
-            fi
-        fi
     fi
-    
-    log_info "✓ Server started successfully"
+
+    if [[ "$wait" == "true" ]]; then
+        log_info "Waiting for services to become healthy..."
+        if ! server_verify_running_health "$timeout"; then
+            error_exit "Post-start health verification failed" "$E_SERVICE_ERROR"
+        fi
+        log_info "✓ Server started successfully"
+        return 0
+    fi
+
+    log_info "✓ Start commands issued successfully"
 }
 
 # ============================================================================
@@ -216,10 +313,15 @@ server_start() {
 server_stop() {
     local graceful="${1:-true}"
     local force="${2:-false}"
+    local timeout="${3:-30}"
     
     log_section "Stopping VMANGOS Server"
     
     server_load_config || error_exit "Failed to load configuration" "$E_CONFIG_ERROR"
+
+    if ! server_validate_timeout "$timeout"; then
+        error_exit "Invalid stop timeout: $timeout" "$E_INVALID_ARGS"
+    fi
     
     if [[ "$force" == "true" ]]; then
         graceful="false"
@@ -231,18 +333,33 @@ server_stop() {
         
         if [[ "$graceful" == "true" ]]; then
             if ! systemctl stop "$WORLD_SERVICE"; then
-                log_warn "Graceful stop failed, forcing..."
-                systemctl kill -s SIGTERM "$WORLD_SERVICE" 2>/dev/null || true
-                sleep 5
+                error_exit "Failed to request graceful stop for world service" "$E_SERVICE_ERROR"
+            fi
+
+            if ! server_wait_for_inactive "$WORLD_SERVICE" "$timeout"; then
+                if [[ "$force" == "true" ]]; then
+                    log_warn "World service did not stop within ${timeout}s, forcing..."
+                    server_kill_service "$WORLD_SERVICE" SIGTERM
+                    sleep 2
+                    if service_active "$WORLD_SERVICE"; then
+                        server_kill_service "$WORLD_SERVICE" SIGKILL
+                        sleep 1
+                    fi
+                    if service_active "$WORLD_SERVICE"; then
+                        error_exit "World service remained active after forced termination" "$E_SERVICE_ERROR"
+                    fi
+                else
+                    error_exit "World service did not stop within ${timeout}s" "$E_SERVICE_ERROR"
+                fi
             fi
         else
             systemctl stop "$WORLD_SERVICE" || true
-        fi
-        
-        if service_active "$WORLD_SERVICE" && [[ "$force" == "true" ]]; then
-            log_warn "Force killing world service..."
-            systemctl kill -s SIGKILL "$WORLD_SERVICE" 2>/dev/null || true
-            sleep 2
+            sleep 1
+            if service_active "$WORLD_SERVICE"; then
+                log_warn "Force killing world service..."
+                server_kill_service "$WORLD_SERVICE" SIGKILL
+                sleep 1
+            fi
         fi
     else
         log_info "World service not running"
@@ -251,7 +368,38 @@ server_stop() {
     # Stop auth service
     if service_active "$AUTH_SERVICE"; then
         log_info "Stopping auth service..."
-        systemctl stop "$AUTH_SERVICE" || true
+        if [[ "$graceful" == "true" ]]; then
+            if ! systemctl stop "$AUTH_SERVICE"; then
+                error_exit "Failed to stop auth service" "$E_SERVICE_ERROR"
+            fi
+
+            if ! server_wait_for_inactive "$AUTH_SERVICE" "$timeout"; then
+                if [[ "$force" == "true" ]]; then
+                    log_warn "Auth service did not stop within ${timeout}s, forcing..."
+                    server_kill_service "$AUTH_SERVICE" SIGTERM
+                    sleep 2
+                    if service_active "$AUTH_SERVICE"; then
+                        server_kill_service "$AUTH_SERVICE" SIGKILL
+                        sleep 1
+                    fi
+                    if service_active "$AUTH_SERVICE"; then
+                        error_exit "Auth service remained active after forced termination" "$E_SERVICE_ERROR"
+                    fi
+                else
+                    error_exit "Auth service did not stop within ${timeout}s" "$E_SERVICE_ERROR"
+                fi
+            fi
+        else
+            if ! systemctl stop "$AUTH_SERVICE"; then
+                error_exit "Failed to stop auth service" "$E_SERVICE_ERROR"
+            fi
+            sleep 1
+            if service_active "$AUTH_SERVICE"; then
+                log_warn "Force killing auth service..."
+                server_kill_service "$AUTH_SERVICE" SIGKILL
+                sleep 1
+            fi
+        fi
     else
         log_info "Auth service not running"
     fi
@@ -264,11 +412,17 @@ server_stop() {
 # ============================================================================
 
 server_restart() {
+    local timeout="${1:-60}"
+
     log_section "Restarting VMANGOS Server"
+
+    if ! server_validate_timeout "$timeout"; then
+        error_exit "Invalid restart timeout: $timeout" "$E_INVALID_ARGS"
+    fi
     
-    server_stop true false
+    server_stop true false "$timeout"
     sleep 2
-    server_start true 60
+    server_start true "$timeout"
 }
 
 # ============================================================================
@@ -310,6 +464,7 @@ server_collect_service_status() {
     local prefix="$1"
     local service="$2"
     local state pid uptime_seconds uptime_human memory_kb memory_mb cpu_percent running
+    local restart_count crash_loop
 
     state=$(systemctl is-active "$service" 2>/dev/null || true)
     [[ -n "$state" ]] || state="unknown"
@@ -322,6 +477,12 @@ server_collect_service_status() {
     uptime_human="N/A"
     memory_mb=0
     cpu_percent="0.0"
+    restart_count=$(server_get_restart_count_1h "$service")
+    [[ "$restart_count" =~ ^[0-9]+$ ]] || restart_count=0
+    crash_loop="false"
+    if [[ "$restart_count" -ge "$SERVER_CRASH_LOOP_THRESHOLD" ]]; then
+        crash_loop="true"
+    fi
 
     if [[ "$state" == "active" && "$pid" -gt 0 ]]; then
         running="true"
@@ -350,6 +511,33 @@ server_collect_service_status() {
     status_set_var "STATUS_${prefix}_UPTIME_HUMAN" "$uptime_human"
     status_set_var "STATUS_${prefix}_MEMORY_MB" "$memory_mb"
     status_set_var "STATUS_${prefix}_CPU_PERCENT" "$cpu_percent"
+    status_set_var "STATUS_${prefix}_RESTART_COUNT_1H" "$restart_count"
+    status_set_var "STATUS_${prefix}_CRASH_LOOP" "$crash_loop"
+}
+
+server_set_service_health() {
+    local prefix="$1"
+    local state_var="STATUS_${prefix}_STATE"
+    local running_var="STATUS_${prefix}_RUNNING"
+    local crash_loop_var="STATUS_${prefix}_CRASH_LOOP"
+    local health="stopped"
+    local state="${!state_var}"
+    local running="${!running_var}"
+    local crash_loop="${!crash_loop_var}"
+
+    if [[ "$crash_loop" == "true" ]]; then
+        health="crash-loop"
+    elif [[ "$running" == "true" ]]; then
+        if [[ "$STATUS_DB_OK" == "true" ]]; then
+            health="healthy"
+        else
+            health="degraded"
+        fi
+    elif [[ "$state" == "failed" ]]; then
+        health="failed"
+    fi
+
+    status_set_var "STATUS_${prefix}_HEALTH" "$health"
 }
 
 server_collect_status() {
@@ -400,6 +588,9 @@ server_collect_status() {
     else
         STATUS_DISK_OK="false"
     fi
+
+    server_set_service_health "AUTH"
+    server_set_service_health "WORLD"
 }
 
 server_render_service_text() {
@@ -411,18 +602,22 @@ server_render_service_text() {
     local uptime_var="STATUS_${prefix}_UPTIME_HUMAN"
     local memory_var="STATUS_${prefix}_MEMORY_MB"
     local cpu_var="STATUS_${prefix}_CPU_PERCENT"
+    local restart_var="STATUS_${prefix}_RESTART_COUNT_1H"
+    local health_var="STATUS_${prefix}_HEALTH"
     local state="${!state_var}"
     local running="${!running_var}"
     local pid="${!pid_var}"
     local uptime="${!uptime_var}"
     local memory_mb="${!memory_var}"
     local cpu_percent="${!cpu_var}"
+    local restart_count="${!restart_var}"
+    local health="${!health_var}"
 
     if [[ "$running" == "true" ]]; then
-        printf '  %-5s %s (PID: %s, uptime: %s, RSS: %s MB, CPU: %s%%)\n' \
-            "$label:" "$state" "$pid" "$uptime" "$memory_mb" "$cpu_percent"
+        printf '  %-5s %s (PID: %s, uptime: %s, RSS: %s MB, CPU: %s%%, health: %s, restarts/1h: %s)\n' \
+            "$label:" "$state" "$pid" "$uptime" "$memory_mb" "$cpu_percent" "$health" "$restart_count"
     else
-        printf '  %-5s %s (PID: n/a)\n' "$label:" "$state"
+        printf '  %-5s %s (PID: n/a, health: %s, restarts/1h: %s)\n' "$label:" "$state" "$health" "$restart_count"
     fi
 }
 
@@ -507,7 +702,10 @@ server_status_json() {
       "uptime_seconds": $STATUS_AUTH_UPTIME_SECONDS,
       "uptime_human": "$auth_uptime_escaped",
       "memory_mb": $STATUS_AUTH_MEMORY_MB,
-      "cpu_percent": $STATUS_AUTH_CPU_PERCENT
+      "cpu_percent": $STATUS_AUTH_CPU_PERCENT,
+      "health": "$(json_escape "$STATUS_AUTH_HEALTH")",
+      "restart_count_1h": $STATUS_AUTH_RESTART_COUNT_1H,
+      "crash_loop_detected": $STATUS_AUTH_CRASH_LOOP
     },
     "world": {
       "service": "$world_service_escaped",
@@ -517,7 +715,10 @@ server_status_json() {
       "uptime_seconds": $STATUS_WORLD_UPTIME_SECONDS,
       "uptime_human": "$world_uptime_escaped",
       "memory_mb": $STATUS_WORLD_MEMORY_MB,
-      "cpu_percent": $STATUS_WORLD_CPU_PERCENT
+      "cpu_percent": $STATUS_WORLD_CPU_PERCENT,
+      "health": "$(json_escape "$STATUS_WORLD_HEALTH")",
+      "restart_count_1h": $STATUS_WORLD_RESTART_COUNT_1H,
+      "crash_loop_detected": $STATUS_WORLD_CRASH_LOOP
     }
   },
   "checks": {
@@ -545,8 +746,7 @@ EOF
 }
 
 server_validate_interval() {
-    local interval="${1:-}"
-    [[ "$interval" =~ ^[1-9][0-9]*$ ]]
+    server_validate_positive_integer "${1:-}"
 }
 
 server_status_watch() {

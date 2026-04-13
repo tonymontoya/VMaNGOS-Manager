@@ -42,6 +42,9 @@ GLOBAL OPTIONS:
 
 COMMANDS:
     server [start|stop|restart|status] [OPTIONS]
+      start options: [--wait] [--timeout SECONDS]
+      stop options: [--graceful|--force] [--timeout SECONDS]
+      restart options: [--timeout SECONDS]
       status options: [--format text|json] [--watch] [--interval SECONDS]
     account [create|list|setgm|ban|unban|password] [OPTIONS]
     update [check|inspect|plan|apply] [OPTIONS]
@@ -134,33 +137,70 @@ cmd_server() {
     case "$subcmd" in
         start)
             local wait=false
+            local timeout=60
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --wait) wait=true; shift ;;
+                    --timeout)
+                        if [[ -n "${2:-}" ]]; then
+                            timeout="$2"
+                            shift 2
+                        else
+                            echo "Error: --timeout requires an argument" >&2
+                            exit 2
+                        fi
+                        ;;
                     --) shift; break ;;
                     -*) echo "Unknown option: $1"; exit 2 ;;
                     *) break ;;
                 esac
             done
-            server_start "$wait"
+            server_start "$wait" "$timeout"
             ;;
             
         stop)
             local graceful=true force=false
+            local timeout=30
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --graceful) graceful=true; shift ;;
                     --force) force=true; shift ;;
+                    --timeout)
+                        if [[ -n "${2:-}" ]]; then
+                            timeout="$2"
+                            shift 2
+                        else
+                            echo "Error: --timeout requires an argument" >&2
+                            exit 2
+                        fi
+                        ;;
                     --) shift; break ;;
                     -*) echo "Unknown option: $1"; exit 2 ;;
                     *) break ;;
                 esac
             done
-            server_stop "$graceful" "$force"
+            server_stop "$graceful" "$force" "$timeout"
             ;;
             
         restart)
-            server_restart
+            local timeout=60
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --timeout)
+                        if [[ -n "${2:-}" ]]; then
+                            timeout="$2"
+                            shift 2
+                        else
+                            echo "Error: --timeout requires an argument" >&2
+                            exit 2
+                        fi
+                        ;;
+                    --) shift; break ;;
+                    -*) echo "Unknown option: $1"; exit 2 ;;
+                    *) break ;;
+                esac
+            done
+            server_restart "$timeout"
             ;;
             
         status)
