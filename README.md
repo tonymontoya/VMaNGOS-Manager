@@ -254,18 +254,23 @@ VMANGOS-Manager/
 
 ### Manager Config File
 
-Optional config file at `/opt/mangos/manager/manager.conf`:
+Optional config file at `/opt/mangos/manager/config/manager.conf`:
 
 ```ini
 [database]
-host = localhost
+host = 127.0.0.1
 port = 3306
-manager_user = vmangos_mgr
+user = mangos
+password_file = /opt/mangos/manager/config/.dbpass
+auth_db = auth
+characters_db = characters
+world_db = world
+logs_db = logs
 
 [backup]
 enabled = true
 retention_days = 7
-path = /opt/mangos/backups
+backup_dir = /opt/mangos/backups
 ```
 
 ---

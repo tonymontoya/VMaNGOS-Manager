@@ -151,6 +151,21 @@ mktemp_secure() {
     echo "$temp_file"
 }
 
+get_file_permissions() {
+    local file_path="$1"
+    stat -c "%a" "$file_path" 2>/dev/null || stat -f "%OLp" "$file_path"
+}
+
+get_file_size_bytes() {
+    local file_path="$1"
+    stat -c "%s" "$file_path" 2>/dev/null || stat -f "%z" "$file_path"
+}
+
+sha256_file() {
+    local file_path="$1"
+    sha256sum "$file_path" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$file_path" | cut -d' ' -f1
+}
+
 # ============================================================================
 # JSON UTILITIES
 # ============================================================================

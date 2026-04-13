@@ -85,7 +85,7 @@ config_load() {
     fi
     
     local perms
-    perms=$(stat -c "%a" "$config_file" 2>/dev/null || echo "644")
+    perms=$(get_file_permissions "$config_file" 2>/dev/null || echo "644")
     if [[ "$perms" != "600" ]]; then
         log_warn "Config file permissions are $perms, should be 600"
     fi
@@ -125,6 +125,14 @@ config_load() {
 config_create() {
     local config_path="${1:-$CONFIG_FILE}"
     local password_file="${2:-}"
+    local default_db_host default_db_user default_auth_db default_characters_db default_world_db default_logs_db
+
+    default_db_host="${VMANGOS_DB_HOST:-127.0.0.1}"
+    default_db_user="${VMANGOS_DB_USER:-mangos}"
+    default_auth_db="${VMANGOS_AUTH_DB:-auth}"
+    default_characters_db="${VMANGOS_CHAR_DB:-characters}"
+    default_world_db="${VMANGOS_WORLD_DB:-world}"
+    default_logs_db="${VMANGOS_LOGS_DB:-logs}"
     
     log_info "Creating default config: $config_path"
     
@@ -146,31 +154,30 @@ config_create() {
 # Auto-generated on $(date -Iseconds)
 
 [database]
-host = 10.0.1.6
+host = $default_db_host
 port = 3306
-user = vmangos_mgr
+user = $default_db_user
 password_file = $password_file
 password = 
-auth_db = auth
-characters_db = characters
-world_db = mangos
+auth_db = $default_auth_db
+characters_db = $default_characters_db
+world_db = $default_world_db
+logs_db = $default_logs_db
 
 [server]
 auth_service = auth
 world_service = world
 install_root = /opt/mangos
-data_dir = /opt/mangos/data
-auth_port = 3724
-world_port = 8085
+console_enabled = false
 
 [backup]
 enabled = true
 backup_dir = /opt/mangos/backups
-retention_days = 30
+retention_days = 7
 
 [logging]
-log_file = /var/log/vmangos-manager.log
-log_level = info
+file = /var/log/vmangos-manager.log
+level = info
 EOF
 
     chmod 600 "$config_path"
@@ -207,7 +214,7 @@ config_validate() {
     fi
     
     local perms
-    perms=$(stat -c "%a" "$config_file" 2>/dev/null || echo "unknown")
+    perms=$(get_file_permissions "$config_file" 2>/dev/null || echo "unknown")
     if [[ "$perms" != "600" ]]; then
         warnings+=("Config file permissions are $perms (should be 600)")
     fi

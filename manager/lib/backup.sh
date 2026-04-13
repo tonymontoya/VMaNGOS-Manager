@@ -8,6 +8,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/server.sh"
 
 # ============================================================================
 # CONFIGURATION
@@ -17,6 +18,7 @@ export BACKUP_CONFIG_LOADED=""
 export BACKUP_DIR=""
 export BACKUP_RETENTION_DAYS=""
 export BACKUP_VERIFY_AFTER=""
+export MANAGER_BIN="${MANAGER_BIN:-}"
 
 export BACKUP_LOCK_FILE="/var/run/vmangos-manager/backup.lock"
 
@@ -52,24 +54,37 @@ backup_load_config() {
     BACKUP_RETENTION_DAYS="${CONFIG_BACKUP_RETENTION_DAYS:-30}"
     BACKUP_VERIFY_AFTER="${CONFIG_BACKUP_VERIFY_AFTER:-true}"
 
-    # Load database names from config
-    # Load server config first to get AUTH_DB
-    server_load_config || {
-        log_error "Failed to load server configuration"
-        return 1
-    }
-
-    # Load server config first to get AUTH_DB
     server_load_config || {
         log_error "Failed to load server configuration"
         return 1
     }
 
     BACKUP_DATABASES=("$AUTH_DB" "${CONFIG_DATABASE_CHARACTERS_DB:-characters}" "${CONFIG_DATABASE_WORLD_DB:-mangos}" "${CONFIG_DATABASE_LOGS_DB:-logs}")
+    MANAGER_BIN="$(backup_resolve_manager_bin)"
     
     BACKUP_CONFIG_LOADED="1"
     log_debug "Backup configuration loaded: dir=$BACKUP_DIR"
     return 0
+}
+
+backup_resolve_manager_bin() {
+    if [[ -n "${MANAGER_BIN:-}" ]]; then
+        printf '%s' "$MANAGER_BIN"
+        return 0
+    fi
+
+    local install_root="${INSTALL_ROOT:-${CONFIG_SERVER_INSTALL_ROOT:-/opt/mangos}}"
+    local configured_path="$install_root/manager/bin/vmangos-manager"
+    local repo_path
+    repo_path="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/vmangos-manager"
+
+    if [[ -x "$configured_path" ]]; then
+        printf '%s' "$configured_path"
+    elif [[ -x "$repo_path" ]]; then
+        printf '%s' "$repo_path"
+    else
+        printf '%s' "$configured_path"
+    fi
 }
 
 # ============================================================================
@@ -204,6 +219,70 @@ backup_generate_filename() {
     echo "vmangos_backup_${timestamp}"
 }
 
+backup_manager_version() {
+    local manager_bin_path
+    manager_bin_path="$(backup_resolve_manager_bin)"
+
+    if [[ -x "$manager_bin_path" ]]; then
+        "$manager_bin_path" --version 2>/dev/null | awk '{print $4}'
+    else
+        printf '%s' 'unknown'
+    fi
+}
+
+metadata_json_get() {
+    local metadata_file="$1"
+    local key="$2"
+
+    awk -v key="$key" '
+        {
+            if (match($0, "\"" key "\"[[:space:]]*:[[:space:]]*\"[^\"]*\"")) {
+                value = substr($0, RSTART, RLENGTH)
+                sub(/^[^:]*:[[:space:]]*"/, "", value)
+                sub(/"$/, "", value)
+                print value
+                exit
+            }
+            if (match($0, "\"" key "\"[[:space:]]*:[[:space:]]*[0-9]+")) {
+                value = substr($0, RSTART, RLENGTH)
+                sub(/^[^:]*:[[:space:]]*/, "", value)
+                print value
+                exit
+            }
+        }
+    ' "$metadata_file"
+}
+
+metadata_json_array_values() {
+    local metadata_file="$1"
+    local key="$2"
+
+    local line values
+    line=$(grep -m1 "\"$key\"" "$metadata_file" 2>/dev/null || true)
+    [[ -n "$line" ]] || return 0
+
+    values=$(printf '%s\n' "$line" | sed -E 's/^[^[]*\[//; s/\].*$//; s/"//g; s/[[:space:]]*,[[:space:]]*/\n/g')
+    if [[ -n "$values" ]]; then
+        printf '%s\n' "$values"
+    fi
+}
+
+metadata_json_array_join() {
+    local metadata_file="$1"
+    local key="$2"
+    local joined
+
+    joined=$(metadata_json_array_values "$metadata_file" "$key" | paste -sd ', ' -)
+    printf '%s' "$joined"
+}
+
+metadata_json_array_count() {
+    local metadata_file="$1"
+    local key="$2"
+
+    metadata_json_array_values "$metadata_file" "$key" | awk 'NF {count++} END {print count+0}'
+}
+
 backup_now() {
     local verify="${1:-false}"
     
@@ -261,13 +340,14 @@ backup_now() {
     fi
     
     local backup_size
-    backup_size=$(stat -c%s "$temp_backup")
+    backup_size=$(get_file_size_bytes "$temp_backup")
     log_info "Backup size: $backup_size bytes"
     
     # Generate metadata
     log_info "Generating metadata..."
-    local checksum timestamp
-    checksum=$(sha256sum "$temp_backup" | cut -d' ' -f1)
+    local checksum manager_version timestamp
+    checksum=$(sha256_file "$temp_backup")
+    manager_version=$(backup_manager_version)
     timestamp=$(date -Iseconds)
     
     # Create metadata JSON
@@ -280,7 +360,7 @@ backup_now() {
   "checksum_sha256": "$checksum",
   "databases": [$(printf '"%s",' "${BACKUP_DATABASES[@]}" | sed 's/,$//')],
   "vmangos_commit": "e7de79f3beb1eeed7fcdcf2f4d9c057d3db6f149",
-  "created_by": "vmangos-manager $(cd "$(dirname "$0")" && ./bin/vmangos-manager --version 2>/dev/null | awk '{print $3}')"
+    "created_by": "vmangos-manager $manager_version"
 }
 EOF
     
@@ -325,6 +405,9 @@ backup_verify() {
     local level="${2:-1}"
     
     log_section "Backup Verification (Level $level)"
+
+    backup_load_config || return 1
+    server_load_config || return 1
     
     # Validate backup file exists
     if [[ ! -f "$backup_file" ]]; then
@@ -336,8 +419,9 @@ backup_verify() {
     local metadata_file
     metadata_file="${backup_file%.sql.gz}.json"
     if [[ ! -f "$metadata_file" ]]; then
-        log_warn "Metadata file not found: $metadata_file"
-        metadata_file=""
+        log_error "Metadata file not found: $metadata_file"
+        json_output false "null" "VERIFY_INCOMPLETE" "Backup metadata file missing" "Backups must include sidecar metadata to verify"
+        return "$E_VERIFY_INCOMPLETE"
     fi
     
     # Level 1: Archive integrity + checksum
@@ -372,25 +456,27 @@ verify_level_1() {
     log_info "✓ Archive integrity OK"
     
     # Verify checksum if metadata exists
-    if [[ -n "$metadata_file" && -f "$metadata_file" ]]; then
-        log_info "Verifying checksum..."
-        
-        local stored_checksum actual_checksum
-        stored_checksum=$(jq -r '.checksum_sha256' "$metadata_file" 2>/dev/null)
-        actual_checksum=$(sha256sum "$backup_file" | cut -d' ' -f1)
-        
-        if [[ "$stored_checksum" != "$actual_checksum" ]]; then
-            log_error "Checksum mismatch"
-            log_error "  Stored:   $stored_checksum"
-            log_error "  Actual:   $actual_checksum"
-            json_output false "null" "VERIFY_CORRUPT" "Backup file checksum mismatch" "File may have been modified or corrupted"
-            return "$E_VERIFY_CORRUPT"
-        fi
-        
-        log_info "✓ Checksum verified"
-    else
-        log_warn "No metadata file, skipping checksum verification"
+    log_info "Verifying checksum..."
+
+    local stored_checksum actual_checksum
+    stored_checksum=$(metadata_json_get "$metadata_file" "checksum_sha256")
+    actual_checksum=$(sha256_file "$backup_file")
+
+    if [[ -z "$stored_checksum" ]]; then
+        log_error "Metadata checksum missing or malformed"
+        json_output false "null" "VERIFY_INCOMPLETE" "Backup metadata checksum missing" "Metadata must include checksum_sha256"
+        return "$E_VERIFY_INCOMPLETE"
     fi
+
+    if [[ "$stored_checksum" != "$actual_checksum" ]]; then
+        log_error "Checksum mismatch"
+        log_error "  Stored:   $stored_checksum"
+        log_error "  Actual:   $actual_checksum"
+        json_output false "null" "VERIFY_CORRUPT" "Backup file checksum mismatch" "File may have been modified or corrupted"
+        return "$E_VERIFY_CORRUPT"
+    fi
+
+    log_info "✓ Checksum verified"
     
     return 0
 }
@@ -410,9 +496,9 @@ verify_level_2() {
     fi
     
     # Check for SQL dump header indicators
-    if [[ ! "$header" =~ "MySQL dump" ]]; then
+    if [[ "$header" != *"MySQL dump"* && "$header" != *"MariaDB dump"* ]]; then
         log_error "SQL dump header not found"
-        json_output false "null" "VERIFY_INCOMPLETE" "Backup missing MySQL dump header" "File may not be a valid SQL dump"
+        json_output false "null" "VERIFY_INCOMPLETE" "Backup missing SQL dump header" "File may not be a valid SQL dump"
         return "$E_VERIFY_INCOMPLETE"
     fi
     
@@ -433,18 +519,23 @@ verify_level_2() {
         "${CONFIG_DATABASE_WORLD_DB:-world}.gameobject"
         "${CONFIG_DATABASE_WORLD_DB:-world}.item_template"
         "${CONFIG_DATABASE_WORLD_DB:-world}.quest_template"
-        "${CONFIG_DATABASE_LOGS_DB:-logs}.logs"
     )
     
     for table in "${required_tables[@]}"; do
-        local tbl_name
+        local db_name tbl_name
+        db_name="${table%%.*}"
         tbl_name="${table#*.}"
-        
-        # Look for CREATE TABLE statement
-        if ! gunzip -c "$backup_file" 2>/dev/null | grep -q "CREATE TABLE.*\`$tbl_name\`"; then
+
+        if ! backup_dump_has_table "$backup_file" "$db_name" "$tbl_name"; then
             missing_tables+=("$table")
         fi
     done
+
+    local logs_db_name
+    logs_db_name="${CONFIG_DATABASE_LOGS_DB:-logs}"
+    if ! backup_dump_has_any_table_in_db "$backup_file" "$logs_db_name"; then
+        missing_tables+=("$logs_db_name.<any table>")
+    fi
     
     if [[ ${#missing_tables[@]} -gt 0 ]]; then
         log_error "Missing required tables:"
@@ -457,6 +548,61 @@ verify_level_2() {
     
     log_info "✓ All required tables present"
     return 0
+}
+
+backup_dump_has_table() {
+    local backup_file="$1"
+    local target_db="$2"
+    local target_table="$3"
+
+    gunzip -c "$backup_file" 2>/dev/null | awk -v target_db="$target_db" -v target_table="$target_table" '
+        /^-- Current Database: `/ {
+            if (match($0, /`[^`]+`/)) {
+                current_db = substr($0, RSTART + 1, RLENGTH - 2)
+            }
+            next
+        }
+        /^USE `/ {
+            if (match($0, /`[^`]+`/)) {
+                current_db = substr($0, RSTART + 1, RLENGTH - 2)
+            }
+            next
+        }
+        current_db == target_db && $0 ~ "CREATE TABLE.*`" target_table "`" {
+            found = 1
+            next
+        }
+        END {
+            exit found ? 0 : 1
+        }
+    '
+}
+
+backup_dump_has_any_table_in_db() {
+    local backup_file="$1"
+    local target_db="$2"
+
+    gunzip -c "$backup_file" 2>/dev/null | awk -v target_db="$target_db" '
+        /^-- Current Database: `/ {
+            if (match($0, /`[^`]+`/)) {
+                current_db = substr($0, RSTART + 1, RLENGTH - 2)
+            }
+            next
+        }
+        /^USE `/ {
+            if (match($0, /`[^`]+`/)) {
+                current_db = substr($0, RSTART + 1, RLENGTH - 2)
+            }
+            next
+        }
+        current_db == target_db && /^CREATE TABLE `/ {
+            found = 1
+            next
+        }
+        END {
+            exit found ? 0 : 1
+        }
+    '
 }
 
 # ============================================================================
@@ -555,26 +701,8 @@ backup_restore() {
 
 backup_restore_full() {
     local backup_file="$1"
-    
-    # Check for root credentials
-    if [[ -z "${MYSQL_ROOT_PASSWORD:-}" ]]; then
-        log_error "Root database password not provided"
-        log_info "Set MYSQL_ROOT_PASSWORD environment variable"
-        return "$E_RESTORE_PRIVS"
-    fi
-    
-    # Create temporary MySQL options file (avoids password in process list)
     local mysql_defaults
-    mysql_defaults=$(mktemp -t vmangos_restore.XXXXXX)
-    chmod 600 "$mysql_defaults"
-    
-    cat > "$mysql_defaults" << EOF
-[client]
-host = $DB_HOST
-port = $DB_PORT
-user = root
-password = $MYSQL_ROOT_PASSWORD
-EOF
+    mysql_defaults=$(backup_restore_defaults_file) || return "$E_RESTORE_PRIVS"
     
     # Restore from backup using defaults file
     local restore_result=0
@@ -586,6 +714,38 @@ EOF
     rm -f "$mysql_defaults"
     
     return "$restore_result"
+}
+
+backup_restore_defaults_file() {
+    if [[ -n "${MYSQL_RESTORE_DEFAULTS_FILE:-}" ]]; then
+        if [[ ! -f "$MYSQL_RESTORE_DEFAULTS_FILE" ]]; then
+            log_error "Restore defaults file not found: $MYSQL_RESTORE_DEFAULTS_FILE"
+            return "$E_RESTORE_PRIVS"
+        fi
+
+        printf '%s' "$MYSQL_RESTORE_DEFAULTS_FILE"
+        return 0
+    fi
+
+    if [[ -z "${MYSQL_RESTORE_PASSWORD:-}" ]]; then
+        log_error "Privileged restore credentials not provided"
+        log_info "Set MYSQL_RESTORE_DEFAULTS_FILE or MYSQL_RESTORE_PASSWORD before running restore"
+        return "$E_RESTORE_PRIVS"
+    fi
+
+    local restore_user="${MYSQL_RESTORE_USER:-root}"
+    local mysql_defaults
+    mysql_defaults=$(mktemp_secure vmangos_restore.XXXXXX)
+
+    cat > "$mysql_defaults" << EOF
+[client]
+host = $DB_HOST
+port = $DB_PORT
+user = $restore_user
+password = $MYSQL_RESTORE_PASSWORD
+EOF
+
+    printf '%s' "$mysql_defaults"
 }
 
 backup_restore_dry_run() {
@@ -601,11 +761,17 @@ backup_restore_dry_run() {
     metadata_file="${backup_file%.sql.gz}.json"
     if [[ -f "$metadata_file" ]]; then
         echo "Backup metadata:"
-        jq < "$metadata_file" -r '
-            "  Created: \(.timestamp)",
-            "  Size: \(.size_bytes) bytes",
-            "  Databases: \(.databases | join(", "))"
-        ' 2>/dev/null || echo "  (metadata parse error)"
+        local created_at size_bytes databases
+        created_at=$(metadata_json_get "$metadata_file" "timestamp")
+        size_bytes=$(metadata_json_get "$metadata_file" "size_bytes")
+        databases=$(metadata_json_array_join "$metadata_file" "databases")
+        if [[ -n "$created_at" || -n "$size_bytes" || -n "$databases" ]]; then
+            [[ -n "$created_at" ]] && echo "  Created: $created_at"
+            [[ -n "$size_bytes" ]] && echo "  Size: $size_bytes bytes"
+            [[ -n "$databases" ]] && echo "  Databases: $databases"
+        else
+            echo "  (metadata parse error)"
+        fi
         echo ""
     fi
     
@@ -620,7 +786,8 @@ backup_restore_dry_run() {
     echo "  5. Start world service"
     echo ""
     echo "Requirements:"
-    echo "  - Root database credentials (not vmangos_mgr)"
+    echo "  - Explicit privileged database credentials"
+    echo "    Use MYSQL_RESTORE_DEFAULTS_FILE or MYSQL_RESTORE_PASSWORD"
     echo "  - Server downtime (users will be disconnected)"
     echo ""
     echo "Estimated downtime: 1-5 minutes depending on backup size"
@@ -694,6 +861,41 @@ schedule_parse_weekly() {
     return 0
 }
 
+backup_service_unit_content() {
+    local description="$1"
+    local manager_bin_path="$2"
+
+    cat << EOF
+[Unit]
+Description=$description
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=$manager_bin_path backup now --verify
+User=root
+StandardOutput=journal
+StandardError=journal
+EOF
+}
+
+backup_timer_unit_content() {
+    local description="$1"
+    local on_calendar="$2"
+
+    cat << EOF
+[Unit]
+Description=$description
+
+[Timer]
+OnCalendar=$on_calendar
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
 schedule_create_daily() {
     local time_str="$1"
     local hour minute
@@ -702,39 +904,20 @@ schedule_create_daily() {
     
     local timer_name="vmangos-backup-daily"
     local service_name="vmangos-backup"
+    local manager_bin_path
+    manager_bin_path="$(backup_resolve_manager_bin)"
     
     # Create systemd service file
     local service_file="/etc/systemd/system/${service_name}.service"
     log_info "Creating service: $service_file"
     
-    sudo tee "$service_file" > /dev/null << EOF
-[Unit]
-Description=VMANGOS Daily Backup
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart="$MANAGER_BIN" backup now --verify
-User=root
-StandardOutput=journal
-StandardError=journal
-EOF
+    backup_service_unit_content "VMANGOS Daily Backup" "$manager_bin_path" | sudo tee "$service_file" > /dev/null
     
     # Create systemd timer file (Ubuntu 22.04 format)
     local timer_file="/etc/systemd/system/${timer_name}.timer"
     log_info "Creating timer: $timer_file"
     
-    sudo tee "$timer_file" > /dev/null << EOF
-[Unit]
-Description=Run VMANGOS backup daily at $time_str
-
-[Timer]
-OnCalendar=*-*-* $hour:$minute:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
+    backup_timer_unit_content "Run VMANGOS backup daily at $time_str" "*-*-* $hour:$minute:00" | sudo tee "$timer_file" > /dev/null
     
     # Reload and enable
     log_info "Enabling timer..."
@@ -761,39 +944,20 @@ schedule_create_weekly() {
     
     local timer_name="vmangos-backup-weekly"
     local service_name="vmangos-backup"
+    local manager_bin_path
+    manager_bin_path="$(backup_resolve_manager_bin)"
     
     # Create systemd service file
     local service_file="/etc/systemd/system/${service_name}.service"
     log_info "Creating service: $service_file"
     
-    sudo tee "$service_file" > /dev/null << EOF
-[Unit]
-Description=VMANGOS Weekly Backup
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart="$MANAGER_BIN" backup now --verify
-User=root
-StandardOutput=journal
-StandardError=journal
-EOF
+    backup_service_unit_content "VMANGOS Weekly Backup" "$manager_bin_path" | sudo tee "$service_file" > /dev/null
     
     # Create systemd timer file (Ubuntu 22.04 format)
     local timer_file="/etc/systemd/system/${timer_name}.timer"
     log_info "Creating timer: $timer_file"
     
-    sudo tee "$timer_file" > /dev/null << EOF
-[Unit]
-Description=Run VMANGOS backup weekly on $day at $time
-
-[Timer]
-OnCalendar=$day *-*-* $hour:$minute:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
+    backup_timer_unit_content "Run VMANGOS backup weekly on $day at $time" "$day *-*-* $hour:$minute:00" | sudo tee "$timer_file" > /dev/null
     
     # Reload and enable
     log_info "Enabling timer..."
@@ -842,7 +1006,7 @@ backup_list() {
         for meta_file in "${metadata_files[@]}"; do
             [[ $first -eq 1 ]] || echo ","
             first=0
-            jq -c . "$meta_file" 2>/dev/null || echo "null"
+            tr -d '\n' < "$meta_file" || echo "null"
         done
         echo ""
         echo "]"
@@ -854,16 +1018,16 @@ backup_list() {
         
         for meta_file in "${metadata_files[@]}"; do
             local timestamp size_bytes file verified
-            timestamp=$(jq -r '.timestamp' "$meta_file" 2>/dev/null | cut -d'T' -f1)
-            size_bytes=$(jq -r '.size_bytes' "$meta_file" 2>/dev/null)
-            file=$(jq -r '.file' "$meta_file" 2>/dev/null)
+            timestamp=$(metadata_json_get "$meta_file" "timestamp" | cut -d'T' -f1)
+            size_bytes=$(metadata_json_get "$meta_file" "size_bytes")
+            file=$(metadata_json_get "$meta_file" "file")
             
             # Check if backup file exists and verify checksum
             local backup_file="$BACKUP_DIR/$file"
             if [[ -f "$backup_file" ]]; then
                 local stored_checksum actual_checksum
-                stored_checksum=$(jq -r '.checksum_sha256' "$meta_file" 2>/dev/null)
-                actual_checksum=$(sha256sum "$backup_file" 2>/dev/null | cut -d' ' -f1)
+                stored_checksum=$(metadata_json_get "$meta_file" "checksum_sha256")
+                actual_checksum=$(sha256_file "$backup_file")
                 if [[ "$stored_checksum" == "$actual_checksum" ]]; then
                     verified="✓"
                 else
@@ -907,8 +1071,8 @@ backup_clean() {
     local all_backups=()
     while IFS= read -r -d '' meta_file; do
         local timestamp basename
-        timestamp=$(jq -r '.timestamp' "$meta_file" 2>/dev/null)
-        basename=$(jq -r '.basename' "$meta_file" 2>/dev/null)
+        timestamp=$(metadata_json_get "$meta_file" "timestamp")
+        basename=$(metadata_json_get "$meta_file" "basename")
         if [[ -n "$timestamp" && -n "$basename" ]]; then
             all_backups+=("$timestamp|$basename|$meta_file")
         fi
@@ -979,83 +1143,5 @@ backup_clean() {
     
     log_info "✓ Cleanup complete: deleted $deleted backups"
     return 0
-}
-backup_list() {
-    local format="${1:-text}"
-    
-    log_section "Backup List"
-    
-    backup_load_config || return 1
-    
-    if [[ ! -d "$BACKUP_DIR" ]]; then
-        log_error "Backup directory not found: $BACKUP_DIR"
-        return 1
-    fi
-    
-    # Find all backup metadata files
-    local metadata_files=()
-    while IFS= read -r -d '' file; do
-        metadata_files+=("$file")
-    done < <(find "$BACKUP_DIR" -maxdepth 1 -name "*.json" -type f -print0 2>/dev/null | sort -z)
-    
-    if [[ ${#metadata_files[@]} -eq 0 ]]; then
-        log_info "No backups found in $BACKUP_DIR"
-        return 0
-    fi
-    
-    if [[ "$format" == "json" ]]; then
-        # Output JSON array
-        echo "["
-        local first=1
-        for meta_file in "${metadata_files[@]}"; do
-            [[ $first -eq 1 ]] || echo ","
-            first=0
-            jq -c . "$meta_file" 2>/dev/null || echo "null"
-        done
-        echo ""
-        echo "]"
-    else
-        # Output text table
-        echo ""
-        printf "%-20s %-12s %-10s %s\n" "Timestamp" "Size" "Verified" "File"
-        printf "%-20s %-12s %-10s %s\n" "--------------------" "------------" "----------" "----"
-        
-        for meta_file in "${metadata_files[@]}"; do
-            local timestamp size_bytes file verified
-            timestamp=$(jq -r '.timestamp' "$meta_file" 2>/dev/null | cut -d'T' -f1)
-            size_bytes=$(jq -r '.size_bytes' "$meta_file" 2>/dev/null)
-            file=$(jq -r '.file' "$meta_file" 2>/dev/null)
-            
-            # Check if backup file exists and verify checksum
-            local backup_file="$BACKUP_DIR/$file"
-            if [[ -f "$backup_file" ]]; then
-                local stored_checksum actual_checksum
-                stored_checksum=$(jq -r '.checksum_sha256' "$meta_file" 2>/dev/null)
-                actual_checksum=$(sha256sum "$backup_file" 2>/dev/null | cut -d' ' -f1)
-                if [[ "$stored_checksum" == "$actual_checksum" ]]; then
-                    verified="✓"
-                else
-                    verified="✗"
-                fi
-            else
-                verified="MISSING"
-            fi
-            
-            # Format size
-            local size_str
-            if [[ "$size_bytes" -gt 1073741824 ]]; then
-                size_str=$(echo "scale=1; $size_bytes/1073741824" | bc)G
-            elif [[ "$size_bytes" -gt 1048576 ]]; then
-                size_str=$(echo "scale=1; $size_bytes/1048576" | bc)M
-            elif [[ "$size_bytes" -gt 1024 ]]; then
-                size_str=$(echo "scale=1; $size_bytes/1024" | bc)K
-            else
-                size_str="${size_bytes}B"
-            fi
-            
-            printf "%-20s %-12s %-10s %s\n" "$timestamp" "$size_str" "$verified" "$file"
-        done
-        echo ""
-    fi
 }
 
