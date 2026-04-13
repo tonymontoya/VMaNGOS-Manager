@@ -482,7 +482,7 @@ phase_prerequisites() {
     apt-get update
     apt-get install -y build-essential cmake git libmariadb-dev libssl-dev \
         libbz2-dev libreadline-dev libncurses-dev libboost-all-dev \
-        p7zip-full wget zlib1g-dev
+        p7zip-full sysstat wget zlib1g-dev
     
     set_checkpoint "PREREQS_DONE"
 }
