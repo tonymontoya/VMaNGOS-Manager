@@ -43,6 +43,7 @@ GLOBAL OPTIONS:
 COMMANDS:
     server [start|stop|restart|status] [OPTIONS]
     config [create|validate|show] [OPTIONS]
+    backup [now|list|verify|restore|clean|schedule] [OPTIONS]
 EOF
 }
 
@@ -112,6 +113,8 @@ source "$LIB_DIR/common.sh"
 source "$LIB_DIR/config.sh"
 # shellcheck source=lib/server.sh
 source "$LIB_DIR/server.sh"
+# shellcheck source=lib/backup.sh
+source "$LIB_DIR/backup.sh"
 
 # Export globals for library use
 export VERBOSE
@@ -237,6 +240,131 @@ cmd_config() {
 }
 
 # ============================================================================
+# BACKUP COMMAND HANDLER
+# ============================================================================
+
+cmd_backup() {
+    local subcmd="${1:-}"
+    shift || true
+    
+    case "$subcmd" in
+        now)
+            local verify=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --verify) verify=true; shift ;;
+                    --) shift; break ;;
+                    -*) echo "Unknown option: $1"; exit 2 ;;
+                    *) break ;;
+                esac
+            done
+            backup_now "$verify"
+            ;;
+            
+        list)
+            local fmt="text"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --format) fmt="$2"; shift 2 ;;
+                    --) shift; break ;;
+                    -*) echo "Unknown option: $1"; exit 2 ;;
+                    *) break ;;
+                esac
+            done
+            backup_list "$fmt"
+            ;;
+            
+        verify)
+            local file=""
+            local level=1
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --level) level="$2"; shift 2 ;;
+                    --) shift; break ;;
+                    -*) echo "Unknown option: $1"; exit 2 ;;
+                    *) 
+                        if [[ -z "$file" ]]; then
+                            file="$1"
+                            shift
+                        else
+                            break
+                        fi
+                        ;;
+                esac
+            done
+            if [[ -z "$file" ]]; then
+                echo "Error: backup file required" >&2
+                exit 2
+            fi
+            backup_verify "$file" "$level"
+            ;;
+            
+        restore)
+            local file=""
+            local dry_run=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --dry-run) dry_run=true; shift ;;
+                    --) shift; break ;;
+                    -*) echo "Unknown option: $1"; exit 2 ;;
+                    *)
+                        if [[ -z "$file" ]]; then
+                            file="$1"
+                            shift
+                        else
+                            break
+                        fi
+                        ;;
+                esac
+            done
+            if [[ -z "$file" ]]; then
+                echo "Error: backup file required" >&2
+                exit 2
+            fi
+            backup_restore "$file" "$dry_run"
+            ;;
+            
+        clean)
+            local keep_last=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --keep-last) keep_last="$2"; shift 2 ;;
+                    --) shift; break ;;
+                    -*) echo "Unknown option: $1"; exit 2 ;;
+                    *) break ;;
+                esac
+            done
+            backup_clean "$keep_last"
+            ;;
+            
+        schedule)
+            local schedule_type=""
+            local schedule_value=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --daily) schedule_type="daily"; schedule_value="$2"; shift 2 ;;
+                    --weekly) schedule_type="weekly"; schedule_value="$2"; shift 2 ;;
+                    --) shift; break ;;
+                    -*) echo "Unknown option: $1"; exit 2 ;;
+                    *) break ;;
+                esac
+            done
+            if [[ -z "$schedule_type" ]]; then
+                echo "Error: --daily or --weekly required" >&2
+                exit 2
+            fi
+            backup_schedule "$schedule_type" "$schedule_value"
+            ;;
+            
+        *)
+            echo "Error: Unknown backup subcommand: $subcmd" >&2
+            echo "Valid subcommands: now, list, verify, restore, clean, schedule" >&2
+            exit 2
+            ;;
+    esac
+}
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -258,6 +386,9 @@ main() {
             ;;
         config)
             cmd_config "$@"
+            ;;
+        backup)
+            cmd_backup "$@"
             ;;
         help|--help|-h)
             show_help

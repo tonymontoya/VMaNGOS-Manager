@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# shellcheck source=lib/common.sh
 #
 # Test runner for VMANGOS Manager
 #
@@ -72,7 +71,10 @@ run_test() {
     return $result
 }
 
-# Test suites
+# ============================================================================
+# ORIGINAL TESTS
+# ============================================================================
+
 test_common_json() {
     source "$LIB_DIR/common.sh"
     SKIP_ROOT_INIT=1
@@ -129,6 +131,112 @@ test_cli_parsing() {
     return $all_passed
 }
 
+# ============================================================================
+# BACKUP TESTS
+# ============================================================================
+
+test_backup_metadata_generation() {
+    source "$LIB_DIR/backup.sh"
+    SKIP_ROOT_INIT=1
+    
+    local all_passed=0
+    local temp_dir; temp_dir=$(mktemp -d)
+    
+    # Create mock metadata
+    local metadata_file="$temp_dir/test_backup.json"
+    cat > "$metadata_file" << 'JSONEOF'
+{
+  "timestamp": "2026-04-13T10:00:00+00:00",
+  "file": "vmangos_backup_20260413_100000.sql.gz",
+  "basename": "vmangos_backup_20260413_100000",
+  "size_bytes": 104857600,
+  "checksum_sha256": "aabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd",
+  "databases": ["auth","characters","world","logs"]
+}
+JSONEOF
+
+    # Test metadata structure
+    local timestamp
+    timestamp=$(jq -r '.timestamp' "$metadata_file")
+    assert_equals "2026-04-13T10:00:00+00:00" "$timestamp" "metadata: timestamp field"
+    
+    local size
+    size=$(jq -r '.size_bytes' "$metadata_file")
+    assert_equals "104857600" "$size" "metadata: size_bytes field"
+    
+    local db_count
+    db_count=$(jq -r '.databases | length' "$metadata_file")
+    assert_equals "4" "$db_count" "metadata: databases count"
+    
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
+test_backup_schedule_parsing() {
+    source "$LIB_DIR/backup.sh"
+    SKIP_ROOT_INIT=1
+    
+    local all_passed=0
+    
+    # Test valid daily format
+    if schedule_parse_daily "04:00" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} schedule_parse_daily accepts valid 04:00"
+    else
+        echo -e "${RED}✗${NC} schedule_parse_daily rejected valid 04:00"
+        all_passed=1
+    fi
+    
+    # Test invalid daily format
+    if ! schedule_parse_daily "25:00" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} schedule_parse_daily rejects invalid 25:00"
+    else
+        echo -e "${RED}✗${NC} schedule_parse_daily accepted invalid 25:00"
+        all_passed=1
+    fi
+    
+    # Test valid weekly format
+    if schedule_parse_weekly "Sun 04:00" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} schedule_parse_weekly accepts valid 'Sun 04:00'"
+    else
+        echo -e "${RED}✗${NC} schedule_parse_weekly rejected valid 'Sun 04:00'"
+        all_passed=1
+    fi
+    
+    # Test invalid day
+    if ! schedule_parse_weekly "Someday 04:00" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} schedule_parse_weekly rejects invalid day"
+    else
+        echo -e "${RED}✗${NC} schedule_parse_weekly accepted invalid day"
+        all_passed=1
+    fi
+    
+    return $all_passed
+}
+
+test_backup_filename_generation() {
+    source "$LIB_DIR/backup.sh"
+    SKIP_ROOT_INIT=1
+    
+    local all_passed=0
+    
+    local filename
+    filename=$(backup_generate_filename)
+    
+    # Check format: vmangos_backup_YYYYMMDD_HHMMSS
+    if [[ "$filename" =~ ^vmangos_backup_[0-9]{8}_[0-9]{6}$ ]]; then
+        echo -e "${GREEN}✓${NC} backup_generate_filename produces valid format"
+    else
+        echo -e "${RED}✗${NC} backup_generate_filename invalid format: $filename"
+        all_passed=1
+    fi
+    
+    return $all_passed
+}
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
 main() {
     echo "========================================"
     echo "VMANGOS Manager Test Suite"
@@ -138,6 +246,9 @@ main() {
     run_test "Config: Loading" test_config_loading
     run_test "Config: Creation" test_config_create
     run_test "CLI: Parsing" test_cli_parsing
+    run_test "Backup: Metadata generation" test_backup_metadata_generation
+    run_test "Backup: Schedule parsing" test_backup_schedule_parsing
+    run_test "Backup: Filename generation" test_backup_filename_generation
     
     echo ""
     echo "========================================"

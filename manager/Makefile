@@ -1,7 +1,7 @@
 .PHONY: all test lint install clean help
 
 # Shell scripts to lint
-SCRIPTS := bin/vmangos-manager lib/common.sh lib/config.sh lib/server.sh
+SCRIPTS := bin/vmangos-manager lib/common.sh lib/config.sh lib/server.sh lib/backup.sh
 
 # Default target
 all: lint test
