@@ -737,6 +737,53 @@ test_update_check_json_output() {
     return $all_passed
 }
 
+test_update_check_prefers_configured_source_repo() {
+    # shellcheck source=../lib/update.sh
+    source "$LIB_DIR/update.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local output
+
+    OUTPUT_FORMAT="text"
+    config_load() {
+        CONFIG_SERVER_INSTALL_ROOT="/opt/mangos"
+        return 0
+    }
+    config_resolve_manager_root() { printf '/opt/mangos/manager\n'; }
+    update_find_repo_root() {
+        echo "manager fallback should not be used" >&2
+        return 1
+    }
+    update_git() {
+        local args="$*"
+        case "$args" in
+            *"/opt/mangos/source rev-parse --show-toplevel"*) printf '/opt/mangos/source\n' ;;
+            *"/opt/mangos/source rev-parse --abbrev-ref --symbolic-full-name @{upstream}"*) printf 'origin/development\n' ;;
+            *"/opt/mangos/source rev-parse --abbrev-ref HEAD"*) printf 'development\n' ;;
+            *"/opt/mangos/source fetch --quiet origin"*) return 0 ;;
+            *"/opt/mangos/source rev-parse origin/development^{commit}"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"/opt/mangos/source rev-parse HEAD"*) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+            *"/opt/mangos/source rev-parse origin/development"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"/opt/mangos/source rev-list --count HEAD..origin/development"*) printf '1\n' ;;
+            *"/opt/mangos/source rev-list --count origin/development..HEAD"*) printf '0\n' ;;
+            *"/opt/mangos/source status --porcelain"*) return 0 ;;
+            *)
+                echo "unexpected git args: $args" >&2
+                return 1
+                ;;
+        esac
+    }
+
+    output=$(update_check)
+    assert_true "[[ \$output == *'VMANGOS Core Update Check'* ]]" "update_check uses configured source repo when available" || all_passed=1
+    assert_true "[[ \$output == *'Source repo: /opt/mangos/source'* ]]" "update_check source mode reports source repo" || all_passed=1
+    assert_true "[[ \$output == *'vmangos-manager update plan'* ]]" "update_check source mode points to update plan" || all_passed=1
+
+    OUTPUT_FORMAT="text"
+    return $all_passed
+}
+
 test_update_check_requires_git_repo() {
     # shellcheck source=../lib/update.sh
     source "$LIB_DIR/update.sh"
@@ -752,6 +799,211 @@ test_update_check_requires_git_repo() {
     assert_true "[[ \$output == *'\"code\":\"NOT_A_GIT_REPO\"'* ]]" "update_check errors cleanly when no git repo is available" || all_passed=1
     assert_true "[[ \$output == *'VMANGOS_MANAGER_REPO'* ]]" "update_check error suggests explicit repo path" || all_passed=1
 
+    OUTPUT_FORMAT="text"
+    return $all_passed
+}
+
+test_update_plan_text_output() {
+    # shellcheck source=../lib/update.sh
+    source "$LIB_DIR/update.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local output
+
+    OUTPUT_FORMAT="text"
+    config_load() {
+        CONFIG_SERVER_INSTALL_ROOT="/srv/mangos"
+        return 0
+    }
+    config_resolve_manager_root() { printf '/srv/mangos/manager\n'; }
+    update_git() {
+        local args="$*"
+        case "$args" in
+            *"/srv/mangos/source rev-parse --show-toplevel"*) printf '/srv/mangos/source\n' ;;
+            *"/srv/mangos/source rev-parse --abbrev-ref --symbolic-full-name @{upstream}"*) printf 'origin/development\n' ;;
+            *"/srv/mangos/source rev-parse --abbrev-ref HEAD"*) printf 'development\n' ;;
+            *"/srv/mangos/source fetch --quiet origin"*) return 0 ;;
+            *"/srv/mangos/source rev-parse origin/development^{commit}"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"/srv/mangos/source rev-parse HEAD"*) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+            *"/srv/mangos/source rev-parse origin/development"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"/srv/mangos/source rev-list --count HEAD..origin/development"*) printf '4\n' ;;
+            *"/srv/mangos/source rev-list --count origin/development..HEAD"*) printf '0\n' ;;
+            *"/srv/mangos/source status --porcelain"*) return 0 ;;
+            *)
+                echo "unexpected git args: $args" >&2
+                return 1
+                ;;
+        esac
+    }
+    update_nproc() { printf '6\n'; }
+
+    output=$(update_plan)
+    assert_true "[[ \$output == *'VMANGOS Core Update Plan'* ]]" "update_plan text prints header" || all_passed=1
+    assert_true "[[ \$output == *'Source repo: /srv/mangos/source'* ]]" "update_plan text shows source repo" || all_passed=1
+    assert_true "[[ \$output == *'Tracking: origin/development'* ]]" "update_plan text shows tracking ref" || all_passed=1
+    assert_true "[[ \$output == *'Commits behind: 4'* ]]" "update_plan text reports behind count" || all_passed=1
+    assert_true "[[ \$output == *'vmangos-manager backup now --verify'* ]]" "update_plan text includes backup-first step" || all_passed=1
+    assert_true "[[ \$output == *'cmake -S /srv/mangos/source -B /srv/mangos/build'* ]]" "update_plan text includes cmake step" || all_passed=1
+
+    OUTPUT_FORMAT="text"
+    return $all_passed
+}
+
+test_update_plan_json_output() {
+    # shellcheck source=../lib/update.sh
+    source "$LIB_DIR/update.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local output compact_output
+
+    OUTPUT_FORMAT="json"
+    config_load() {
+        CONFIG_SERVER_INSTALL_ROOT="/opt/mangos"
+        return 0
+    }
+    config_resolve_manager_root() { printf '/opt/mangos/manager\n'; }
+    update_git() {
+        local args="$*"
+        case "$args" in
+            *"/opt/mangos/source rev-parse --show-toplevel"*) printf '/opt/mangos/source\n' ;;
+            *"/opt/mangos/source rev-parse --abbrev-ref --symbolic-full-name @{upstream}"*) printf 'origin/development\n' ;;
+            *"/opt/mangos/source rev-parse --abbrev-ref HEAD"*) printf 'development\n' ;;
+            *"/opt/mangos/source fetch --quiet origin"*) return 0 ;;
+            *"/opt/mangos/source rev-parse origin/development^{commit}"*) printf 'dddddddddddddddddddddddddddddddddddddddd\n' ;;
+            *"/opt/mangos/source rev-parse HEAD"*) printf 'cccccccccccccccccccccccccccccccccccccccc\n' ;;
+            *"/opt/mangos/source rev-parse origin/development"*) printf 'dddddddddddddddddddddddddddddddddddddddd\n' ;;
+            *"/opt/mangos/source rev-list --count HEAD..origin/development"*) printf '0\n' ;;
+            *"/opt/mangos/source rev-list --count origin/development..HEAD"*) printf '1\n' ;;
+            *"/opt/mangos/source status --porcelain"*) printf ' M src/game/Main.cpp\n' ;;
+            *)
+                echo "unexpected git args: $args" >&2
+                return 1
+                ;;
+        esac
+    }
+    update_nproc() { printf '8\n'; }
+
+    output=$(update_plan)
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+    assert_true "[[ \$compact_output == *'\"success\":true'* ]]" "update_plan json reports success" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"source_repo\":\"/opt/mangos/source\"'* ]]" "update_plan json includes source repo" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"commits_ahead\":1'* ]]" "update_plan json reports ahead count" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"worktree_dirty\":true'* ]]" "update_plan json reports dirty state" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"backup_required\":true'* ]]" "update_plan json requires backup" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"steps\":[\"vmangos-managerbackupnow--verify\"'* ]]" "update_plan json includes steps" || all_passed=1
+
+    OUTPUT_FORMAT="text"
+    return $all_passed
+}
+
+test_update_apply_runs_backup_and_rebuild_workflow() {
+    # shellcheck source=../lib/update.sh
+    source "$LIB_DIR/update.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local output call_log_file pulled=0
+    call_log_file=$(mktemp)
+
+    OUTPUT_FORMAT="text"
+    check_root() { :; }
+    config_load() {
+        CONFIG_SERVER_INSTALL_ROOT="/opt/mangos"
+        return 0
+    }
+    config_resolve_manager_root() { printf '/opt/mangos/manager\n'; }
+    acquire_lock() { printf 'lock|\n' >> "$call_log_file"; }
+    release_lock() { printf 'unlock|\n' >> "$call_log_file"; }
+    backup_now() { printf 'backup|\n' >> "$call_log_file"; }
+    server_stop() { printf 'stop|\n' >> "$call_log_file"; }
+    server_start() { printf 'start|\n' >> "$call_log_file"; }
+    update_run_cmake() { printf 'cmake|\n' >> "$call_log_file"; }
+    update_run_make_build() { printf 'makebuild|\n' >> "$call_log_file"; }
+    update_run_make_install() { printf 'makeinstall|\n' >> "$call_log_file"; }
+    update_post_apply_verify() { printf 'verify|\n' >> "$call_log_file"; }
+    server_status() { printf 'status|\n' >> "$call_log_file"; }
+    update_nproc() { printf '4\n'; }
+    update_git() {
+        local args="$*"
+        case "$args" in
+            *"/opt/mangos/source rev-parse --show-toplevel"*) printf '/opt/mangos/source\n' ;;
+            *"/opt/mangos/source rev-parse --abbrev-ref --symbolic-full-name @{upstream}"*) printf 'origin/development\n' ;;
+            *"/opt/mangos/source rev-parse --abbrev-ref HEAD"*) printf 'development\n' ;;
+            *"/opt/mangos/source fetch --quiet origin"*) return 0 ;;
+            *"/opt/mangos/source rev-parse origin/development^{commit}"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"/opt/mangos/source rev-parse origin/development"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"/opt/mangos/source rev-list --count HEAD..origin/development"*) printf '2\n' ;;
+            *"/opt/mangos/source rev-list --count origin/development..HEAD"*) printf '0\n' ;;
+            *"/opt/mangos/source status --porcelain"*) return 0 ;;
+            *"/opt/mangos/source pull --ff-only origin development"*) pulled=1; printf 'pull|\n' >> "$call_log_file"; return 0 ;;
+            *"/opt/mangos/source rev-parse HEAD"*)
+                if [[ "$pulled" -eq 1 ]]; then
+                    printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
+                else
+                    printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+                fi
+                ;;
+            *)
+                echo "unexpected git args: $args" >&2
+                return 1
+                ;;
+        esac
+    }
+
+    output=$(update_apply true)
+    assert_true "[[ \$(tr -d '\\n' < \"$call_log_file\") == 'backup|lock|stop|pull|cmake|makebuild|makeinstall|start|verify|unlock|status|' ]]" "update_apply runs backup/build/install workflow in order" || all_passed=1
+    assert_true "[[ \$output == *'Applying VMANGOS Core Update'* ]]" "update_apply prints section header" || all_passed=1
+    assert_true "[[ \$output == *'✓ Update applied successfully'* ]]" "update_apply reports success" || all_passed=1
+
+    rm -f "$call_log_file"
+    OUTPUT_FORMAT="text"
+    return $all_passed
+}
+
+test_update_apply_rejects_dirty_source_tree() {
+    # shellcheck source=../lib/update.sh
+    source "$LIB_DIR/update.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local output call_log_file
+    call_log_file=$(mktemp)
+
+    OUTPUT_FORMAT="text"
+    check_root() { :; }
+    config_load() {
+        CONFIG_SERVER_INSTALL_ROOT="/opt/mangos"
+        return 0
+    }
+    config_resolve_manager_root() { printf '/opt/mangos/manager\n'; }
+    backup_now() { printf 'backup|\n' >> "$call_log_file"; }
+    update_git() {
+        local args="$*"
+        case "$args" in
+            *"/opt/mangos/source rev-parse --show-toplevel"*) printf '/opt/mangos/source\n' ;;
+            *"/opt/mangos/source rev-parse --abbrev-ref --symbolic-full-name @{upstream}"*) printf 'origin/development\n' ;;
+            *"/opt/mangos/source rev-parse --abbrev-ref HEAD"*) printf 'development\n' ;;
+            *"/opt/mangos/source fetch --quiet origin"*) return 0 ;;
+            *"/opt/mangos/source rev-parse origin/development^{commit}"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"/opt/mangos/source rev-parse HEAD"*) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+            *"/opt/mangos/source rev-parse origin/development"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"/opt/mangos/source rev-list --count HEAD..origin/development"*) printf '1\n' ;;
+            *"/opt/mangos/source rev-list --count origin/development..HEAD"*) printf '0\n' ;;
+            *"/opt/mangos/source status --porcelain"*) printf ' M src/game/Main.cpp\n' ;;
+            *)
+                echo "unexpected git args: $args" >&2
+                return 1
+                ;;
+        esac
+    }
+
+    output=$(update_apply true 2>&1 || true)
+    assert_true "[[ \$output == *'Refusing to apply update with local uncommitted changes'* ]]" "update_apply rejects dirty source tree" || all_passed=1
+    assert_true "[[ ! -s \"$call_log_file\" ]]" "update_apply does not start backup when source tree is dirty" || all_passed=1
+
+    rm -f "$call_log_file"
     OUTPUT_FORMAT="text"
     return $all_passed
 }
@@ -1384,7 +1636,12 @@ main() {
     run_test "CLI: Account rejects positional password" test_cli_account_rejects_positional_password
     run_test "Update: Text output" test_update_check_text_output
     run_test "Update: JSON output" test_update_check_json_output
+    run_test "Update: Source repo preferred" test_update_check_prefers_configured_source_repo
     run_test "Update: Missing repo" test_update_check_requires_git_repo
+    run_test "Update: Plan text output" test_update_plan_text_output
+    run_test "Update: Plan JSON output" test_update_plan_json_output
+    run_test "Update: Apply workflow" test_update_apply_runs_backup_and_rebuild_workflow
+    run_test "Update: Apply rejects dirty tree" test_update_apply_rejects_dirty_source_tree
     run_test "Packaging: Install and uninstall" test_make_install_and_uninstall_targets
     run_test "Server: Player count fallback" test_server_player_count_fallback
     run_test "Server: Interval validation" test_server_validate_interval

@@ -44,7 +44,7 @@ COMMANDS:
     server [start|stop|restart|status] [OPTIONS]
       status options: [--format text|json] [--watch] [--interval SECONDS]
     account [create|list|setgm|ban|unban|password] [OPTIONS]
-    update [check] [OPTIONS]
+    update [check|plan|apply] [OPTIONS]
     config [create|validate|show] [OPTIONS]
     backup [now|list|verify|restore|clean|schedule] [OPTIONS]
 EOF
@@ -531,9 +531,54 @@ cmd_update() {
             update_check
             ;;
 
+        plan)
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --)
+                        shift
+                        break
+                        ;;
+                    -*)
+                        echo "Unknown option: $1" >&2
+                        exit 2
+                        ;;
+                    *)
+                        echo "Error: update plan does not accept positional arguments" >&2
+                        exit 2
+                        ;;
+                esac
+            done
+            update_plan
+            ;;
+
+        apply)
+            local backup_first=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --backup-first)
+                        backup_first=true
+                        shift
+                        ;;
+                    --)
+                        shift
+                        break
+                        ;;
+                    -*)
+                        echo "Unknown option: $1" >&2
+                        exit 2
+                        ;;
+                    *)
+                        echo "Error: update apply does not accept positional arguments" >&2
+                        exit 2
+                        ;;
+                esac
+            done
+            update_apply "$backup_first"
+            ;;
+
         *)
             echo "Error: Unknown update subcommand: $subcmd" >&2
-            echo "Valid subcommands: check" >&2
+            echo "Valid subcommands: check, plan, apply" >&2
             exit 2
             ;;
     esac

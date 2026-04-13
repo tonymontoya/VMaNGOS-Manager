@@ -105,20 +105,24 @@ vmangos-manager config show [--format text|json]
 ```bash
 vmangos-manager update check
 vmangos-manager --format json update check
+vmangos-manager update plan
+vmangos-manager update apply --backup-first
 ```
 
 Behavior:
 
-- runs `git fetch` against the tracked remote
-- compares local `HEAD` to the tracked remote ref
-- reports `commits_behind`
-- prints manual non-atomic update steps
+- `update check` prefers the configured VMANGOS core source tree under `<install_root>/source`
+- if no installed source tree is available, `update check` falls back to the current `VMANGOS-Manager` checkout
+- `update plan` prints the non-atomic update steps for the configured VMANGOS core tree
+- `update apply` performs the non-atomic core update workflow in place
 
 Important:
 
-- the installed copy under `/opt/mangos/manager` is not a git checkout
-- run update checks from a source checkout, or set `VMANGOS_MANAGER_REPO=/path/to/VMANGOS-Manager`
-- update application workflow is intentionally manual in Release A
+- `update apply` is non-atomic and does not promise rollback
+- `update apply` requires either `--backup-first` or explicit confirmation that a verified backup already exists
+- `update apply` rejects dirty or divergent VMANGOS source trees
+- `update apply` does not support JSON output
+- if no installed source tree is available, run Manager checkout comparisons from a source checkout or set `VMANGOS_MANAGER_REPO=/path/to/VMANGOS-Manager`
 
 ## Common Workflows
 

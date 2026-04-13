@@ -158,9 +158,13 @@ vmangos-manager account password <username> [--password-file PATH|--password-env
 ```bash
 vmangos-manager update check
 vmangos-manager --format json update check
+vmangos-manager update plan
+vmangos-manager update apply --backup-first
 ```
 
-`update check` is read-only. It runs `git fetch`, compares the current checkout to its tracked remote ref, reports `commits_behind`, and prints manual non-atomic update steps. The installed bundled copy under `/opt/mangos/manager` is not itself a git checkout, so run update checks from a source checkout or set `VMANGOS_MANAGER_REPO`.
+`update check` is read-only. On an installed host with a configured VMANGOS core checkout under `<install_root>/source`, it inspects that source tree and reports whether the core is behind its tracked remote. If no installed source tree is available, it falls back to the Release A Manager-checkout behavior and compares the current `VMANGOS-Manager` git checkout to its tracked remote ref.
+
+`update plan` and `update apply` operate on the configured VMANGOS core tree under `<install_root>/source`. The workflow is intentionally non-atomic: it stops services, fast-forwards the existing source tree, rebuilds in the existing build directory, reinstalls into the existing run directory, and starts services again. `update apply` rejects dirty or divergent source trees and requires either `--backup-first` or explicit confirmation that a verified backup already exists. `update apply` is text-only; `update check` and `update plan` support JSON output.
 
 #### Config
 
