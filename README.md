@@ -114,6 +114,10 @@ sudo /opt/mangos/manager/bin/vmangos-manager server status
 # Watch status
 sudo /opt/mangos/manager/bin/vmangos-manager server status --watch --interval 2
 
+# Bootstrap the dashboard environment once, then launch it
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
+
 # Create an account without exposing the password on the command line
 sudo VMANGOS_PASSWORD='ChangeMe7' /opt/mangos/manager/bin/vmangos-manager account create TESTUSER --password-env
 
@@ -140,9 +144,12 @@ vmangos-manager server start [--wait] [--timeout SECONDS]
 vmangos-manager server stop [--graceful|--force] [--timeout SECONDS]
 vmangos-manager server restart [--timeout SECONDS]
 vmangos-manager server status [--format text|json] [--watch] [--interval SECONDS]
+vmangos-manager dashboard [--refresh SECONDS] [--theme dark|light] [--bootstrap]
 ```
 
 `server start --wait` now performs bounded post-start verification for auth/world service activity, DB connectivity, and recent crash-loop signals. `server stop` respects a configurable graceful timeout before failing or escalating with `--force`. `server status` and `server status --watch` surface per-service health plus restart counts from recent `systemd` history.
+
+`dashboard` reuses the existing manager JSON surfaces for server, logs, and online-player data. Run `dashboard --bootstrap` once on a fresh install to create the dashboard virtual environment and install Textual.
 
 #### Account
 
@@ -406,10 +413,10 @@ See `SECURITY.md` for Release A password handling, audit logging, DB access expe
 - ✅ Auto-handling of client data permissions and path structure
 
 ### Release B
-- 🔄 Non-atomic update assistant
-- 🔄 Maintenance scheduler
-- 🔄 Enhanced server control safety interlocks
-- 🔄 Log rotation
+- ✅ Non-atomic update assistant
+- ✅ Maintenance scheduler
+- ✅ Enhanced server control safety interlocks
+- ✅ Log rotation
 
 ### Release C
 - 🔄 Textual dashboard

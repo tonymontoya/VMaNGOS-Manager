@@ -1,7 +1,7 @@
 .PHONY: all test lint install uninstall clean help
 
 # Shell scripts to lint
-SCRIPTS := bin/vmangos-manager install_manager.sh lib/common.sh lib/config.sh lib/server.sh lib/account.sh lib/update.sh lib/backup.sh lib/logs.sh
+SCRIPTS := bin/vmangos-manager install_manager.sh lib/common.sh lib/config.sh lib/server.sh lib/account.sh lib/update.sh lib/backup.sh lib/logs.sh lib/dashboard.sh
 
 PREFIX ?= /opt/mangos/manager
 DESTDIR ?=
@@ -34,8 +34,10 @@ install:
 	@install -d "$(INSTALL_BIN_DIR)" "$(INSTALL_LIB_DIR)" "$(INSTALL_TEST_DIR)"
 	@install -m 755 bin/vmangos-manager "$(INSTALL_BIN_DIR)/vmangos-manager"
 	@install -m 644 lib/*.sh "$(INSTALL_LIB_DIR)/"
+	@install -m 644 lib/*.py "$(INSTALL_LIB_DIR)/" 2>/dev/null || true
 	@install -m 644 tests/*.sh "$(INSTALL_TEST_DIR)/"
 	@install -m 644 Makefile "$(INSTALL_ROOT)/Makefile"
+	@install -m 644 dashboard-requirements.txt "$(INSTALL_ROOT)/dashboard-requirements.txt"
 	@echo "Installation complete"
 
 # Uninstall from system without removing config/
@@ -43,8 +45,10 @@ uninstall:
 	@echo "Removing VMANGOS Manager from $(INSTALL_ROOT)..."
 	@rm -f "$(INSTALL_BIN_DIR)/vmangos-manager"
 	@rm -f "$(INSTALL_LIB_DIR)"/*.sh
+	@rm -f "$(INSTALL_LIB_DIR)"/*.py
 	@rm -f "$(INSTALL_TEST_DIR)"/*.sh
 	@rm -f "$(INSTALL_ROOT)/Makefile"
+	@rm -f "$(INSTALL_ROOT)/dashboard-requirements.txt"
 	@rmdir "$(INSTALL_BIN_DIR)" 2>/dev/null || true
 	@rmdir "$(INSTALL_LIB_DIR)" 2>/dev/null || true
 	@rmdir "$(INSTALL_TEST_DIR)" 2>/dev/null || true
