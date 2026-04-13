@@ -270,7 +270,7 @@ config_detect_systemd_available() {
 config_detect_extract_exec_path() {
     local details="$1"
 
-    printf '%s\n' "$details" | grep -Eo '/[^ ;"}]+/(realmd|mangosd)' | head -1 || true
+    printf '%s\n' "$details" | grep -Eo '/[^ ;"}]+/run/bin/(realmd|mangosd)' | head -1 || true
 }
 
 config_detect_collect_systemd_hints() {
