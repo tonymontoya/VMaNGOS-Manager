@@ -233,7 +233,35 @@ EOF
 exit 0
 EOF
 
-    chmod +x "$mock_dir/systemctl" "$mock_dir/ps" "$mock_dir/mysql" "$mock_dir/df" "$mock_dir/sleep"
+    cat > "$mock_dir/journalctl" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+service=""
+prev=""
+
+for arg in "$@"; do
+    if [[ "$prev" == "-u" ]]; then
+        service="$arg"
+        break
+    fi
+    prev="$arg"
+done
+
+count=0
+case "$service" in
+    auth) count="${STATUS_TEST_AUTH_RESTARTS:-0}" ;;
+    world) count="${STATUS_TEST_WORLD_RESTARTS:-0}" ;;
+esac
+
+i=0
+while [[ "$i" -lt "$count" ]]; do
+    echo "Scheduled restart job"
+    i=$((i + 1))
+done
+EOF
+
+    chmod +x "$mock_dir/systemctl" "$mock_dir/ps" "$mock_dir/mysql" "$mock_dir/df" "$mock_dir/sleep" "$mock_dir/journalctl"
 }
 
 setup_config_detect_mock_bin() {
@@ -1551,6 +1579,37 @@ test_server_validate_interval() {
     return $all_passed
 }
 
+test_server_start_fails_when_database_unreachable() {
+    # shellcheck source=../lib/server.sh
+    source "$LIB_DIR/server.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local output install_root service_start_called=0
+    install_root=$(mktemp -d)
+
+    mkdir -p "$install_root/run/etc"
+    : > "$install_root/run/etc/mangosd.conf"
+    : > "$install_root/run/etc/realmd.conf"
+
+    AUTH_SERVICE="auth"
+    WORLD_SERVICE="world"
+    INSTALL_ROOT="$install_root"
+    SERVER_CONFIG_LOADED=1
+
+    server_load_config() { return 0; }
+    db_check_connection() { return 1; }
+    service_start() { service_start_called=1; return 0; }
+
+    output=$(server_start false 30 2>&1 || true)
+    assert_true "[[ \$output == *'Database connectivity check failed'* ]]" "server_start reports DB preflight failure" || all_passed=1
+    assert_true "[[ \$output == *'Pre-flight checks failed'* ]]" "server_start exits cleanly when DB is unreachable" || all_passed=1
+    assert_equals "0" "$service_start_called" "server_start does not start services after DB preflight failure" || all_passed=1
+
+    rm -rf "$install_root"
+    return $all_passed
+}
+
 test_server_start_orders_services() {
     # shellcheck source=../lib/server.sh
     source "$LIB_DIR/server.sh"
@@ -1577,6 +1636,27 @@ test_server_start_orders_services() {
     assert_equals "auth,world" "$order" "server_start starts auth before world" || all_passed=1
 
     rm -f "$order_file"
+    return $all_passed
+}
+
+test_server_restart_passes_timeout_to_stop_and_start() {
+    # shellcheck source=../lib/server.sh
+    source "$LIB_DIR/server.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local call_log
+    call_log=$(mktemp)
+
+    server_stop() { printf 'stop:%s:%s:%s\n' "$1" "$2" "$3" >> "$call_log"; }
+    server_start() { printf 'start:%s:%s\n' "$1" "$2" >> "$call_log"; }
+    sleep() { :; }
+
+    server_restart 45 >/dev/null 2>&1
+
+    assert_equals $'stop:true:false:45\nstart:true:45' "$(cat "$call_log")" "server_restart passes timeout through stop/start workflow" || all_passed=1
+
+    rm -f "$call_log"
     return $all_passed
 }
 
@@ -1610,6 +1690,70 @@ test_server_stop_orders_services() {
     return $all_passed
 }
 
+test_server_stop_respects_timeout_without_force() {
+    # shellcheck source=../lib/server.sh
+    source "$LIB_DIR/server.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local output systemctl_log
+    systemctl_log=$(mktemp)
+
+    AUTH_SERVICE="auth"
+    WORLD_SERVICE="world"
+    SERVER_CONFIG_LOADED=1
+
+    server_load_config() { return 0; }
+    service_active() {
+        case "$1" in
+            world) return 0 ;;
+            auth) return 1 ;;
+            *) return 1 ;;
+        esac
+    }
+    systemctl() {
+        printf '%s %s\n' "$1" "${2:-}" >> "$systemctl_log"
+        return 0
+    }
+    sleep() { :; }
+
+    output=$(server_stop true false 2 2>&1 || true)
+    assert_true "[[ \$output == *'World service did not stop within 2s'* ]]" "server_stop reports graceful timeout expiry" || all_passed=1
+    assert_equals "stop world" "$(head -n 1 "$systemctl_log")" "server_stop requests world stop before aborting on timeout" || all_passed=1
+
+    rm -f "$systemctl_log"
+    return $all_passed
+}
+
+test_server_crash_loop_detection() {
+    # shellcheck source=../lib/server.sh
+    source "$LIB_DIR/server.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local restart_count
+
+    journalctl() {
+        cat <<'EOF'
+Scheduled restart job
+Scheduled restart job
+Scheduled restart job
+EOF
+    }
+
+    restart_count=$(server_get_restart_count_1h world)
+    assert_equals "3" "$restart_count" "server_get_restart_count_1h counts recent scheduled restart jobs" || all_passed=1
+
+    if server_is_crash_loop_detected world; then
+        echo -e "${GREEN}✓${NC} server crash-loop detection trips at threshold"
+    else
+        echo -e "${RED}✗${NC} server crash-loop detection missed threshold"
+        all_passed=1
+    fi
+
+    return $all_passed
+}
+
 test_cli_status_json_with_mocks() {
     local all_passed=0
     local temp_dir mock_dir config_file output compact_output
@@ -1628,6 +1772,8 @@ test_cli_status_json_with_mocks() {
     assert_true "[[ \$compact_output == *'\"database_connectivity\":{\"ok\":true'* ]]" "CLI status json includes DB connectivity check" || all_passed=1
     assert_true "[[ \$compact_output == *'\"source\":\"auth.account.online\"'* ]]" "CLI status json records primary player-count source" || all_passed=1
     assert_true "[[ \$compact_output == *'\"available_kb\":1536000'* ]]" "CLI status json includes disk availability" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"health\":\"healthy\"'* ]]" "CLI status json includes service health labels" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"restart_count_1h\":0'* ]]" "CLI status json includes restart count field" || all_passed=1
 
     rm -rf "$temp_dir"
     return $all_passed
@@ -1648,6 +1794,7 @@ test_cli_status_watch_single_iteration() {
 
     assert_true "[[ \$output == *'VMANGOS Server Status Watch'* ]]" "watch mode prints watch header" || all_passed=1
     assert_true "[[ \$output == *'Press Ctrl+C to stop'* ]]" "watch mode prints interrupt guidance" || all_passed=1
+    assert_true "[[ \$output == *'health: healthy'* ]]" "watch mode prints service health details" || all_passed=1
     assert_true "[[ \$output == *'Source: characters.characters.online'* ]]" "watch mode reports fallback player-count source" || all_passed=1
     assert_true "[[ \$output == *'Stopped status watch.'* ]]" "watch mode exits cleanly after test iteration" || all_passed=1
 
@@ -2103,8 +2250,12 @@ main() {
     run_test "Packaging: Install and uninstall" test_make_install_and_uninstall_targets
     run_test "Server: Player count fallback" test_server_player_count_fallback
     run_test "Server: Interval validation" test_server_validate_interval
+    run_test "Server: Start fails on DB preflight" test_server_start_fails_when_database_unreachable
     run_test "Server: Start order" test_server_start_orders_services
+    run_test "Server: Restart timeout wiring" test_server_restart_passes_timeout_to_stop_and_start
     run_test "Server: Stop order" test_server_stop_orders_services
+    run_test "Server: Graceful stop timeout" test_server_stop_respects_timeout_without_force
+    run_test "Server: Crash loop detection" test_server_crash_loop_detection
     run_test "CLI: Status JSON" test_cli_status_json_with_mocks
     run_test "CLI: Status watch" test_cli_status_watch_single_iteration
     run_test "CLI: Watch rejects JSON" test_cli_status_watch_rejects_json
