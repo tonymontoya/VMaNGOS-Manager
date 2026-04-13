@@ -1,11 +1,11 @@
-# VMANGOS Manager
+# VMaNGOS Manager
 
 ![CI](https://github.com/tonymontoya/VMANGOS-Manager/actions/workflows/ci.yml/badge.svg)
 ![Ubuntu 22.04](https://img.shields.io/badge/ubuntu-22.04-E95420)
 ![Release](https://img.shields.io/badge/release-v0.1.0-0f766e)
 ![Interface](https://img.shields.io/badge/interface-Textual%20TUI-0f172a)
 
-VMANGOS Manager gives VMaNGOS servers something they usually do not get: a real operator experience. It automates host installation, provisions the moving pieces around the realm, and puts a live terminal dashboard on top instead of expecting admins to live in scattered shell commands.
+VMaNGOS Manager gives Classic WoW servers something they usually do not get: a real operator experience. It automates host installation, provisions the moving pieces around the realm, and puts a live terminal dashboard on top instead of expecting admins to live in scattered shell commands.
 
 ![VMANGOS Manager Textual dashboard](docs/assets/dashboard-overview.svg)
 
