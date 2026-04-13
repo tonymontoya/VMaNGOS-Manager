@@ -371,6 +371,18 @@ cmd_backup() {
 main() {
     parse_global_options "$@"
     
+    # Shift consumed global options - parse_global_options stops at first non-option
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -v|--verbose) shift ;;
+            -f|--format) shift 2 ;;
+            -c|--config) shift 2 ;;
+            --) shift; break ;;
+            -*) shift ;;  # Unknown option, let command handle it
+            *) break ;;
+        esac
+    done
+    
     if [[ $# -eq 0 ]]; then
         echo "Error: No command specified" >&2
         show_help >&2
