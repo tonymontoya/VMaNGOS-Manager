@@ -7,7 +7,8 @@ CLAUDE.md
 .env.local
 .env.*
 
-# Development plans (stored in /home/tony/dev-plans/)
+# Development plans
+dev-plans/
 ENG_PLAN_*.md
 DEV_READINESS_*.md
 FRD.md
