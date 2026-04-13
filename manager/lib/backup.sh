@@ -66,6 +66,12 @@ backup_load_config() {
     BACKUP_VERIFY_AFTER="${CONFIG_BACKUP_VERIFY_AFTER:-true}"
 
     # Load database names from config
+    # Load server config first to get AUTH_DB
+    server_load_config || {
+        log_error "Failed to load server configuration"
+        return 1
+    }
+
     BACKUP_DATABASES=("$AUTH_DB" "${CONFIG_DATABASE_CHARACTERS_DB:-characters}" "${CONFIG_DATABASE_WORLD_DB:-mangos}" "${CONFIG_DATABASE_LOGS_DB:-logs}")
     
     BACKUP_CONFIG_LOADED="1"
