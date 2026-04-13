@@ -700,7 +700,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart='$MANAGER_BIN' backup now --verify
+ExecStart="$MANAGER_BIN" backup now --verify
 User=root
 StandardOutput=journal
 StandardError=journal
@@ -759,7 +759,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart='$MANAGER_BIN' backup now --verify
+ExecStart="$MANAGER_BIN" backup now --verify
 User=root
 StandardOutput=journal
 StandardError=journal
