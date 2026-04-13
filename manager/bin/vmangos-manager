@@ -44,6 +44,7 @@ COMMANDS:
     server [start|stop|restart|status] [OPTIONS]
       status options: [--format text|json] [--watch] [--interval SECONDS]
     account [create|list|setgm|ban|unban|password] [OPTIONS]
+    update [check] [OPTIONS]
     config [create|validate|show] [OPTIONS]
     backup [now|list|verify|restore|clean|schedule] [OPTIONS]
 EOF
@@ -117,6 +118,8 @@ source "$LIB_DIR/config.sh"
 source "$LIB_DIR/server.sh"
 # shellcheck source=lib/account.sh
 source "$LIB_DIR/account.sh"
+# shellcheck source=lib/update.sh
+source "$LIB_DIR/update.sh"
 # shellcheck source=lib/backup.sh
 source "$LIB_DIR/backup.sh"
 
@@ -500,6 +503,43 @@ cmd_account() {
 }
 
 # ============================================================================
+# UPDATE COMMAND HANDLER
+# ============================================================================
+
+cmd_update() {
+    local subcmd="${1:-}"
+    shift || true
+
+    case "$subcmd" in
+        check)
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --)
+                        shift
+                        break
+                        ;;
+                    -*)
+                        echo "Unknown option: $1" >&2
+                        exit 2
+                        ;;
+                    *)
+                        echo "Error: update check does not accept positional arguments" >&2
+                        exit 2
+                        ;;
+                esac
+            done
+            update_check
+            ;;
+
+        *)
+            echo "Error: Unknown update subcommand: $subcmd" >&2
+            echo "Valid subcommands: check" >&2
+            exit 2
+            ;;
+    esac
+}
+
+# ============================================================================
 # BACKUP COMMAND HANDLER
 # ============================================================================
 
@@ -658,6 +698,9 @@ main() {
             ;;
         account)
             cmd_account "$@"
+            ;;
+        update)
+            cmd_update "$@"
             ;;
         config)
             cmd_config "$@"

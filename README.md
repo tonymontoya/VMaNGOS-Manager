@@ -76,78 +76,110 @@ set realmlist YOUR_SERVER_IP
 
 ## Part 2: Management CLI
 
-The `vmangos-manager` command-line tool provides comprehensive server administration.
+The `vmangos-manager` command-line tool provides Release A administration for server control, account management, backups, and update checks.
+
+Detailed operator references live in:
+
+- `MANUAL.md`
+- `TROUBLESHOOTING.md`
+- `SECURITY.md`
 
 ### Installation of CLI
 
 ```bash
-# Clone the repository
 git clone https://github.com/tonymontoya/VMANGOS-Manager.git
 cd VMANGOS-Manager
 
-# Install to system (optional)
-sudo cp bin/vmangos-manager /usr/local/bin/
-sudo chmod +x /usr/local/bin/vmangos-manager
+# Run the manager test suite
+cd manager
+make test
+
+# Install manager files into /opt/mangos/manager
+sudo make install PREFIX=/opt/mangos/manager
+
+# Or use the convenience wrapper from the repo root
+cd ..
+sudo ./manager/install_manager.sh --run-tests
 ```
 
 ### Quick Start
 
 ```bash
-# Check server status
-sudo vmangos-manager server status all
+# Validate config
+sudo /opt/mangos/manager/bin/vmangos-manager config validate
 
-# Start servers
-sudo vmangos-manager server start all
+# One-shot status
+sudo /opt/mangos/manager/bin/vmangos-manager server status
 
-# View logs
-sudo vmangos-manager server logs world -f
+# Watch status
+sudo /opt/mangos/manager/bin/vmangos-manager server status --watch --interval 2
+
+# Create an account without exposing the password on the command line
+sudo VMANGOS_PASSWORD='ChangeMe7' /opt/mangos/manager/bin/vmangos-manager account create TESTUSER --password-env
+
+# Check for manager updates from a git checkout
+./manager/bin/vmangos-manager update check
 ```
 
 ### Commands
-
-#### Server Control
-
-```bash
-# Start services
-sudo vmangos-manager server start [auth|world|all]
-
-# Stop services
-sudo vmangos-manager server stop [auth|world|all]
-
-# Restart services
-sudo vmangos-manager server restart [auth|world|all]
-
-# Check status
-sudo vmangos-manager server status [auth|world|all]
-
-# View logs
-sudo vmangos-manager server logs [auth|world] [-f]
-```
 
 #### Global Options
 
 | Option | Description |
 |--------|-------------|
-| `-j, --json` | Output in JSON format |
+| `-c, --config FILE` | Config file path |
+| `-f, --format text|json` | Output format |
 | `-v, --verbose` | Enable verbose logging |
-| `-n, --dry-run` | Show what would be done without executing |
-| `-h, --help` | Show help message |
+| `-h, --help` | Show help |
 | `--version` | Show version information |
 
-#### Examples
+#### Server
 
 ```bash
-# JSON output for scripting
-sudo vmangos-manager --json server status world
+vmangos-manager server start [--wait]
+vmangos-manager server stop [--graceful|--force]
+vmangos-manager server restart
+vmangos-manager server status [--format text|json] [--watch] [--interval SECONDS]
+```
 
-# Dry run to preview changes
-sudo vmangos-manager -n server restart all
+#### Account
 
-# Verbose logging for debugging
-sudo vmangos-manager -v server start all
+```bash
+vmangos-manager account create <username> [--password-file PATH|--password-env]
+vmangos-manager account list [--online]
+vmangos-manager account setgm <username> <0-3>
+vmangos-manager account ban <username> <duration> --reason "<words>"
+vmangos-manager account unban <username>
+vmangos-manager account password <username> [--password-file PATH|--password-env]
+```
 
-# Follow logs in real-time
-sudo vmangos-manager server logs auth -f
+#### Update
+
+```bash
+vmangos-manager update check
+vmangos-manager --format json update check
+```
+
+`update check` is read-only. It runs `git fetch`, compares the current checkout to its tracked remote ref, reports `commits_behind`, and prints manual non-atomic update steps. The installed bundled copy under `/opt/mangos/manager` is not itself a git checkout, so run update checks from a source checkout or set `VMANGOS_MANAGER_REPO`.
+
+#### Config
+
+```bash
+vmangos-manager config create [--path FILE]
+vmangos-manager config validate [--format text|json]
+vmangos-manager config show [--format text|json]
+```
+
+#### Backup
+
+```bash
+vmangos-manager backup now [--verify]
+vmangos-manager backup list [--format text|json]
+vmangos-manager backup verify <file> [--level 1|2]
+vmangos-manager backup restore <file> [--dry-run]
+vmangos-manager backup clean [--keep-last N]
+vmangos-manager backup schedule --daily HH:MM
+vmangos-manager backup schedule --weekly "Sun 04:00"
 ```
 
 ### JSON Output Schema
@@ -184,37 +216,51 @@ sudo vmangos-manager server logs auth -f
 
 ```
 VMANGOS-Manager/
-├── bin/
-│   └── vmangos-manager      # Main CLI entry point
-├── lib/
-│   ├── common.sh            # Logging, locks, JSON helpers, security
-│   ├── config.sh            # INI parser, config management
-│   └── server.sh            # Service control (start/stop/restart/status)
-├── tests/
-│   └── unit/                # Unit test suite
+├── manager/
+│   ├── bin/vmangos-manager      # Main CLI entry point
+│   ├── lib/common.sh            # Logging, locks, JSON helpers
+│   ├── lib/config.sh            # INI parser and config management
+│   ├── lib/server.sh            # Service control and status
+│   ├── lib/account.sh           # Account management and validation
+│   ├── lib/update.sh            # Git-based update checks
+│   ├── lib/backup.sh            # Backup, verify, restore, schedule
+│   ├── tests/run_tests.sh       # Shell test runner
+│   ├── Makefile                 # lint/test/install/uninstall
+│   └── install_manager.sh       # Source-install wrapper
 ├── vmangos_setup.sh         # Interactive installer
 ├── auto_install.sh          # Automated installer wrapper
-└── README.md
+├── README.md
+├── MANUAL.md
+├── TROUBLESHOOTING.md
+└── SECURITY.md
 ```
 
 ### Library Modules
 
-#### `lib/common.sh`
+#### `manager/lib/common.sh`
 - **Logging** - Structured logging with multiple levels (ERROR, WARN, INFO, DEBUG)
 - **Locks** - PID-verified file locking for concurrent operation safety
 - **JSON** - Escaping and output functions for API compatibility
-- **Security** - Password file permission checking, input validation
 
-#### `lib/config.sh`
+#### `manager/lib/config.sh`
 - **INI Parser** - Reads configuration files with section support
 - **Defaults** - Sensible defaults for all configuration values
 - **Validation** - Key and connection string format validation
 
-#### `lib/server.sh`
+#### `manager/lib/server.sh`
 - **Service Control** - Start, stop, restart with timeout handling
-- **Status** - Running state, uptime, memory usage
-- **Health Checks** - Verify services are actually responding
-- **Bulk Operations** - All-services operations with proper ordering
+- **Status** - Running state, uptime, memory usage, DB reachability, player counts
+- **Watch Mode** - Repeated text refresh with interval control
+
+#### `manager/lib/account.sh`
+- **Validation** - Username, GM level, duration, and reason whitelists
+- **Security** - Interactive/file/env password handling and VMANGOS SRP hashing
+- **Operations** - Create, list, GM assignment, bans, unbans, password resets
+
+#### `manager/lib/update.sh`
+- **Update Check** - Fetches remote metadata without mutating local code
+- **Comparison** - Reports the current checkout, tracked remote ref, and `commits_behind`
+- **Instructions** - Prints manual non-atomic update steps for the bundled install model
 
 ---
 
@@ -277,101 +323,36 @@ backup_dir = /opt/mangos/backups
 
 ## Testing
 
-### Run Unit Tests
+### Run Manager Tests
 
 ```bash
-cd VMANGOS-Manager
-bash tests/unit/test_common.sh
-bash tests/unit/test_config.sh
+cd VMANGOS-Manager/manager
+make test
 ```
 
 ### Test Coverage
 
-- **32 unit tests** covering core functionality
+- **36 shell tests** covering config, status, account, update, backup, and packaging behavior
 - **100% pass rate** required for releases
-- **Shellcheck clean** - Zero warnings or errors
+- **CI shellcheck** - Zero warnings expected in pull requests
 
 ---
 
 ## Troubleshooting
 
-### Installation Issues
+See `TROUBLESHOOTING.md` for:
 
-#### Git Clone Failures
-The installer includes retry logic with exponential backoff. If cloning still fails:
-- Check network connectivity
-- Verify GitHub is accessible: `curl -I https://github.com`
-- Try manual clone: `git clone https://github.com/vmangos/core`
-
-#### Compilation Issues
-- Ensure you have at least 4GB RAM (swap can help)
-- For limited RAM, edit to use fewer jobs: `make -j 1` instead of `make -j $CPU`
-
-### Management CLI Issues
-
-#### Permission Denied
-The CLI requires root privileges for systemctl operations:
-```bash
-sudo vmangos-manager server status all
-```
-
-#### Lock Timeouts
-If you see "Could not acquire lock" errors:
-- Check if another manager process is running: `ps aux | grep vmangos-manager`
-- Stale locks are automatically cleared after 60 seconds
-
-#### JSON Parsing Errors
-Ensure your system has Python 3 for JSON validation:
-```bash
-python3 --version
-```
-
-### Server Issues
-
-#### Services Won't Start
-```bash
-# Check systemd status
-sudo systemctl status auth
-sudo systemctl status world
-
-# View detailed logs
-sudo journalctl -u auth -n 50
-sudo journalctl -u world -n 50
-```
-
-#### Database Connection Issues
-```bash
-# Verify MariaDB is running
-sudo systemctl status mariadb
-
-# Check credentials in config
-sudo grep -E "DatabaseInfo" /opt/mangos/run/etc/mangosd.conf
-```
-
-#### Client Can't Connect
-- Verify `realmlist.wtf` points to your server IP
-- Check firewall: ports 3724 (auth) and 8085 (world) must be open
-- Verify realmlist table: `mysql auth -e "SELECT * FROM realmlist;"`
-
-#### Data Extraction Issues
-If you see "Invalid Map.dbc file format" errors:
-- Ensure you're using WoW 1.12.1 build 5875 (check login screen lower-left corner)
-- The script auto-creates a `Data/Data` symlink for extractor compatibility
-- If client data is in a protected location, the script will auto-copy it to `/opt/mangos/client-data`
-
-#### Database Import Errors
-If migrations fail with "Table doesn't exist":
-- The installer now imports databases in correct order (logon → characters → logs → mangos)
-- Source migrations are skipped when using pre-built database (avoids conflicts)
+- installation and git checkout problems
+- config permission errors
+- status/account/backup failure patterns
+- update check repo-detection issues
+- host validation commands
 
 ---
 
 ## Security Considerations
 
-1. **Password Files** - Always use mode 600, owned by root
-2. **Firewall** - Limit MySQL port (3306) to trusted IPs only
-3. **Updates** - Keep VMANGOS core updated with latest commits
-4. **Backups** - Regular database backups recommended
+See `SECURITY.md` for Release A password handling, audit logging, DB access expectations, and operational guidance.
 
 ---
 
@@ -380,23 +361,23 @@ If migrations fail with "Table doesn't exist":
 ### Release A (Foundation) - Current
 - ✅ Automated installer with retry logic
 - ✅ Management CLI with JSON output
-- ✅ Service control (start/stop/restart/status)
+- ✅ Service control and rich status/watch output
+- ✅ Account management module
+- ✅ Backup and verify workflows
+- ✅ Update check with manual non-atomic instructions
 - ✅ Comprehensive unit tests
 - ✅ Checkpoint/resume for interrupted installations
 - ✅ Client data validation and legal acquisition instructions
 - ✅ Auto-handling of client data permissions and path structure
 
-### Release B (Backup & Monitoring)
-- 🔄 Database backup/restore
-- 🔄 Automated backup scheduling
-- 🔄 Player count monitoring
-- 🔄 Service health dashboards
+### Release B
+- 🔄 Non-atomic update assistant
+- 🔄 Maintenance scheduler
+- 🔄 Enhanced server control safety interlocks
+- 🔄 Log rotation
 
-### Release C (Account Management)
-- 🔄 Account CRUD operations
-- 🔄 Ban/unban functionality
-- 🔄 Password management
-- 🔄 GM level management
+### Release C
+- 🔄 Textual dashboard
 
 ---
 

@@ -297,6 +297,7 @@ test_cli_parsing() {
     assert_true "[[ \$output == *'VMANGOS Manager'* ]]" "CLI --help shows app name" || all_passed=1
     assert_true "[[ \$output == *'server'* ]]" "CLI --help lists server command" || all_passed=1
     assert_true "[[ \$output == *'account'* ]]" "CLI --help lists account command" || all_passed=1
+    assert_true "[[ \$output == *'update'* ]]" "CLI --help lists update command" || all_passed=1
     return $all_passed
 }
 
@@ -625,6 +626,138 @@ test_cli_account_rejects_positional_password() {
     output=$(bash "$MANAGER_DIR/bin/vmangos-manager" account password testuser secret 2>&1 || true)
     assert_true "[[ \$output == *'accepts only a username as a positional argument'* ]]" "CLI password rejects positional password" || all_passed=1
 
+    return $all_passed
+}
+
+test_update_check_text_output() {
+    # shellcheck source=../lib/update.sh
+    source "$LIB_DIR/update.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local output
+
+    OUTPUT_FORMAT="text"
+    config_load() {
+        CONFIG_SERVER_INSTALL_ROOT="/srv/mangos"
+        return 0
+    }
+    update_find_repo_root() { printf '/tmp/vmangos-manager\n'; }
+    update_git() {
+        local args="$*"
+        case "$args" in
+            *"rev-parse --abbrev-ref --symbolic-full-name @{upstream}"*) printf 'origin/main\n' ;;
+            *"rev-parse --abbrev-ref HEAD"*) printf 'main\n' ;;
+            *"fetch --quiet origin"*) return 0 ;;
+            *"rev-parse origin/main^{commit}"*) printf '2222222222222222222222222222222222222222\n' ;;
+            *"rev-parse HEAD"*) printf '1111111111111111111111111111111111111111\n' ;;
+            *"rev-parse origin/main"*) printf '2222222222222222222222222222222222222222\n' ;;
+            *"rev-list --count HEAD..origin/main"*) printf '2\n' ;;
+            *"status --porcelain"*) return 0 ;;
+            *)
+                echo "unexpected git args: $args" >&2
+                return 1
+                ;;
+        esac
+    }
+
+    output=$(update_check)
+    assert_true "[[ \$output == *'VMANGOS Manager Update Check'* ]]" "update_check text prints header" || all_passed=1
+    assert_true "[[ \$output == *'Commits behind: 2'* ]]" "update_check text prints behind count" || all_passed=1
+    assert_true "[[ \$output == *'Status: update available'* ]]" "update_check text prints update state" || all_passed=1
+    assert_true "[[ \$output == *'git checkout main'* ]]" "update_check text includes manual branch step" || all_passed=1
+    assert_true "[[ \$output == *'sudo make install PREFIX=/srv/mangos/manager'* ]]" "update_check text includes non-atomic install instruction" || all_passed=1
+
+    OUTPUT_FORMAT="text"
+    return $all_passed
+}
+
+test_update_check_json_output() {
+    # shellcheck source=../lib/update.sh
+    source "$LIB_DIR/update.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local output compact_output
+
+    OUTPUT_FORMAT="json"
+    config_load() {
+        CONFIG_SERVER_INSTALL_ROOT="/opt/mangos"
+        return 0
+    }
+    update_find_repo_root() { printf '/repo/root\n'; }
+    update_git() {
+        local args="$*"
+        case "$args" in
+            *"rev-parse --abbrev-ref --symbolic-full-name @{upstream}"*) printf 'origin/main\n' ;;
+            *"rev-parse --abbrev-ref HEAD"*) printf 'main\n' ;;
+            *"fetch --quiet origin"*) return 0 ;;
+            *"rev-parse origin/main^{commit}"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"rev-parse HEAD"*) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
+            *"rev-parse origin/main"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"rev-list --count HEAD..origin/main"*) printf '3\n' ;;
+            *"status --porcelain"*) printf ' M README.md\n' ;;
+            *)
+                echo "unexpected git args: $args" >&2
+                return 1
+                ;;
+        esac
+    }
+
+    output=$(update_check)
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+    assert_true "[[ \$compact_output == *'\"success\":true'* ]]" "update_check json reports success" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"commits_behind\":3'* ]]" "update_check json reports behind count" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"update_available\":true'* ]]" "update_check json reports update availability" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"worktree_dirty\":true'* ]]" "update_check json reports dirty worktree" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"install_target\":\"/opt/mangos/manager\"'* ]]" "update_check json includes install target" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"instructions\":[\"cd/repo/root\"'* ]]" "update_check json includes manual instructions" || all_passed=1
+
+    OUTPUT_FORMAT="text"
+    return $all_passed
+}
+
+test_update_check_requires_git_repo() {
+    # shellcheck source=../lib/update.sh
+    source "$LIB_DIR/update.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local output
+
+    OUTPUT_FORMAT="json"
+    update_find_repo_root() { return 1; }
+
+    output=$(update_check 2>/dev/null || true)
+    assert_true "[[ \$output == *'\"code\":\"NOT_A_GIT_REPO\"'* ]]" "update_check errors cleanly when no git repo is available" || all_passed=1
+    assert_true "[[ \$output == *'VMANGOS_MANAGER_REPO'* ]]" "update_check error suggests explicit repo path" || all_passed=1
+
+    OUTPUT_FORMAT="text"
+    return $all_passed
+}
+
+test_make_install_and_uninstall_targets() {
+    local all_passed=0
+    local temp_dir install_root
+
+    temp_dir=$(mktemp -d)
+    install_root="$temp_dir/opt/mangos/manager"
+    mkdir -p "$install_root/config"
+    printf '%s\n' '[database]' > "$install_root/config/manager.conf"
+
+    make -C "$MANAGER_DIR" install DESTDIR="$temp_dir" PREFIX=/opt/mangos/manager >/dev/null
+
+    assert_file_exists "$install_root/bin/vmangos-manager" "make install copies binary" || all_passed=1
+    assert_file_exists "$install_root/lib/update.sh" "make install copies update module" || all_passed=1
+    assert_file_exists "$install_root/tests/run_tests.sh" "make install copies tests" || all_passed=1
+
+    make -C "$MANAGER_DIR" uninstall DESTDIR="$temp_dir" PREFIX=/opt/mangos/manager >/dev/null
+
+    assert_true "[[ ! -e \"$install_root/bin/vmangos-manager\" ]]" "make uninstall removes binary" || all_passed=1
+    assert_true "[[ ! -e \"$install_root/lib/update.sh\" ]]" "make uninstall removes library files" || all_passed=1
+    assert_true "[[ -f \"$install_root/config/manager.conf\" ]]" "make uninstall preserves config files" || all_passed=1
+
+    rm -rf "$temp_dir"
     return $all_passed
 }
 
@@ -1203,6 +1336,10 @@ main() {
     run_test "Account: Env not forwarded" test_account_password_env_not_forwarded_to_python
     run_test "Account: List JSON" test_account_list_json_output
     run_test "CLI: Account rejects positional password" test_cli_account_rejects_positional_password
+    run_test "Update: Text output" test_update_check_text_output
+    run_test "Update: JSON output" test_update_check_json_output
+    run_test "Update: Missing repo" test_update_check_requires_git_repo
+    run_test "Packaging: Install and uninstall" test_make_install_and_uninstall_targets
     run_test "Server: Player count fallback" test_server_player_count_fallback
     run_test "Server: Interval validation" test_server_validate_interval
     run_test "Server: Start order" test_server_start_orders_services
