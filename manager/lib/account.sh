@@ -169,7 +169,7 @@ account_acquire_password() {
             get_password_from_env
             ;;
         interactive)
-            get_password_interactive
+            get_password_interactive "$arg"
             ;;
         *)
             log_error "Unknown password mode: $mode"

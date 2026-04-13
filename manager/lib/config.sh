@@ -118,6 +118,28 @@ config_load() {
     return 0
 }
 
+config_resolve_manager_root() {
+    local config_file="${1:-$CONFIG_FILE}"
+    local config_dir
+
+    if [[ -n "${MANAGER_ROOT:-}" ]]; then
+        printf '%s\n' "$MANAGER_ROOT"
+        return 0
+    fi
+
+    if [[ -f "$config_file" ]]; then
+        config_dir=$(cd "$(dirname "$config_file")" && pwd)
+        printf '%s\n' "$(cd "$config_dir/.." && pwd)"
+        return 0
+    fi
+
+    if [[ -n "${CONFIG_SERVER_INSTALL_ROOT:-}" ]]; then
+        printf '%s/manager\n' "$CONFIG_SERVER_INSTALL_ROOT"
+    else
+        printf '/opt/mangos/manager\n'
+    fi
+}
+
 # ============================================================================
 # CONFIG CREATION
 # ============================================================================

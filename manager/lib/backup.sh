@@ -68,13 +68,15 @@ backup_load_config() {
 }
 
 backup_resolve_manager_bin() {
+    local manager_root
+
     if [[ -n "${MANAGER_BIN:-}" ]]; then
         printf '%s' "$MANAGER_BIN"
         return 0
     fi
 
-    local install_root="${INSTALL_ROOT:-${CONFIG_SERVER_INSTALL_ROOT:-/opt/mangos}}"
-    local configured_path="$install_root/manager/bin/vmangos-manager"
+    manager_root=$(config_resolve_manager_root "$CONFIG_FILE")
+    local configured_path="$manager_root/bin/vmangos-manager"
     local repo_path
     repo_path="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/vmangos-manager"
 
@@ -1144,4 +1146,3 @@ backup_clean() {
     log_info "✓ Cleanup complete: deleted $deleted backups"
     return 0
 }
-
