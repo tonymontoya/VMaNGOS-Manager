@@ -903,6 +903,174 @@ backup_clean() {
         return 1
     fi
     
+    # Get all backups with metadata
+    local all_backups=()
+    while IFS= read -r -d '' meta_file; do
+        local timestamp basename
+        timestamp=$(jq -r '.timestamp' "$meta_file" 2>/dev/null)
+        basename=$(jq -r '.basename' "$meta_file" 2>/dev/null)
+        if [[ -n "$timestamp" && -n "$basename" ]]; then
+            all_backups+=("$timestamp|$basename|$meta_file")
+        fi
+    done < <(find "$BACKUP_DIR" -maxdepth 1 -name "*.json" -type f -print0 2>/dev/null)
+    
+    local total_count=${#all_backups[@]}
+    log_info "Found $total_count backups"
+    
+    if [[ ${#all_backups[@]} -eq 0 ]]; then
+        log_info "No backups to clean"
+        return 0
+    fi
+    
+    local deleted=0
+    
+    if [[ -n "$keep_last" ]]; then
+        # Count-based retention (--keep-last N)
+        log_info "Retention strategy: keep last $keep_last backups (count-based)"
+        
+        if [[ "$total_count" -le "$keep_last" ]]; then
+            log_info "Nothing to clean (keeping all $total_count backups)"
+            return 0
+        fi
+        
+        # Sort by timestamp (newest first)
+        local sorted_backups=()
+        while IFS="" read -r line; do
+            sorted_backups+=("$line")
+        done < <(printf "%s\n" "${all_backups[@]}" | sort -r -t"|" -k1)
+        
+        # Delete old backups beyond keep_last
+        for ((i=keep_last; i<${#sorted_backups[@]}; i++)); do
+            local entry="${sorted_backups[$i]}"
+            local basename="${entry#*|}"
+            basename="${basename%|*}"
+            
+            log_info "Deleting: $basename"
+            rm -f "$BACKUP_DIR/${basename}.sql.gz" "$BACKUP_DIR/${basename}.json"
+            deleted=$((deleted + 1))
+        done
+    else
+        # Age-based retention (retention_days config)
+        local retention_days="$BACKUP_RETENTION_DAYS"
+        log_info "Retention strategy: delete backups older than $retention_days days (age-based)"
+        
+        # Calculate cutoff date (retention_days ago)
+        local cutoff_date
+        cutoff_date=$(date -d "$retention_days days ago" +%Y-%m-%d 2>/dev/null || date -v-"${retention_days}"d +%Y-%m-%d)
+        log_info "Cutoff date: $cutoff_date (backups older than this will be deleted)"
+        
+        # Check each backup's age
+        for entry in "${all_backups[@]}"; do
+            local timestamp basename
+            timestamp="${entry%%|*}"
+            basename="${entry#*|}"
+            basename="${basename%|*}"
+            
+            # Extract date from timestamp (ISO 8601 format: 2026-04-13T10:00:00+00:00)
+            local backup_date="${timestamp%%T*}"
+            
+            if [[ "$backup_date" < "$cutoff_date" ]]; then
+                log_info "Deleting: $basename (age: $backup_date, cutoff: $cutoff_date)"
+                rm -f "$BACKUP_DIR/${basename}.sql.gz" "$BACKUP_DIR/${basename}.json"
+                deleted=$((deleted + 1))
+            fi
+        done
+    fi
+    
+    log_info "✓ Cleanup complete: deleted $deleted backups"
+    return 0
+}
+backup_list() {
+    local format="${1:-text}"
+    
+    log_section "Backup List"
+    
+    backup_load_config || return 1
+    
+    if [[ ! -d "$BACKUP_DIR" ]]; then
+        log_error "Backup directory not found: $BACKUP_DIR"
+        return 1
+    fi
+    
+    # Find all backup metadata files
+    local metadata_files=()
+    while IFS= read -r -d '' file; do
+        metadata_files+=("$file")
+    done < <(find "$BACKUP_DIR" -maxdepth 1 -name "*.json" -type f -print0 2>/dev/null | sort -z)
+    
+    if [[ ${#metadata_files[@]} -eq 0 ]]; then
+        log_info "No backups found in $BACKUP_DIR"
+        return 0
+    fi
+    
+    if [[ "$format" == "json" ]]; then
+        # Output JSON array
+        echo "["
+        local first=1
+        for meta_file in "${metadata_files[@]}"; do
+            [[ $first -eq 1 ]] || echo ","
+            first=0
+            jq -c . "$meta_file" 2>/dev/null || echo "null"
+        done
+        echo ""
+        echo "]"
+    else
+        # Output text table
+        echo ""
+        printf "%-20s %-12s %-10s %s\n" "Timestamp" "Size" "Verified" "File"
+        printf "%-20s %-12s %-10s %s\n" "--------------------" "------------" "----------" "----"
+        
+        for meta_file in "${metadata_files[@]}"; do
+            local timestamp size_bytes file verified
+            timestamp=$(jq -r '.timestamp' "$meta_file" 2>/dev/null | cut -d'T' -f1)
+            size_bytes=$(jq -r '.size_bytes' "$meta_file" 2>/dev/null)
+            file=$(jq -r '.file' "$meta_file" 2>/dev/null)
+            
+            # Check if backup file exists and verify checksum
+            local backup_file="$BACKUP_DIR/$file"
+            if [[ -f "$backup_file" ]]; then
+                local stored_checksum actual_checksum
+                stored_checksum=$(jq -r '.checksum_sha256' "$meta_file" 2>/dev/null)
+                actual_checksum=$(sha256sum "$backup_file" 2>/dev/null | cut -d' ' -f1)
+                if [[ "$stored_checksum" == "$actual_checksum" ]]; then
+                    verified="✓"
+                else
+                    verified="✗"
+                fi
+            else
+                verified="MISSING"
+            fi
+            
+            # Format size
+            local size_str
+            if [[ "$size_bytes" -gt 1073741824 ]]; then
+                size_str=$(echo "scale=1; $size_bytes/1073741824" | bc)G
+            elif [[ "$size_bytes" -gt 1048576 ]]; then
+                size_str=$(echo "scale=1; $size_bytes/1048576" | bc)M
+            elif [[ "$size_bytes" -gt 1024 ]]; then
+                size_str=$(echo "scale=1; $size_bytes/1024" | bc)K
+            else
+                size_str="${size_bytes}B"
+            fi
+            
+            printf "%-20s %-12s %-10s %s\n" "$timestamp" "$size_str" "$verified" "$file"
+        done
+        echo ""
+    fi
+}
+
+backup_clean() {
+    local keep_last="${1:-}"
+    
+    log_section "Backup Cleanup"
+    
+    backup_load_config || return 1
+    
+    if [[ ! -d "$BACKUP_DIR" ]]; then
+        log_error "Backup directory not found: $BACKUP_DIR"
+        return 1
+    fi
+    
     # Determine retention strategy
     if [[ -n "$keep_last" ]]; then
         log_info "Retention strategy: keep last $keep_last backups"
