@@ -1,5 +1,10 @@
 # VMANGOS Manager
 
+![CI](https://github.com/tonymontoya/VMANGOS-Manager/actions/workflows/ci.yml/badge.svg)
+![Ubuntu 22.04](https://img.shields.io/badge/ubuntu-22.04-E95420)
+![Release](https://img.shields.io/badge/release-v0.1.0-0f766e)
+![Interface](https://img.shields.io/badge/interface-Textual%20TUI-0f172a)
+
 VMANGOS Manager gives VMaNGOS servers something they usually do not get: a real operator experience. It automates host installation, provisions the moving pieces around the realm, and puts a live terminal dashboard on top instead of expecting admins to live in scattered shell commands.
 
 ![VMANGOS Manager Textual dashboard](docs/assets/dashboard-overview.svg)
@@ -11,6 +16,13 @@ This screenshot is a real, demo-backed dashboard export generated from the Manag
 - VMaNGOS has powerful server software but a thin operator surface.
 - New hosts take real setup work, and existing hosts usually accrete fragile local scripts.
 - Manager makes installation, monitoring, and day-two operations feel like one product instead of a pile of disconnected chores.
+
+## Why This Lands Better Than Ad-Hoc Scripts
+
+- one installer flow instead of a private pile of half-remembered host notes
+- one dashboard instead of hopping between `systemctl`, `mysql`, `journalctl`, and `df`
+- one CLI backend that the TUI, docs, and automation all agree on
+- one adoption path for existing hosts instead of forcing a rebuild-from-scratch story
 
 ## What You Get
 
@@ -67,6 +79,8 @@ The dashboard surfaces:
 - online player visibility plus per-player detail
 - alerts, recent events, and log rotation health
 
+It is especially useful for the VMANGOS audience because it keeps the terminal-first workflow while still delivering a polished operator surface.
+
 ## Two Good Starting Paths
 
 ### Fresh Host
@@ -122,6 +136,12 @@ sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
 - update planning and apply flows
 - account management
 - config detection for existing installs
+
+## Proof
+
+- validated on a real Ubuntu VMANGOS host, not just mocked local shell tests
+- dashboard screenshot in this README is generated from the actual Textual app export path
+- manager test suite currently covers 63 checks across config, status, logs, schedule, backup, update, and dashboard seams
 
 ## Documentation
 
