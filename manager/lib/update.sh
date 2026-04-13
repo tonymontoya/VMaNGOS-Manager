@@ -12,7 +12,6 @@ UPDATE_INSTALL_ROOT=""
 UPDATE_SOURCE_ROOT=""
 UPDATE_BUILD_ROOT=""
 UPDATE_RUN_ROOT=""
-UPDATE_MANAGER_ROOT=""
 
 update_git() {
     git "$@"
@@ -57,7 +56,6 @@ update_load_install_context() {
     UPDATE_SOURCE_ROOT="$UPDATE_INSTALL_ROOT/source"
     UPDATE_BUILD_ROOT="$UPDATE_INSTALL_ROOT/build"
     UPDATE_RUN_ROOT="$UPDATE_INSTALL_ROOT/run"
-    UPDATE_MANAGER_ROOT=$(config_resolve_manager_root "$CONFIG_FILE")
 }
 
 update_get_tracking_ref() {
