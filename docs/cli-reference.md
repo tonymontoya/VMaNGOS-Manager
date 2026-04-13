@@ -1,15 +1,6 @@
-# MANUAL
+# CLI Reference
 
-## Overview
-
-Release A ships the `vmangos-manager` CLI for:
-
-- server control and status
-- account management
-- backup workflows
-- read-only update checks
-
-Release B adds explicit config detection for adopting existing VMANGOS installs without changing the runtime model to implicit autodetection.
+`vmangos-manager` is the operational backend for the dashboard, installer-provisioned automation, and direct host administration.
 
 Default installed paths:
 
@@ -17,7 +8,7 @@ Default installed paths:
 - config: `/opt/mangos/manager/config/manager.conf`
 - DB password file: `/opt/mangos/manager/config/.dbpass`
 
-## Installation
+## Install The CLI
 
 From a source checkout:
 
@@ -50,6 +41,19 @@ sudo make uninstall PREFIX=/opt/mangos/manager
 --version
 ```
 
+## Dashboard
+
+```bash
+vmangos-manager dashboard [--refresh SECONDS] [--theme dark|light]
+vmangos-manager dashboard --bootstrap
+```
+
+Notes:
+
+- `dashboard --bootstrap` creates the dashboard virtual environment and installs Textual
+- `dashboard` reuses Manager's existing JSON status surfaces instead of duplicating status logic
+- default refresh interval is `2` seconds
+
 ## Server Commands
 
 ```bash
@@ -63,7 +67,8 @@ Notes:
 
 - watch mode is text-only
 - default watch interval is `2` seconds
-- status includes service state, process details, DB connectivity, disk space, and player count
+- status includes service state, process details, DB connectivity, disk space, player count, host metrics, alerts, and recent events
+- `server start --wait` performs bounded post-start verification
 
 ## Schedule Commands
 
@@ -128,7 +133,7 @@ Behavior:
 - `config detect` is read-only; it does not overwrite `manager.conf`
 - `config create` includes a `[maintenance]` section for scheduler timezone, honor backend, warning backend, and default restart warnings
 
-## Update Check
+## Update Commands
 
 ```bash
 vmangos-manager update check
@@ -162,6 +167,13 @@ Important:
 - if no installed source tree is available, run Manager checkout comparisons from a source checkout or set `VMANGOS_MANAGER_REPO=/path/to/VMANGOS-Manager`
 
 ## Common Workflows
+
+Dashboard:
+
+```bash
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
+```
 
 Status:
 

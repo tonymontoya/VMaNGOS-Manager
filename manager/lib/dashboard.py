@@ -35,6 +35,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to manager.conf")
     parser.add_argument("--refresh", type=int, default=2, help="Refresh interval in seconds")
     parser.add_argument("--theme", choices=("dark", "light"), default="dark", help="Dashboard theme")
+    parser.add_argument("--screenshot", help="Write an SVG screenshot after the first refresh and exit")
     parser.add_argument(
         "--snapshot-json",
         action="store_true",
@@ -279,7 +280,13 @@ class DashboardRuntimeError(RuntimeError):
     """Raised when the dashboard runtime cannot start."""
 
 
-def create_app(manager_bin: str, config_path: str, refresh: int, theme: str):
+def create_app(
+    manager_bin: str,
+    config_path: str,
+    refresh: int,
+    theme: str,
+    screenshot_path: str | None,
+):
     try:
         from textual.app import App, ComposeResult
         from textual.containers import Container, Vertical
@@ -379,6 +386,9 @@ def create_app(manager_bin: str, config_path: str, refresh: int, theme: str):
             self.config_path = config_path
             self.refresh_interval = refresh
             self.theme_name = theme
+            self.screenshot_path = screenshot_path
+            self.screenshot_taken = False
+            self.screenshot_pending = False
             self.last_action = "dashboard started"
             self.snapshot = {
                 "captured_at": now_iso(),
@@ -435,6 +445,14 @@ def create_app(manager_bin: str, config_path: str, refresh: int, theme: str):
             self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot))
             self.query_one("#alerts-pane", Static).update(render_alerts_panel(snapshot))
             self.refresh_players(snapshot.get("players", []))
+            if self.screenshot_path and not self.screenshot_taken and not self.screenshot_pending:
+                self.screenshot_pending = True
+                self.set_timer(0.5, self.capture_screenshot_and_exit)
+
+        def capture_screenshot_and_exit(self) -> None:
+            self.screenshot_taken = True
+            self.save_screenshot(self.screenshot_path)
+            self.exit()
 
         def refresh_players(self, players: list[dict[str, Any]]) -> None:
             table = self.query_one("#players-table", DataTable)
@@ -537,7 +555,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        app = create_app(args.manager_bin, args.config, args.refresh, args.theme)
+        app = create_app(args.manager_bin, args.config, args.refresh, args.theme, args.screenshot)
     except DashboardRuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
