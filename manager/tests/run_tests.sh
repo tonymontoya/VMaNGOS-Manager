@@ -948,6 +948,7 @@ test_account_password_env_not_forwarded_to_python() {
     assert_true "[[ $(cat "$env_seen_file") == 'UNSET' ]]" "account_password does not pass VMANGOS_PASSWORD to hashing subprocess env" || all_passed=1
     assert_true "[[ \$output == *'AUDIT account.password'* ]]" "account_password still completes via env mode" || all_passed=1
     unset VMANGOS_PASSWORD
+    unset -f python3
     rm -f "$env_seen_file" "$output_file"
 
     return $all_passed
@@ -1775,6 +1776,85 @@ EOF
     assert_true "[[ \$compact_output == *'\"captured_at\":\"'* ]]" "dashboard snapshot includes capture timestamp" || all_passed=1
 
     rm -rf "$temp_dir"
+    return $all_passed
+}
+
+test_dashboard_action_request_builder() {
+    local all_passed=0 output compact_output
+
+    output=$(python3 - "$MANAGER_DIR/lib/dashboard.py" <<'PY'
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("dashboard_module", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+snapshot = {
+    "all_accounts": [
+        {"id": 8, "username": "GMADMIN", "gm_level": 3, "online": False, "banned": False}
+    ],
+    "backups": {
+        "entries": [
+            {"timestamp": "2026-04-13T21:30:00+00:00", "file": "backup-20260413-213000.tar.gz"}
+        ],
+        "summary": {"backup_dir": "/tmp/vmangos-backups"},
+    },
+}
+
+payload = {
+    "create": module.build_dashboard_action_request(
+        snapshot,
+        "",
+        "",
+        "account_create",
+        {"username": "PLAYERTWO", "password": "Secret12", "confirm_password": "Secret12"},
+    ),
+    "setgm": module.build_dashboard_action_request(
+        snapshot,
+        "8",
+        "",
+        "account_setgm",
+        {"gm_level": "2"},
+    ),
+    "restore": module.build_dashboard_action_request(
+        snapshot,
+        "",
+        "backup-20260413-213000.tar.gz",
+        "backup_restore_dry_run",
+        {},
+    ),
+    "weekly": module.build_dashboard_action_request(
+        snapshot,
+        "",
+        "",
+        "backup_schedule_weekly",
+        {"schedule": "Sun 04:00"},
+    ),
+    "config": module.build_dashboard_action_request(snapshot, "", "", "config_validate", {}),
+    "bad_ban": module.build_dashboard_action_request(
+        snapshot,
+        "8",
+        "",
+        "account_ban",
+        {"duration": "soon", "reason": "Bad!"},
+    ),
+}
+
+print(json.dumps(payload, sort_keys=True))
+PY
+)
+
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+
+    assert_true "[[ \$compact_output == *'\"create\":{\"command\":[\"account\",\"create\",\"PLAYERTWO\",\"--password-env\"]'* && \$compact_output == *'\"VMANGOS_PASSWORD\":\"Secret12\"'* ]]" "dashboard action builder creates password-env account requests" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"setgm\":{\"command\":[\"account\",\"setgm\",\"GMADMIN\",\"2\"]'* ]]" "dashboard action builder targets selected account for GM updates" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"restore\":{\"command\":[\"backup\",\"restore\",\"/tmp/vmangos-backups/backup-20260413-213000.tar.gz\",\"--dry-run\"]'* ]]" "dashboard action builder resolves restore dry-run path from backup selection" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"weekly\":{\"command\":[\"backup\",\"schedule\",\"--weekly\",\"Sun04:00\"]'* ]]" "dashboard action builder emits weekly backup schedule commands" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"config\":{\"command\":[\"config\",\"validate\"]'* && \$compact_output == *'\"view\":\"config\"'* ]]" "dashboard action builder exposes config validation as a workflow action" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"bad_ban\":{\"error\":\"accountbanskipped:durationmustuseformslike30m,12h,or7d\"'* ]]" "dashboard action builder validates account ban input before dispatch" || all_passed=1
+
     return $all_passed
 }
 
@@ -2983,6 +3063,9 @@ main() {
     run_test "Update: Apply workflow" test_update_apply_runs_backup_and_rebuild_workflow
     run_test "Update: Apply rejects dirty tree" test_update_apply_rejects_dirty_source_tree
     run_test "Packaging: Install and uninstall" test_make_install_and_uninstall_targets
+    run_test "Dashboard: Bootstrap and launch" test_dashboard_bootstrap_and_run
+    run_test "Dashboard: Snapshot aggregation" test_dashboard_snapshot_json_aggregates_backend
+    run_test "Dashboard: Action requests" test_dashboard_action_request_builder
     run_test "Server: Player count fallback" test_server_player_count_fallback
     run_test "Server: Interval validation" test_server_validate_interval
     run_test "Server: Start fails on DB preflight" test_server_start_fails_when_database_unreachable

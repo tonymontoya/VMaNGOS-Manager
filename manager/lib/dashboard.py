@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -34,6 +35,13 @@ ACCENT_SKY = "#7dd3fc"
 ACCENT_TEAL = "#2dd4bf"
 ACCENT_ROSE = "#fb7185"
 ACCENT_MUTED = "#cbd5e1"
+
+USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9]{2,32}$")
+GM_LEVEL_PATTERN = re.compile(r"^[0-3]$")
+DURATION_PATTERN = re.compile(r"^[1-9][0-9]*[smhdw]$")
+BAN_REASON_PATTERN = re.compile(r"^[A-Za-z0-9]+(?: [A-Za-z0-9]+)*$")
+DAILY_TIME_PATTERN = re.compile(r"^([0-1][0-9]|2[0-3]):[0-5][0-9]$")
+WEEKLY_SCHEDULE_PATTERN = re.compile(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([0-1][0-9]|2[0-3]):[0-5][0-9]$")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -201,6 +209,221 @@ def parse_ini_content(content: str) -> dict[str, str]:
     return values
 
 
+def normalize_form_values(values: dict[str, Any] | None) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for key, value in (values or {}).items():
+        normalized[key] = str(value or "").strip()
+    return normalized
+
+
+def find_selected_account(snapshot: dict[str, Any], selected_account_id: str) -> dict[str, Any] | None:
+    accounts = snapshot.get("all_accounts", [])
+    if selected_account_id:
+        for account in accounts:
+            if str(account.get("id", "")) == selected_account_id:
+                return account
+    return accounts[0] if accounts else None
+
+
+def find_selected_backup(snapshot: dict[str, Any], selected_backup_file: str) -> dict[str, Any] | None:
+    entries = snapshot.get("backups", {}).get("entries", [])
+    if selected_backup_file:
+        for entry in entries:
+            if str(entry.get("file", "")) == selected_backup_file:
+                return entry
+    return max(entries, key=lambda item: str(item.get("timestamp", ""))) if entries else None
+
+
+def render_context_actions(active_view: str) -> list[str]:
+    lines = [
+        f"[bold {ACCENT_GOLD}]r[/]  refresh",
+        f"[bold {ACCENT_GOLD}]s[/]  start server",
+        f"[bold {ACCENT_GOLD}]x[/]  stop server",
+        f"[bold {ACCENT_GOLD}]R[/]  restart server",
+    ]
+
+    if active_view == "accounts":
+        lines.extend(
+            [
+                f"[bold {ACCENT_GOLD}]c[/]  create account",
+                f"[bold {ACCENT_GOLD}]p[/]  reset password",
+                f"[bold {ACCENT_GOLD}]g[/]  set GM level",
+                f"[bold {ACCENT_GOLD}]n[/]  ban account",
+                f"[bold {ACCENT_GOLD}]u[/]  unban account",
+            ]
+        )
+    elif active_view == "backups":
+        lines.extend(
+            [
+                f"[bold {ACCENT_GOLD}]b[/]  backup now",
+                f"[bold {ACCENT_GOLD}]v[/]  verify backup",
+                f"[bold {ACCENT_GOLD}]d[/]  restore dry-run",
+                f"[bold {ACCENT_GOLD}]y[/]  schedule daily",
+                f"[bold {ACCENT_GOLD}]w[/]  schedule weekly",
+            ]
+        )
+    elif active_view == "config":
+        lines.append(f"[bold {ACCENT_GOLD}]k[/]  validate config")
+    else:
+        lines.extend(
+            [
+                f"[bold {ACCENT_GOLD}]b[/]  backup now",
+                f"[bold {ACCENT_GOLD}]v[/]  verify backup",
+                f"[bold {ACCENT_GOLD}]k[/]  validate config",
+            ]
+        )
+
+    lines.extend(
+        [
+            f"[bold {ACCENT_GOLD}]t[/]  theme",
+            f"[bold {ACCENT_GOLD}]q[/]  quit",
+        ]
+    )
+    return lines
+
+
+def build_dashboard_action_request(
+    snapshot: dict[str, Any],
+    selected_account_id: str,
+    selected_backup_file: str,
+    action_name: str,
+    form_values: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    values = normalize_form_values(form_values)
+
+    if action_name == "account_create":
+        username = values.get("username", "")
+        password = values.get("password", "")
+        confirm_password = values.get("confirm_password", "")
+        if not USERNAME_PATTERN.fullmatch(username):
+            return {"error": "account create skipped: username must be 2-32 alphanumeric characters"}
+        if len(password) < 6 or len(password) > 32:
+            return {"error": "account create skipped: password must be 6-32 characters"}
+        if password != confirm_password:
+            return {"error": "account create skipped: passwords do not match"}
+        return {
+            "label": f"account create {username}",
+            "command": ["account", "create", username, "--password-env"],
+            "env": {"VMANGOS_PASSWORD": password},
+            "refresh_after": True,
+            "view": "accounts",
+        }
+
+    if action_name == "config_validate":
+        return {
+            "label": "config validate",
+            "command": ["config", "validate"],
+            "env": {},
+            "refresh_after": True,
+            "view": "config",
+        }
+
+    account = find_selected_account(snapshot, selected_account_id)
+    if action_name.startswith("account_"):
+        if account is None:
+            return {"error": "account action skipped: no account selected"}
+        username = str(account.get("username", "")).strip()
+        if not username:
+            return {"error": "account action skipped: selected account has no username"}
+
+        if action_name == "account_password":
+            password = values.get("password", "")
+            confirm_password = values.get("confirm_password", "")
+            if len(password) < 6 or len(password) > 32:
+                return {"error": "password reset skipped: password must be 6-32 characters"}
+            if password != confirm_password:
+                return {"error": "password reset skipped: passwords do not match"}
+            return {
+                "label": f"account password {username}",
+                "command": ["account", "password", username, "--password-env"],
+                "env": {"VMANGOS_PASSWORD": password},
+                "refresh_after": True,
+                "view": "accounts",
+            }
+
+        if action_name == "account_setgm":
+            gm_level = values.get("gm_level", "")
+            if not GM_LEVEL_PATTERN.fullmatch(gm_level):
+                return {"error": "set GM skipped: GM level must be 0, 1, 2, or 3"}
+            return {
+                "label": f"account setgm {username}",
+                "command": ["account", "setgm", username, gm_level],
+                "env": {},
+                "refresh_after": True,
+                "view": "accounts",
+            }
+
+        if action_name == "account_ban":
+            duration = values.get("duration", "")
+            reason = values.get("reason", "")
+            if not DURATION_PATTERN.fullmatch(duration):
+                return {"error": "account ban skipped: duration must use forms like 30m, 12h, or 7d"}
+            if not BAN_REASON_PATTERN.fullmatch(reason):
+                return {"error": "account ban skipped: reason must use letters, numbers, and spaces only"}
+            return {
+                "label": f"account ban {username}",
+                "command": ["account", "ban", username, duration, "--reason", reason],
+                "env": {},
+                "refresh_after": True,
+                "view": "accounts",
+            }
+
+        if action_name == "account_unban":
+            return {
+                "label": f"account unban {username}",
+                "command": ["account", "unban", username],
+                "env": {},
+                "refresh_after": True,
+                "view": "accounts",
+            }
+
+    if action_name.startswith("backup_"):
+        backup = find_selected_backup(snapshot, selected_backup_file)
+        backup_summary = snapshot.get("backups", {}).get("summary", {})
+        backup_dir = str(backup_summary.get("backup_dir", "")).strip()
+
+        if action_name == "backup_restore_dry_run":
+            if backup is None or not backup_dir:
+                return {"error": "backup restore skipped: no backup selected"}
+            backup_file = str(backup.get("file", "")).strip()
+            if not backup_file:
+                return {"error": "backup restore skipped: selected backup has no file name"}
+            backup_path = f"{backup_dir.rstrip('/')}/{backup_file}"
+            return {
+                "label": f"backup restore dry-run {backup_file}",
+                "command": ["backup", "restore", backup_path, "--dry-run"],
+                "env": {},
+                "refresh_after": False,
+                "view": "backups",
+            }
+
+        if action_name == "backup_schedule_daily":
+            daily_time = values.get("time", "")
+            if not DAILY_TIME_PATTERN.fullmatch(daily_time):
+                return {"error": "backup schedule skipped: daily time must use HH:MM in 24-hour format"}
+            return {
+                "label": f"backup schedule daily {daily_time}",
+                "command": ["backup", "schedule", "--daily", daily_time],
+                "env": {},
+                "refresh_after": True,
+                "view": "backups",
+            }
+
+        if action_name == "backup_schedule_weekly":
+            weekly_schedule = values.get("schedule", "")
+            if not WEEKLY_SCHEDULE_PATTERN.fullmatch(weekly_schedule):
+                return {"error": "backup schedule skipped: weekly value must use 'Mon 04:00' style format"}
+            return {
+                "label": f"backup schedule weekly {weekly_schedule}",
+                "command": ["backup", "schedule", "--weekly", weekly_schedule],
+                "env": {},
+                "refresh_after": True,
+                "view": "backups",
+            }
+
+    return {"error": f"unsupported dashboard action: {action_name}"}
+
+
 def summarize_backups(entries: list[dict[str, Any]], backup_dir: str) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "count": len(entries),
@@ -234,6 +457,7 @@ def summarize_backups(entries: list[dict[str, Any]], backup_dir: str) -> dict[st
 def empty_snapshot(error_message: str) -> dict[str, Any]:
     return {
         "captured_at": now_iso(),
+        "config_path": "",
         "server": {"ok": False, "data": {}, "error": error_message},
         "logs": {"ok": False, "data": {}, "error": error_message},
         "accounts_online": {"ok": False, "data": {}, "error": error_message},
@@ -326,6 +550,7 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
 
     return {
         "captured_at": now_iso(),
+        "config_path": config_path,
         "server": server,
         "logs": logs,
         "accounts_online": online_accounts,
@@ -363,14 +588,7 @@ def render_sidebar(active_view: str, last_action: str) -> str:
         [
             "",
             f"[bold {ACCENT_SKY}]Actions[/]",
-            f"[bold {ACCENT_GOLD}]r[/]  refresh",
-            f"[bold {ACCENT_GOLD}]s[/]  start server",
-            f"[bold {ACCENT_GOLD}]x[/]  stop server",
-            f"[bold {ACCENT_GOLD}]R[/]  restart server",
-            f"[bold {ACCENT_GOLD}]b[/]  backup now",
-            f"[bold {ACCENT_GOLD}]v[/]  verify backup",
-            f"[bold {ACCENT_GOLD}]t[/]  theme",
-            f"[bold {ACCENT_GOLD}]q[/]  quit",
+            *render_context_actions(active_view),
             "",
             f"[bold {ACCENT_SKY}]Last Action[/]",
             f"[{ACCENT_MUTED}]{escape_markup(truncate_text(last_action, 80)) or 'dashboard started'}[/]",
@@ -502,6 +720,9 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
                 f"[{ACCENT_MUTED}]Accounts loaded:[/] {total_accounts}",
                 "",
                 f"[{ACCENT_MUTED}]Select an account row to inspect it.[/]",
+                "",
+                f"[{ACCENT_MUTED}]Action hotkeys:[/]",
+                f"[bold {ACCENT_GOLD}]c[/]  create account",
             ]
         )
 
@@ -510,14 +731,19 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
             f"[bold {ACCENT_GOLD}]Account Details[/]",
             "",
             f"[{ACCENT_MUTED}]ID[/]         [bold {ACCENT_SKY}]{account.get('id', 0)}[/]",
-            f"[{ACCENT_MUTED}]Username[/]   [bold {ACCENT_TEAL}]{account.get('username', '-')}[/]",
+            f"[{ACCENT_MUTED}]Username[/]   [bold {ACCENT_TEAL}]{escape_markup(account.get('username', '-'))}[/]",
             f"[{ACCENT_MUTED}]GM Level[/]   {account.get('gm_level', 0)}",
             f"[{ACCENT_MUTED}]Online[/]     {'yes' if account.get('online') else 'no'}",
             f"[{ACCENT_MUTED}]Banned[/]     {'yes' if account.get('banned') else 'no'}",
             "",
             f"[{ACCENT_MUTED}]Accounts loaded:[/] {total_accounts}",
             "",
-            f"[{ACCENT_MUTED}]Mutation flows remain CLI-backed in this slice.[/]",
+            f"[{ACCENT_MUTED}]Action hotkeys:[/]",
+            f"[bold {ACCENT_GOLD}]c[/]  create account",
+            f"[bold {ACCENT_GOLD}]p[/]  reset password",
+            f"[bold {ACCENT_GOLD}]g[/]  set GM level",
+            f"[bold {ACCENT_GOLD}]n[/]  ban account",
+            f"[bold {ACCENT_GOLD}]u[/]  unban account",
         ]
     )
 
@@ -594,6 +820,9 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
                 f"[{ACCENT_MUTED}]Action hotkeys:[/]",
                 f"[bold {ACCENT_GOLD}]b[/]  run backup now --verify",
                 f"[bold {ACCENT_GOLD}]v[/]  verify selected backup",
+                f"[bold {ACCENT_GOLD}]d[/]  restore selected backup --dry-run",
+                f"[bold {ACCENT_GOLD}]y[/]  schedule daily backup",
+                f"[bold {ACCENT_GOLD}]w[/]  schedule weekly backup",
             ]
         )
     else:
@@ -605,6 +834,9 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
                 f"[{ACCENT_MUTED}]Action hotkeys:[/]",
                 f"[bold {ACCENT_GOLD}]b[/]  run backup now --verify",
                 f"[bold {ACCENT_GOLD}]v[/]  verify selected backup",
+                f"[bold {ACCENT_GOLD}]d[/]  restore selected backup --dry-run",
+                f"[bold {ACCENT_GOLD}]y[/]  schedule daily backup",
+                f"[bold {ACCENT_GOLD}]w[/]  schedule weekly backup",
             ]
         )
 
@@ -615,6 +847,7 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
     validate = snapshot["config_validate"]
     summary = snapshot.get("config_summary", {})
     content = snapshot.get("config_content", "")
+    config_path = str(snapshot.get("config_path", "") or "n/a")
     preview_lines = content.splitlines()[:16]
     preview = "\n".join(escape_markup(line) for line in preview_lines) if preview_lines else "No config content available."
 
@@ -628,6 +861,7 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            f"[{ACCENT_MUTED}]Config Path[/]   {escape_markup(config_path)}",
             f"[{ACCENT_MUTED}]Install Root[/]  {summary.get('install_root', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]Auth Service[/]  {summary.get('auth_service', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]World Service[/] {summary.get('world_service', 'n/a') or 'n/a'}",
@@ -638,6 +872,10 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
             "",
             f"[bold {ACCENT_SKY}]Config Preview[/]",
             preview,
+            "",
+            f"[{ACCENT_MUTED}]Action hotkeys:[/]",
+            f"[bold {ACCENT_GOLD}]k[/]  validate config",
+            f"[{ACCENT_MUTED}]Existing-host tip:[/] use [bold {ACCENT_GOLD}]vmangos-manager config detect[/] in the CLI when wiring Manager onto a custom install.",
         ]
     )
     return "\n".join(lines)
@@ -660,11 +898,74 @@ def create_app(
     try:
         from textual.app import App, ComposeResult
         from textual.containers import Container, Horizontal, Vertical
-        from textual.widgets import DataTable, Footer, Header, Static
+        from textual.screen import ModalScreen
+        from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
     except ImportError as exc:
         raise DashboardRuntimeError(
             f"Textual runtime import failed: {exc}. Run 'vmangos-manager dashboard --bootstrap' first."
         ) from exc
+
+    class CommandFormScreen(ModalScreen[dict[str, str] | None]):
+        BINDINGS = [("escape", "cancel", "Cancel"), ("enter", "submit", "Submit")]
+
+        def __init__(
+            self,
+            title: str,
+            submit_label: str,
+            fields: list[dict[str, Any]],
+            intro: str = "",
+        ) -> None:
+            super().__init__()
+            self.title = title
+            self.submit_label = submit_label
+            self.fields = fields
+            self.intro = intro
+
+        def compose(self) -> ComposeResult:
+            with Container(id="command-modal"):
+                yield Static(self.title, id="command-modal-title")
+                if self.intro:
+                    yield Static(self.intro, id="command-modal-intro")
+                for field in self.fields:
+                    yield Label(str(field.get("label", "")), classes="command-modal-label")
+                    yield Input(
+                        value=str(field.get("value", "")),
+                        placeholder=str(field.get("placeholder", "")),
+                        password=bool(field.get("password", False)),
+                        id=f"command-field-{field['name']}",
+                    )
+                yield Static("", id="command-modal-error")
+                with Horizontal(id="command-modal-actions"):
+                    yield Button("Cancel", id="command-cancel")
+                    yield Button(self.submit_label, id="command-submit", variant="primary")
+
+        def on_mount(self) -> None:
+            if getattr(self.app, "theme_name", "dark") == "light":
+                self.add_class("theme-light")
+            inputs = list(self.query(Input))
+            if inputs:
+                self.set_focus(inputs[0])
+            else:
+                self.set_focus(self.query_one("#command-submit", Button))
+
+        def collect_values(self) -> dict[str, str]:
+            values: dict[str, str] = {}
+            for field in self.fields:
+                widget = self.query_one(f"#command-field-{field['name']}", Input)
+                values[str(field["name"])] = widget.value
+            return values
+
+        def action_cancel(self) -> None:
+            self.dismiss(None)
+
+        def action_submit(self) -> None:
+            self.dismiss(self.collect_values())
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "command-cancel":
+                self.dismiss(None)
+            elif event.button.id == "command-submit":
+                self.dismiss(self.collect_values())
 
     class VMangosDashboard(App[None]):
         CSS = """
@@ -807,6 +1108,72 @@ def create_app(
         #config-pane {
             height: 1fr;
         }
+
+        CommandFormScreen {
+            align: center middle;
+            background: rgba(6, 17, 29, 0.78);
+        }
+
+        CommandFormScreen.theme-light {
+            background: rgba(246, 241, 231, 0.82);
+        }
+
+        #command-modal {
+            width: 72;
+            max-width: 96;
+            height: auto;
+            border: round #f59e0b;
+            background: #0b1726;
+            padding: 1 2;
+        }
+
+        CommandFormScreen.theme-light #command-modal {
+            border: round #2563eb;
+            background: #fffdf7;
+        }
+
+        #command-modal-title {
+            text-style: bold;
+            color: #f8fafc;
+            margin-bottom: 1;
+        }
+
+        CommandFormScreen.theme-light #command-modal-title {
+            color: #111827;
+        }
+
+        #command-modal-intro {
+            color: #cbd5e1;
+            margin-bottom: 1;
+        }
+
+        CommandFormScreen.theme-light #command-modal-intro {
+            color: #475569;
+        }
+
+        .command-modal-label {
+            margin-top: 1;
+            color: #7dd3fc;
+        }
+
+        CommandFormScreen.theme-light .command-modal-label {
+            color: #1d4ed8;
+        }
+
+        #command-modal-error {
+            color: #fb7185;
+            min-height: 1;
+            margin-top: 1;
+        }
+
+        #command-modal-actions {
+            height: auto;
+            margin-top: 1;
+        }
+
+        #command-submit {
+            margin-left: 1;
+        }
         """
 
         BINDINGS = [
@@ -817,6 +1184,15 @@ def create_app(
             ("R", "restart_server", "Restart"),
             ("b", "backup_now", "Backup"),
             ("v", "verify_selected_backup", "Verify"),
+            ("c", "create_account", "Create"),
+            ("p", "reset_account_password", "Password"),
+            ("g", "set_account_gm", "Set GM"),
+            ("n", "ban_account", "Ban"),
+            ("u", "unban_account", "Unban"),
+            ("d", "restore_selected_backup_dry_run", "Dry Run"),
+            ("y", "schedule_daily_backup", "Daily"),
+            ("w", "schedule_weekly_backup", "Weekly"),
+            ("k", "validate_config", "Validate"),
             ("1", "show_overview", "Overview"),
             ("2", "show_accounts", "Accounts"),
             ("3", "show_backups", "Backups"),
@@ -944,6 +1320,12 @@ def create_app(
             self.save_screenshot(self.screenshot_path)
             self.exit()
 
+        def selected_account(self) -> dict[str, Any] | None:
+            return find_selected_account(self.snapshot, self.selected_account_id)
+
+        def selected_backup(self) -> dict[str, Any] | None:
+            return find_selected_backup(self.snapshot, self.selected_backup_file)
+
         def refresh_players(self, players: list[dict[str, Any]]) -> None:
             table = self.query_one("#players-table", DataTable)
             table.clear(columns=False)
@@ -1056,6 +1438,49 @@ def create_app(
                 render_backups_summary(snapshot=self.snapshot, selected_backup=entry)
             )
 
+        def open_command_form(
+            self,
+            action_name: str,
+            title: str,
+            submit_label: str,
+            fields: list[dict[str, Any]],
+            intro: str = "",
+        ) -> None:
+            self.push_screen(
+                CommandFormScreen(title=title, submit_label=submit_label, fields=fields, intro=intro),
+                lambda result, action_name=action_name: self.handle_command_form_result(action_name, result),
+            )
+
+        def handle_command_form_result(self, action_name: str, result: dict[str, str] | None) -> None:
+            if result is None:
+                return
+            self.dispatch_dashboard_action(action_name, result)
+
+        def dispatch_dashboard_action(self, action_name: str, form_values: dict[str, Any] | None = None) -> None:
+            request = build_dashboard_action_request(
+                self.snapshot,
+                self.selected_account_id,
+                self.selected_backup_file,
+                action_name,
+                form_values,
+            )
+            error = str(request.get("error", ""))
+            if error:
+                self.set_action_result(error)
+                return
+
+            target_view = str(request.get("view", "") or "")
+            if target_view and target_view != self.active_view:
+                self.active_view = target_view
+                self.apply_view_state()
+
+            self.request_command_action(
+                str(request["label"]),
+                list(request["command"]),
+                refresh_after=bool(request.get("refresh_after", True)),
+                env=dict(request.get("env", {})),
+            )
+
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
             if event.data_table.id == "players-table":
                 self.update_selected_player(event.row_key)
@@ -1126,26 +1551,157 @@ def create_app(
             backup_path = f"{backup_dir.rstrip('/')}/{self.selected_backup_file}"
             self.request_command_action("verify", ["backup", "verify", backup_path, "--level", "1"], refresh_after=False)
 
+        def action_create_account(self) -> None:
+            self.active_view = "accounts"
+            self.apply_view_state()
+            self.open_command_form(
+                "account_create",
+                "Create Account",
+                "Create",
+                [
+                    {"name": "username", "label": "Username", "placeholder": "PLAYERONE"},
+                    {"name": "password", "label": "Password", "password": True},
+                    {"name": "confirm_password", "label": "Confirm Password", "password": True},
+                ],
+                "Create a VMaNGOS account using the existing Manager CLI backend.",
+            )
+
+        def action_reset_account_password(self) -> None:
+            account = self.selected_account()
+            if account is None:
+                self.set_action_result("password reset skipped: no account selected")
+                return
+            username = str(account.get("username", "selected account")).strip()
+            self.active_view = "accounts"
+            self.apply_view_state()
+            self.open_command_form(
+                "account_password",
+                "Reset Account Password",
+                "Reset",
+                [
+                    {"name": "password", "label": "New Password", "password": True},
+                    {"name": "confirm_password", "label": "Confirm Password", "password": True},
+                ],
+                f"Reset the password for {username}.",
+            )
+
+        def action_set_account_gm(self) -> None:
+            account = self.selected_account()
+            if account is None:
+                self.set_action_result("set GM skipped: no account selected")
+                return
+            username = str(account.get("username", "selected account")).strip()
+            self.active_view = "accounts"
+            self.apply_view_state()
+            self.open_command_form(
+                "account_setgm",
+                "Set GM Level",
+                "Apply",
+                [
+                    {
+                        "name": "gm_level",
+                        "label": "GM Level (0-3)",
+                        "value": str(account.get("gm_level", 0)),
+                        "placeholder": "0",
+                    }
+                ],
+                f"Adjust GM access for {username}.",
+            )
+
+        def action_ban_account(self) -> None:
+            account = self.selected_account()
+            if account is None:
+                self.set_action_result("account ban skipped: no account selected")
+                return
+            username = str(account.get("username", "selected account")).strip()
+            self.active_view = "accounts"
+            self.apply_view_state()
+            self.open_command_form(
+                "account_ban",
+                "Ban Account",
+                "Ban",
+                [
+                    {"name": "duration", "label": "Duration", "placeholder": "7d"},
+                    {"name": "reason", "label": "Reason", "placeholder": "Abuse"},
+                ],
+                f"Ban {username} with the existing account CLI workflow.",
+            )
+
+        def action_unban_account(self) -> None:
+            self.dispatch_dashboard_action("account_unban")
+
+        def action_restore_selected_backup_dry_run(self) -> None:
+            backup = self.selected_backup()
+            if backup is None:
+                self.set_action_result("backup restore skipped: no backup selected")
+                return
+            backup_file = str(backup.get("file", "selected backup")).strip()
+            self.active_view = "backups"
+            self.apply_view_state()
+            self.open_command_form(
+                "backup_restore_dry_run",
+                "Restore Dry Run",
+                "Run Dry Run",
+                [],
+                f"Run a dry-run restore check for {backup_file}.",
+            )
+
+        def action_schedule_daily_backup(self) -> None:
+            self.active_view = "backups"
+            self.apply_view_state()
+            self.open_command_form(
+                "backup_schedule_daily",
+                "Schedule Daily Backup",
+                "Schedule",
+                [{"name": "time", "label": "Daily Time (HH:MM)", "value": "04:00", "placeholder": "04:00"}],
+                "Install or update the daily backup timer.",
+            )
+
+        def action_schedule_weekly_backup(self) -> None:
+            self.active_view = "backups"
+            self.apply_view_state()
+            self.open_command_form(
+                "backup_schedule_weekly",
+                "Schedule Weekly Backup",
+                "Schedule",
+                [{"name": "schedule", "label": "Weekly Schedule", "value": "Sun 04:00", "placeholder": "Sun 04:00"}],
+                "Install or update the weekly backup timer.",
+            )
+
+        def action_validate_config(self) -> None:
+            self.dispatch_dashboard_action("config_validate")
+
         def request_command_action(
             self,
             label: str,
             command: list[str],
             *,
             refresh_after: bool = True,
+            env: dict[str, str] | None = None,
         ) -> None:
             if self.action_inflight:
+                self.set_action_result("another dashboard action is already running")
                 return
             self.action_inflight = True
+            self.set_action_result(f"{label} running...")
             threading.Thread(
                 target=self.run_command_action,
-                args=(label, command, refresh_after),
+                args=(label, command, refresh_after, env or {}),
                 daemon=True,
             ).start()
 
-        def run_command_action(self, label: str, command: list[str], refresh_after: bool) -> None:
+        def run_command_action(
+            self,
+            label: str,
+            command: list[str],
+            refresh_after: bool,
+            env: dict[str, str],
+        ) -> None:
             try:
                 full_command = [self.manager_bin, "-c", self.config_path, *command]
-                completed = subprocess.run(full_command, capture_output=True, text=True, check=False)
+                command_env = os.environ.copy()
+                command_env.update(env)
+                completed = subprocess.run(full_command, capture_output=True, text=True, check=False, env=command_env)
                 output = (completed.stdout or completed.stderr or "").strip().splitlines()
                 message = output[-1] if output else f"{label} exited with code {completed.returncode}"
                 if completed.returncode == 0:
