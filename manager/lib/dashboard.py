@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -13,20 +14,26 @@ from typing import Any
 
 
 STATUS_COLORS = {
-    "healthy": "green",
-    "ok": "green",
-    "active": "green",
-    "warning": "yellow",
-    "degraded": "yellow",
-    "missing": "yellow",
-    "stopped": "yellow",
-    "inactive": "yellow",
-    "critical": "red",
-    "failed": "red",
-    "crash-loop": "red",
-    "unreachable": "red",
-    "unavailable": "bright_black",
+    "healthy": "#34d399",
+    "ok": "#22c55e",
+    "active": "#2dd4bf",
+    "warning": "#f59e0b",
+    "degraded": "#fbbf24",
+    "missing": "#f59e0b",
+    "stopped": "#f59e0b",
+    "inactive": "#f59e0b",
+    "critical": "#f87171",
+    "failed": "#ef4444",
+    "crash-loop": "#fb7185",
+    "unreachable": "#fb7185",
+    "unavailable": "#94a3b8",
 }
+
+ACCENT_GOLD = "#f59e0b"
+ACCENT_SKY = "#7dd3fc"
+ACCENT_TEAL = "#2dd4bf"
+ACCENT_ROSE = "#fb7185"
+ACCENT_MUTED = "#cbd5e1"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -345,26 +352,28 @@ def render_sidebar(active_view: str, last_action: str) -> str:
         ("config", "4", "Config"),
     ]
 
-    lines = ["[b]Manager Console[/b]", "", "Views"]
+    lines = [f"[bold {ACCENT_GOLD}]Manager Console[/]", "", f"[bold {ACCENT_SKY}]Views[/]"]
     for name, key, label in sections:
-        marker = "▶" if name == active_view else " "
-        lines.append(f"{marker} [{key}] {label}")
+        if name == active_view:
+            lines.append(f"[bold {ACCENT_TEAL}]▶[/] [bold {ACCENT_GOLD}]{key}[/] [bold {ACCENT_TEAL}]{label}[/]")
+        else:
+            lines.append(f"[{ACCENT_MUTED}]  [/] [bold {ACCENT_GOLD}]{key}[/] [{ACCENT_MUTED}]{label}[/]")
 
     lines.extend(
         [
             "",
-            "[b]Actions[/b]",
-            "r  refresh",
-            "s  start server",
-            "x  stop server",
-            "R  restart server",
-            "b  backup now",
-            "v  verify backup",
-            "t  theme",
-            "q  quit",
+            f"[bold {ACCENT_SKY}]Actions[/]",
+            f"[bold {ACCENT_GOLD}]r[/]  refresh",
+            f"[bold {ACCENT_GOLD}]s[/]  start server",
+            f"[bold {ACCENT_GOLD}]x[/]  stop server",
+            f"[bold {ACCENT_GOLD}]R[/]  restart server",
+            f"[bold {ACCENT_GOLD}]b[/]  backup now",
+            f"[bold {ACCENT_GOLD}]v[/]  verify backup",
+            f"[bold {ACCENT_GOLD}]t[/]  theme",
+            f"[bold {ACCENT_GOLD}]q[/]  quit",
             "",
-            "[b]Last Action[/b]",
-            escape_markup(truncate_text(last_action, 80)) or "dashboard started",
+            f"[bold {ACCENT_SKY}]Last Action[/]",
+            f"[{ACCENT_MUTED}]{escape_markup(truncate_text(last_action, 80)) or 'dashboard started'}[/]",
         ]
     )
     return "\n".join(lines)
@@ -375,11 +384,11 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
     if not server["ok"]:
         return "\n".join(
             [
-                "[b]Service Overview[/b]",
+                f"[bold {ACCENT_GOLD}]Service Overview[/]",
                 "",
-                f"[red]Server snapshot failed:[/] {server['error']}",
+                f"[bold {ACCENT_ROSE}]Server snapshot failed:[/] {server['error']}",
                 "",
-                f"Current view: {active_view}",
+                f"[{ACCENT_MUTED}]Current view:[/] {active_view}",
             ]
         )
 
@@ -392,15 +401,15 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
 
     return "\n".join(
         [
-            "[b]Service Overview[/b]",
+            f"[bold {ACCENT_GOLD}]Service Overview[/]",
             "",
-            f"Auth   {format_state(auth.get('health', auth.get('state')))}  pid {auth.get('pid', 0)}  up {auth.get('uptime_human', 'N/A')}",
-            f"World  {format_state(world.get('health', world.get('state')))}  pid {world.get('pid', 0)}  up {world.get('uptime_human', 'N/A')}",
+            f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
+            f"[bold {ACCENT_SKY}]World[/]  {format_state(world.get('health', world.get('state')))}  [{ACCENT_MUTED}]pid[/] {world.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {world.get('uptime_human', 'N/A')}",
             "",
-            f"DB     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}",
-            f"Users  [bold]{players.get('online', 0)}[/] online via {players.get('source', 'unavailable')}",
+            f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}",
+            f"[bold {ACCENT_SKY}]Users[/]  [bold {ACCENT_GOLD}]{players.get('online', 0)}[/] [{ACCENT_MUTED}]online via[/] {players.get('source', 'unavailable')}",
             "",
-            f"Snapshot {iso_to_display(snapshot.get('captured_at'))}",
+            f"[{ACCENT_MUTED}]Snapshot[/] {iso_to_display(snapshot.get('captured_at'))}",
         ]
     )
 
@@ -408,7 +417,7 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
 def render_metrics_panel(snapshot: dict[str, Any]) -> str:
     server = snapshot["server"]
     logs = snapshot["logs"]
-    lines = ["[b]Host Metrics[/b]", ""]
+    lines = [f"[bold {ACCENT_GOLD}]Host Metrics[/]", ""]
 
     if server["ok"]:
         data = server["data"]
@@ -420,24 +429,24 @@ def render_metrics_panel(snapshot: dict[str, Any]) -> str:
         storage_io = data.get("storage_io", {})
         lines.extend(
             [
-                f"CPU      {cpu.get('usage_percent', 0)}%  {format_state(cpu.get('status', 'unavailable'))}  cores {cpu.get('cores', 0)}",
-                f"Memory   {memory.get('used_percent', 0)}%  {format_state(memory.get('status', 'unavailable'))}  {format_mb_from_kb(memory.get('used_kb', 0))} used",
-                f"Load     {load.get('load_1', 0)} / {load.get('load_5', 0)} / {load.get('load_15', 0)}  {format_state(load.get('status', 'unavailable'))}",
-                f"Disk     {disk.get('used_percent', 0)}%  {format_state(disk.get('status', 'unavailable'))}  free {format_gb_from_kb(disk.get('available_kb', 0))}",
+                f"[bold {ACCENT_SKY}]CPU[/]      {cpu.get('usage_percent', 0)}%  {format_state(cpu.get('status', 'unavailable'))}  [{ACCENT_MUTED}]cores[/] {cpu.get('cores', 0)}",
+                f"[bold {ACCENT_SKY}]Memory[/]   {memory.get('used_percent', 0)}%  {format_state(memory.get('status', 'unavailable'))}  {format_mb_from_kb(memory.get('used_kb', 0))} [{ACCENT_MUTED}]used[/]",
+                f"[bold {ACCENT_SKY}]Load[/]     {load.get('load_1', 0)} / {load.get('load_5', 0)} / {load.get('load_15', 0)}  {format_state(load.get('status', 'unavailable'))}",
+                f"[bold {ACCENT_SKY}]Disk[/]     {disk.get('used_percent', 0)}%  {format_state(disk.get('status', 'unavailable'))}  [{ACCENT_MUTED}]free[/] {format_gb_from_kb(disk.get('available_kb', 0))}",
             ]
         )
         if storage_io.get("available"):
             lines.append(
-                f"I/O      {storage_io.get('util_percent', 0)}% util  {format_state(storage_io.get('status', 'unavailable'))}  {storage_io.get('device', 'n/a')}"
+                f"[bold {ACCENT_SKY}]I/O[/]      {storage_io.get('util_percent', 0)}% [{ACCENT_MUTED}]util[/]  {format_state(storage_io.get('status', 'unavailable'))}  {storage_io.get('device', 'n/a')}"
             )
         else:
             lines.append(
-                f"I/O      {format_state(storage_io.get('status', 'unavailable'))}  install sysstat/iostat for live disk stats"
+                f"[bold {ACCENT_SKY}]I/O[/]      {format_state(storage_io.get('status', 'unavailable'))}  [{ACCENT_MUTED}]install sysstat/iostat for live disk stats[/]"
             )
     else:
-        lines.append(f"[red]Server metrics unavailable:[/] {server['error']}")
+        lines.append(f"[bold {ACCENT_ROSE}]Server metrics unavailable:[/] {server['error']}")
 
-    lines.extend(["", "[b]Log Rotation[/b]"])
+    lines.extend(["", f"[bold {ACCENT_SKY}]Log Rotation[/]"])
     if logs["ok"]:
         data = logs["data"]
         config = data.get("config", {})
@@ -445,14 +454,14 @@ def render_metrics_panel(snapshot: dict[str, Any]) -> str:
         disk = data.get("disk", {})
         lines.extend(
             [
-                f"Health   {format_state(data.get('status', 'unavailable'))}",
-                f"Config   present={config.get('present', False)}  in_sync={config.get('in_sync', False)}",
-                f"Files    active={log_counts.get('active_files', 0)}  rotated={log_counts.get('rotated_files', 0)}",
-                f"Disk     {disk.get('used_percent', 0)}% used  free {format_gb_from_kb(disk.get('available_kb', 0))}",
+                f"[bold {ACCENT_SKY}]Health[/]   {format_state(data.get('status', 'unavailable'))}",
+                f"[bold {ACCENT_SKY}]Config[/]   present={config.get('present', False)}  in_sync={config.get('in_sync', False)}",
+                f"[bold {ACCENT_SKY}]Files[/]    active={log_counts.get('active_files', 0)}  rotated={log_counts.get('rotated_files', 0)}",
+                f"[bold {ACCENT_SKY}]Disk[/]     {disk.get('used_percent', 0)}% [{ACCENT_MUTED}]used[/]  [{ACCENT_MUTED}]free[/] {format_gb_from_kb(disk.get('available_kb', 0))}",
             ]
         )
     else:
-        lines.append(f"[red]Logs snapshot unavailable:[/] {logs['error']}")
+        lines.append(f"[bold {ACCENT_ROSE}]Logs snapshot unavailable:[/] {logs['error']}")
 
     return "\n".join(lines)
 
@@ -461,25 +470,25 @@ def render_player_details(player: dict[str, Any] | None) -> str:
     if not player:
         return "\n".join(
             [
-                "[b]Player Details[/b]",
+                f"[bold {ACCENT_GOLD}]Player Details[/]",
                 "",
-                "No online players.",
+                f"[{ACCENT_MUTED}]No online players.[/]",
                 "",
-                "See [2] Accounts.",
+                f"[{ACCENT_MUTED}]See[/] [bold {ACCENT_GOLD}]Accounts[/]",
             ]
         )
 
     return "\n".join(
         [
-            "[b]Player Details[/b]",
+            f"[bold {ACCENT_GOLD}]Player Details[/]",
             "",
-            f"ID         {player.get('id', 0)}",
-            f"Username   {player.get('username', '-')}",
-            f"GM Level   {player.get('gm_level', 0)}",
-            f"Online     {'yes' if player.get('online') else 'no'}",
-            f"Banned     {'yes' if player.get('banned') else 'no'}",
+            f"[{ACCENT_MUTED}]ID[/]         [bold {ACCENT_SKY}]{player.get('id', 0)}[/]",
+            f"[{ACCENT_MUTED}]Username[/]   [bold {ACCENT_TEAL}]{player.get('username', '-')}[/]",
+            f"[{ACCENT_MUTED}]GM Level[/]   {player.get('gm_level', 0)}",
+            f"[{ACCENT_MUTED}]Online[/]     {'yes' if player.get('online') else 'no'}",
+            f"[{ACCENT_MUTED}]Banned[/]     {'yes' if player.get('banned') else 'no'}",
             "",
-            "See [2] Accounts.",
+            f"[{ACCENT_MUTED}]See[/] [bold {ACCENT_GOLD}]Accounts[/]",
         ]
     )
 
@@ -488,37 +497,37 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
     if not account:
         return "\n".join(
             [
-                "[b]Account Details[/b]",
+                f"[bold {ACCENT_GOLD}]Account Details[/]",
                 "",
-                f"Accounts loaded: {total_accounts}",
+                f"[{ACCENT_MUTED}]Accounts loaded:[/] {total_accounts}",
                 "",
-                "Select an account row to inspect it.",
+                f"[{ACCENT_MUTED}]Select an account row to inspect it.[/]",
             ]
         )
 
     return "\n".join(
         [
-            "[b]Account Details[/b]",
+            f"[bold {ACCENT_GOLD}]Account Details[/]",
             "",
-            f"ID         {account.get('id', 0)}",
-            f"Username   {account.get('username', '-')}",
-            f"GM Level   {account.get('gm_level', 0)}",
-            f"Online     {'yes' if account.get('online') else 'no'}",
-            f"Banned     {'yes' if account.get('banned') else 'no'}",
+            f"[{ACCENT_MUTED}]ID[/]         [bold {ACCENT_SKY}]{account.get('id', 0)}[/]",
+            f"[{ACCENT_MUTED}]Username[/]   [bold {ACCENT_TEAL}]{account.get('username', '-')}[/]",
+            f"[{ACCENT_MUTED}]GM Level[/]   {account.get('gm_level', 0)}",
+            f"[{ACCENT_MUTED}]Online[/]     {'yes' if account.get('online') else 'no'}",
+            f"[{ACCENT_MUTED}]Banned[/]     {'yes' if account.get('banned') else 'no'}",
             "",
-            f"Accounts loaded: {total_accounts}",
+            f"[{ACCENT_MUTED}]Accounts loaded:[/] {total_accounts}",
             "",
-            "Mutation flows remain CLI-backed in this slice.",
+            f"[{ACCENT_MUTED}]Mutation flows remain CLI-backed in this slice.[/]",
         ]
     )
 
 
 def render_alerts_panel(snapshot: dict[str, Any]) -> str:
     server = snapshot["server"]
-    lines = ["[b]Alerts and Events[/b]", ""]
+    lines = [f"[bold {ACCENT_GOLD}]Alerts and Events[/]", ""]
 
     if not server["ok"]:
-        lines.append(f"[red]Alerts unavailable:[/] {server['error']}")
+        lines.append(f"[bold {ACCENT_ROSE}]Alerts unavailable:[/] {server['error']}")
         return "\n".join(lines)
 
     data = server["data"]
@@ -528,7 +537,7 @@ def render_alerts_panel(snapshot: dict[str, Any]) -> str:
 
     lines.append(f"Overall  {format_state(alerts.get('status', 'healthy'))}")
     lines.append("")
-    lines.append("[b]Active Alerts[/b]")
+    lines.append(f"[bold {ACCENT_SKY}]Active Alerts[/]")
 
     if active_alerts:
         for alert in active_alerts[:6]:
@@ -536,10 +545,10 @@ def render_alerts_panel(snapshot: dict[str, Any]) -> str:
                 f"{format_state(alert.get('severity', 'warning'))} {alert.get('source', 'unknown')}: {alert.get('message', '')}"
             )
     else:
-        lines.append("[green]No active alerts[/]")
+        lines.append(f"[bold {STATUS_COLORS['healthy']}]No active alerts[/]")
 
     lines.append("")
-    lines.append("[b]Recent Events[/b]")
+    lines.append(f"[bold {ACCENT_SKY}]Recent Events[/]")
     if recent_events:
         for event in recent_events[:8]:
             lines.append(f"{truncate_text(event.get('timestamp', ''), 19)} {event.get('service', 'unknown')}: {truncate_text(event.get('message', ''), 48)}")
@@ -553,49 +562,49 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
     backups = snapshot.get("backups", {})
     summary = backups.get("summary", {})
     lines = [
-        "[b]Backups[/b]",
+        f"[bold {ACCENT_GOLD}]Backups[/]",
         "",
-        f"Count      {summary.get('count', 0)}",
-        f"Directory  {summary.get('backup_dir', 'n/a') or 'n/a'}",
+        f"[{ACCENT_MUTED}]Count[/]      {summary.get('count', 0)}",
+        f"[{ACCENT_MUTED}]Directory[/]  {summary.get('backup_dir', 'n/a') or 'n/a'}",
     ]
 
     latest_file = summary.get("latest_file", "")
     if latest_file:
         lines.extend(
             [
-                f"Latest     {escape_markup(latest_file)}",
-                f"When       {iso_to_display(summary.get('latest_timestamp'))}",
-                f"Size       {format_bytes(summary.get('latest_size_bytes', 0))}",
+                f"[{ACCENT_MUTED}]Latest[/]     {escape_markup(latest_file)}",
+                f"[{ACCENT_MUTED}]When[/]       {iso_to_display(summary.get('latest_timestamp'))}",
+                f"[{ACCENT_MUTED}]Size[/]       {format_bytes(summary.get('latest_size_bytes', 0))}",
             ]
         )
     else:
-        lines.append("Latest     none")
+        lines.append(f"[{ACCENT_MUTED}]Latest[/]     none")
 
     if selected_backup:
         lines.extend(
             [
                 "",
-                "[b]Selected Backup[/b]",
-                f"File       {escape_markup(selected_backup.get('file', 'n/a'))}",
-                f"When       {iso_to_display(selected_backup.get('timestamp'))}",
-                f"Size       {format_bytes(selected_backup.get('size_bytes', 0))}",
-                f"DBs        {escape_markup(', '.join(selected_backup.get('databases', [])) or 'n/a')}",
-                f"Created By {escape_markup(selected_backup.get('created_by', 'n/a'))}",
+                f"[bold {ACCENT_SKY}]Selected Backup[/]",
+                f"[{ACCENT_MUTED}]File[/]       {escape_markup(selected_backup.get('file', 'n/a'))}",
+                f"[{ACCENT_MUTED}]When[/]       {iso_to_display(selected_backup.get('timestamp'))}",
+                f"[{ACCENT_MUTED}]Size[/]       {format_bytes(selected_backup.get('size_bytes', 0))}",
+                f"[{ACCENT_MUTED}]DBs[/]        {escape_markup(', '.join(selected_backup.get('databases', [])) or 'n/a')}",
+                f"[{ACCENT_MUTED}]Created By[/] {escape_markup(selected_backup.get('created_by', 'n/a'))}",
                 "",
-                "Action hotkeys:",
-                "b  run backup now --verify",
-                "v  verify selected backup",
+                f"[{ACCENT_MUTED}]Action hotkeys:[/]",
+                f"[bold {ACCENT_GOLD}]b[/]  run backup now --verify",
+                f"[bold {ACCENT_GOLD}]v[/]  verify selected backup",
             ]
         )
     else:
         lines.extend(
             [
                 "",
-                "No backup selected.",
+                f"[{ACCENT_MUTED}]No backup selected.[/]",
                 "",
-                "Action hotkeys:",
-                "b  run backup now --verify",
-                "v  verify selected backup",
+                f"[{ACCENT_MUTED}]Action hotkeys:[/]",
+                f"[bold {ACCENT_GOLD}]b[/]  run backup now --verify",
+                f"[bold {ACCENT_GOLD}]v[/]  verify selected backup",
             ]
         )
 
@@ -609,25 +618,25 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
     preview_lines = content.splitlines()[:16]
     preview = "\n".join(escape_markup(line) for line in preview_lines) if preview_lines else "No config content available."
 
-    lines = ["[b]Config Overview[/b]", ""]
+    lines = [f"[bold {ACCENT_GOLD}]Config Overview[/]", ""]
     if validate["ok"]:
         valid = validate["data"].get("valid", True)
         lines.append(f"Validation  {format_state('healthy' if valid else 'critical')}")
     else:
-        lines.append(f"[red]Validation failed:[/] {validate['error']}")
+        lines.append(f"[bold {ACCENT_ROSE}]Validation failed:[/] {validate['error']}")
 
     lines.extend(
         [
             "",
-            f"Install Root  {summary.get('install_root', 'n/a') or 'n/a'}",
-            f"Auth Service  {summary.get('auth_service', 'n/a') or 'n/a'}",
-            f"World Service {summary.get('world_service', 'n/a') or 'n/a'}",
-            f"DB Host       {summary.get('db_host', 'n/a') or 'n/a'}",
-            f"DB User       {summary.get('db_user', 'n/a') or 'n/a'}",
-            f"Backup Dir    {summary.get('backup_dir', 'n/a') or 'n/a'}",
-            f"DB Names      auth={summary.get('auth_db', 'n/a')} world={summary.get('world_db', 'n/a')} chars={summary.get('characters_db', 'n/a')} logs={summary.get('logs_db', 'n/a')}",
+            f"[{ACCENT_MUTED}]Install Root[/]  {summary.get('install_root', 'n/a') or 'n/a'}",
+            f"[{ACCENT_MUTED}]Auth Service[/]  {summary.get('auth_service', 'n/a') or 'n/a'}",
+            f"[{ACCENT_MUTED}]World Service[/] {summary.get('world_service', 'n/a') or 'n/a'}",
+            f"[{ACCENT_MUTED}]DB Host[/]       {summary.get('db_host', 'n/a') or 'n/a'}",
+            f"[{ACCENT_MUTED}]DB User[/]       {summary.get('db_user', 'n/a') or 'n/a'}",
+            f"[{ACCENT_MUTED}]Backup Dir[/]    {summary.get('backup_dir', 'n/a') or 'n/a'}",
+            f"[{ACCENT_MUTED}]DB Names[/]      auth={summary.get('auth_db', 'n/a')} world={summary.get('world_db', 'n/a')} chars={summary.get('characters_db', 'n/a')} logs={summary.get('logs_db', 'n/a')}",
             "",
-            "[b]Config Preview[/b]",
+            f"[bold {ACCENT_SKY}]Config Preview[/]",
             preview,
         ]
     )
@@ -645,6 +654,9 @@ def create_app(
     theme: str,
     screenshot_path: str | None,
 ):
+    os.environ.setdefault("TEXTUAL_COLOR_SYSTEM", "truecolor")
+    if screenshot_path:
+        os.environ.pop("NO_COLOR", None)
     try:
         from textual.app import App, ComposeResult
         from textual.containers import Container, Horizontal, Vertical
@@ -657,32 +669,32 @@ def create_app(
     class VMangosDashboard(App[None]):
         CSS = """
         Screen {
-            background: #08131f;
-            color: #f8fafc;
+            background: #06111d;
+            color: #e6edf7;
         }
 
         Screen.theme-light {
-            background: #f4efe3;
-            color: #111827;
+            background: #f6f1e7;
+            color: #142033;
         }
 
         Header {
-            background: #133b5c;
+            background: #1447a6;
             color: #f8fafc;
         }
 
         Screen.theme-light Header {
-            background: #d4e6f8;
+            background: #c9e1ff;
             color: #111827;
         }
 
         Footer {
-            background: #0f2538;
+            background: #0a2a43;
             color: #f8fafc;
         }
 
         Screen.theme-light Footer {
-            background: #dbeafe;
+            background: #d8ebff;
             color: #111827;
         }
 
@@ -694,14 +706,14 @@ def create_app(
         #sidebar {
             width: 24;
             min-width: 24;
-            border-right: heavy #1d4ed8;
-            background: #091728;
+            border-right: heavy #f59e0b;
+            background: #0b1726;
             padding: 1 1;
         }
 
         Screen.theme-light #sidebar {
-            border-right: heavy #60a5fa;
-            background: #eef5ff;
+            border-right: heavy #f59e0b;
+            background: #eef6ff;
         }
 
         #content {
@@ -718,8 +730,8 @@ def create_app(
         }
 
         .panel {
-            border: round #2dd4bf;
-            background: #0d1b2a;
+            border: round #14b8a6;
+            background: #102033;
             padding: 1 2;
             overflow: auto;
         }
@@ -879,6 +891,7 @@ def create_app(
             self.set_interval(self.refresh_interval, self.request_snapshot_refresh)
 
         def apply_theme(self) -> None:
+            self.theme = "tokyo-night" if self.theme_name == "dark" else "catppuccin-latte"
             self.remove_class("theme-light")
             self.remove_class("theme-dark")
             self.add_class(f"theme-{self.theme_name}")
