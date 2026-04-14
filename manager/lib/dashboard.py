@@ -55,10 +55,10 @@ VIEW_TITLES = {
 }
 
 VIEW_SUMMARIES = {
-    "overview": "Watch live realm health, host pressure, and player presence.",
-    "accounts": "Provision, secure, and moderate accounts without leaving the console.",
-    "backups": "Inspect backup inventory and queue protection workflows.",
-    "config": "Validate Manager wiring against the host it is operating.",
+    "overview": "Run the realm from one live control deck: services, host pressure, players, and alerts.",
+    "accounts": "Work the selected-account admin flow for provisioning, access, and moderation.",
+    "backups": "Check protection posture, then act on the selected archive with confidence.",
+    "config": "Confirm Manager's wiring view before you trust higher-level automation.",
     "operations": "Review the maintenance queue and preflight risky change windows.",
 }
 
@@ -1018,16 +1018,21 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
     world = data.get("services", {}).get("world", {})
     checks = data.get("checks", {})
     db = checks.get("database_connectivity", {})
+    auth_restarts = clamp_int(auth.get("restart_count_1h", 0))
+    world_restarts = clamp_int(world.get("restart_count_1h", 0))
 
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]Realm Services[/]",
-            f"[{ACCENT_MUTED}]Auth, world, and database readiness.[/]",
+            f"[{ACCENT_MUTED}]Auth, world, and database readiness at a glance.[/]",
             "",
             f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
-            f"[bold {ACCENT_SKY}]World[/]  {format_state(world.get('health', world.get('state')))}  [{ACCENT_MUTED}]pid[/] {world.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {world.get('uptime_human', 'N/A')}",
+            f"[{ACCENT_MUTED}]       cpu[/] {auth.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {auth.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {auth_restarts}",
             "",
-            f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}",
+            f"[bold {ACCENT_SKY}]World[/]  {format_state(world.get('health', world.get('state')))}  [{ACCENT_MUTED}]pid[/] {world.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {world.get('uptime_human', 'N/A')}",
+            f"[{ACCENT_MUTED}]       cpu[/] {world.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {world.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {world_restarts}",
+            "",
+            f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}  [{ACCENT_MUTED}]check[/] {escape_markup(db.get('message', 'n/a'))}",
         ]
     )
 
@@ -1041,7 +1046,7 @@ def render_metrics_panel(
     metric_history = metric_history or []
     lines = [
         f"[bold {ACCENT_GOLD}]Host Metrics[/]",
-        f"[{ACCENT_MUTED}]Machine pressure and short-term trend only.[/]",
+        f"[{ACCENT_MUTED}]Machine pressure, capacity, and short-term trend only.[/]",
         f"[{ACCENT_MUTED}]Recent window[/] {history_window_label(metric_history, refresh_interval)}",
         "",
     ]
@@ -1061,15 +1066,15 @@ def render_metrics_panel(
         io_history = history_values(metric_history, "io")
         lines.extend(
             [
-                f"[bold {ACCENT_SKY}]CPU[/]      {cpu.get('usage_percent', 0)}%  {format_state(cpu.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(cpu_history)}[/] [{ACCENT_MUTED}]{describe_trend(cpu_history, 'cpu')}[/]",
-                f"[bold {ACCENT_SKY}]Memory[/]   {memory.get('used_percent', 0)}%  {format_state(memory.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(memory_history)}[/] [{ACCENT_MUTED}]{describe_trend(memory_history, 'memory')}[/]",
-                f"[bold {ACCENT_SKY}]Load[/]     {load.get('load_1', 0)}  {format_state(load.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(load_history)}[/] [{ACCENT_MUTED}]{describe_trend(load_history, 'load')}[/]",
-                f"[bold {ACCENT_SKY}]Disk[/]     {disk.get('used_percent', 0)}%  {format_state(disk.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(disk_history)}[/] [{ACCENT_MUTED}]{describe_trend(disk_history, 'disk')}[/]",
+                f"[bold {ACCENT_SKY}]CPU[/]      {cpu.get('usage_percent', 0)}%  [{ACCENT_MUTED}]cores[/] {cpu.get('cores', 'n/a')}  {format_state(cpu.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(cpu_history)}[/] [{ACCENT_MUTED}]{describe_trend(cpu_history, 'cpu')}[/]",
+                f"[bold {ACCENT_SKY}]Memory[/]   {memory.get('used_percent', 0)}%  [{ACCENT_MUTED}]used[/] {format_gb_from_kb(memory.get('used_kb', 0))} / {format_gb_from_kb(memory.get('total_kb', 0))}  {format_state(memory.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(memory_history)}[/] [{ACCENT_MUTED}]{describe_trend(memory_history, 'memory')}[/]",
+                f"[bold {ACCENT_SKY}]Load[/]     {load.get('load_1', 0)}  [{ACCENT_MUTED}]5m[/] {load.get('load_5', 0)}  [{ACCENT_MUTED}]15m[/] {load.get('load_15', 0)}  {format_state(load.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(load_history)}[/] [{ACCENT_MUTED}]{describe_trend(load_history, 'load')}[/]",
+                f"[bold {ACCENT_SKY}]Disk[/]     {disk.get('used_percent', 0)}%  [{ACCENT_MUTED}]free[/] {format_gb_from_kb(disk.get('available_kb', 0))}  {format_state(disk.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(disk_history)}[/] [{ACCENT_MUTED}]{describe_trend(disk_history, 'disk')}[/]",
             ]
         )
         if storage_io.get("available"):
             lines.append(
-                f"[bold {ACCENT_SKY}]I/O[/]      {storage_io.get('util_percent', 0)}% [{ACCENT_MUTED}]util[/]  {format_state(storage_io.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(io_history)}[/] [{ACCENT_MUTED}]{describe_trend(io_history, 'io')}[/]"
+                f"[bold {ACCENT_SKY}]I/O[/]      {storage_io.get('util_percent', 0)}% [{ACCENT_MUTED}]util[/]  [{ACCENT_MUTED}]r/w ops[/] {storage_io.get('read_ops_per_sec', 0)}/{storage_io.get('write_ops_per_sec', 0)}  {format_state(storage_io.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(io_history)}[/] [{ACCENT_MUTED}]{describe_trend(io_history, 'io')}[/]"
             )
         else:
             lines.append(
@@ -1085,7 +1090,7 @@ def render_player_details(player: dict[str, Any] | None, online_count: int) -> s
     if not player:
         return "\n".join(
             [
-                f"[bold {ACCENT_GOLD}]Player Details[/]",
+                f"[bold {ACCENT_GOLD}]Selected Player[/]",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]    choose a player row to inspect that account.",
                 "",
@@ -1095,7 +1100,7 @@ def render_player_details(player: dict[str, Any] | None, online_count: int) -> s
 
     return "\n".join(
         [
-            f"[bold {ACCENT_GOLD}]Player Details[/]",
+            f"[bold {ACCENT_GOLD}]Selected Player[/]",
             "",
             f"[{ACCENT_MUTED}]Selected[/]     [bold {ACCENT_TEAL}]{escape_markup(player.get('username', '-'))}[/]",
             f"[{ACCENT_MUTED}]Account ID[/]   [bold {ACCENT_SKY}]{player.get('id', 0)}[/]",
@@ -1126,11 +1131,13 @@ def render_player_pulse(
     gm_summary = ", ".join(gm_names[:3]) if gm_names else "none"
     if len(gm_names) > 3:
         gm_summary = f"{gm_summary} +{len(gm_names) - 3}"
-
-    roster_names = [str(player.get("username", "")).strip() for player in players if str(player.get("username", "")).strip()]
-    roster_sample = ", ".join(roster_names[:4]) if roster_names else "quiet realm"
-    if len(roster_names) > 4:
-        roster_sample = f"{roster_sample} +{len(roster_names) - 4}"
+    staff_count = len(gm_players)
+    player_count = max(online_now - staff_count, 0)
+    if staff_count > 0:
+        coverage = max(int(round(online_now / staff_count)), 1)
+        coverage_text = f"1 GM / {coverage} online"
+    else:
+        coverage_text = "no staff online"
 
     return "\n".join(
         [
@@ -1140,8 +1147,9 @@ def render_player_pulse(
             f"[{ACCENT_MUTED}]Online Now[/]   [bold {ACCENT_GOLD}]{online_now}[/]  [{ACCENT_MUTED}]trend[/] {describe_trend(player_history, 'players')}",
             f"[{ACCENT_MUTED}]Peak Window[/] {peak_window}  [{ACCENT_MUTED}]window[/] {history_window_label(metric_history, refresh_interval)}",
             f"[{ACCENT_MUTED}]Count Source[/] {escape_markup(player_state.get('source', 'unavailable'))}",
-            f"[{ACCENT_MUTED}]GMs Online[/]  {len(gm_players)}  [{ACCENT_MUTED}]names[/] {escape_markup(truncate_text(gm_summary, 36))}",
-            f"[{ACCENT_MUTED}]Roster[/]      {escape_markup(truncate_text(roster_sample, 44))}",
+            f"[{ACCENT_MUTED}]Mix[/]          players={player_count}  staff={staff_count}",
+            f"[{ACCENT_MUTED}]GM Coverage[/]  {escape_markup(coverage_text)}",
+            f"[{ACCENT_MUTED}]GMs Online[/]   {staff_count}  [{ACCENT_MUTED}]names[/] {escape_markup(truncate_text(gm_summary, 36))}",
             "",
             f"[{ACCENT_MUTED}]Drilldown[/]   [bold {ACCENT_GOLD}]o[/] online roster  [bold {ACCENT_GOLD}]2[/] accounts",
         ]
@@ -1152,7 +1160,7 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
     if not account:
         return "\n".join(
             [
-                f"[bold {ACCENT_GOLD}]Account Details[/]",
+                f"[bold {ACCENT_GOLD}]Selected Account[/]",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]    choose a row to inspect or act on an account.",
                 "",
@@ -1162,7 +1170,7 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
 
     return "\n".join(
         [
-            f"[bold {ACCENT_GOLD}]Account Details[/]",
+            f"[bold {ACCENT_GOLD}]Selected Account[/]",
             "",
             f"[{ACCENT_MUTED}]Selected[/]     [bold {ACCENT_TEAL}]{escape_markup(account.get('username', '-'))}[/]",
             f"[{ACCENT_MUTED}]Account ID[/]   [bold {ACCENT_SKY}]{account.get('id', 0)}[/]",
@@ -1188,7 +1196,7 @@ def render_alerts_panel(snapshot: dict[str, Any]) -> str:
     active_alerts = alerts.get("active", [])
     recent_events = alerts.get("recent_events", [])
 
-    lines.append(f"[{ACCENT_MUTED}]Overall[/]      {format_state(alerts.get('status', 'healthy'))}")
+    lines.append(f"[{ACCENT_MUTED}]Overall[/]      {format_state(alerts.get('status', 'healthy'))}  [{ACCENT_MUTED}]active[/] {len(active_alerts)}")
     lines.append(f"[bold {ACCENT_SKY}]Active Alerts[/]")
 
     if active_alerts:
@@ -1216,9 +1224,12 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
     backup_schedule_status = snapshot.get("backup_schedule_status", {})
     schedule_data = backup_schedule_status.get("data", {}) if backup_schedule_status.get("ok") else {}
     schedule_entries = schedule_data.get("schedules", []) if isinstance(schedule_data.get("schedules", []), list) else []
+    configured_schedules = [entry for entry in schedule_entries if entry.get("present")]
+    protection_state = "healthy" if summary.get("count", 0) and configured_schedules else ("warning" if summary.get("count", 0) else "critical")
     lines = [
-        f"[bold {ACCENT_GOLD}]Backup State[/]",
+        f"[bold {ACCENT_GOLD}]Backup Readiness[/]",
         "",
+        f"[{ACCENT_MUTED}]Protection[/]  {format_state(protection_state)}",
         f"[{ACCENT_MUTED}]Count[/]       {summary.get('count', 0)}",
         f"[{ACCENT_MUTED}]Directory[/]   {summary.get('backup_dir', 'n/a') or 'n/a'}",
     ]
@@ -1235,8 +1246,7 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
     else:
         lines.append(f"[{ACCENT_MUTED}]Latest[/]      none")
 
-    lines.extend(["", f"[bold {ACCENT_SKY}]Schedule State[/]"])
-    configured_schedules = [entry for entry in schedule_entries if entry.get("present")]
+    lines.extend(["", f"[bold {ACCENT_SKY}]Timer State[/]"])
     if backup_schedule_status.get("ok"):
         if configured_schedules:
             for entry in configured_schedules:
@@ -1289,7 +1299,7 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
     else:
         secret_label = "not configured"
 
-    lines = [f"[bold {ACCENT_GOLD}]Config Overview[/]", ""]
+    lines = [f"[bold {ACCENT_GOLD}]Configuration Wiring[/]", ""]
     if validate["ok"]:
         valid = validate["data"].get("valid", True)
         lines.append(f"Validation  {format_state('healthy' if valid else 'critical')}")
@@ -1300,13 +1310,17 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
         [
             "",
             f"[{ACCENT_MUTED}]Config Path[/]   {escape_markup(config_path)}",
+            "",
+            f"[bold {ACCENT_SKY}]Realm Wiring[/]",
             f"[{ACCENT_MUTED}]Install Root[/]  {summary.get('install_root', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]Auth Service[/]  {summary.get('auth_service', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]World Service[/] {summary.get('world_service', 'n/a') or 'n/a'}",
+            f"[{ACCENT_MUTED}]Backup Dir[/]    {summary.get('backup_dir', 'n/a') or 'n/a'}",
+            "",
+            f"[bold {ACCENT_SKY}]Database Wiring[/]",
             f"[{ACCENT_MUTED}]DB Host[/]       {summary.get('db_host', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]DB User[/]       {summary.get('db_user', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]DB Secret[/]     {escape_markup(secret_label)}",
-            f"[{ACCENT_MUTED}]Backup Dir[/]    {summary.get('backup_dir', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]DB Names[/]      auth={summary.get('auth_db', 'n/a')} world={summary.get('world_db', 'n/a')} chars={summary.get('characters_db', 'n/a')} logs={summary.get('logs_db', 'n/a')}",
             "",
             f"[bold {ACCENT_SKY}]Dashboard Role[/]",
@@ -1882,6 +1896,11 @@ def create_app(
             margin-right: 1;
         }
 
+        #backups-table-layout {
+            width: 1fr;
+            height: 1fr;
+        }
+
         DataTable {
             background: #0a1828;
             color: #e6edf7;
@@ -1895,6 +1914,7 @@ def create_app(
         #backups-table {
             height: 1fr;
             width: 1fr;
+            margin-top: 1;
         }
 
         #config-pane {
@@ -2111,14 +2131,16 @@ def create_app(
                                 yield Static("", id="alerts-pane", classes="panel accent-panel")
                         with Container(id="accounts-view", classes="view hidden"):
                             with Vertical(classes="panel table-panel table-detail", id="accounts-layout"):
-                                yield Static("[b]Accounts[/b]", classes="table-detail-title")
+                                yield Static("[b]Account Inventory[/b]", classes="table-detail-title")
                                 with Horizontal(classes="table-detail-body"):
                                     yield DataTable(id="accounts-table", classes="detail-table")
                                     yield Static("", id="account-details", classes="detail-pane")
                         with Container(id="backups-view", classes="view hidden"):
                             with Horizontal(id="backups-layout"):
                                 yield Static("", id="backup-summary", classes="panel hero-panel")
-                                yield DataTable(id="backups-table", classes="panel table-panel")
+                                with Vertical(classes="panel table-panel", id="backups-table-layout"):
+                                    yield Static("[b]Backup Inventory[/b]", classes="table-detail-title")
+                                    yield DataTable(id="backups-table", classes="detail-table")
                         with Container(id="config-view", classes="view hidden"):
                             yield Static("", id="config-pane", classes="panel hero-panel")
                         with Container(id="operations-view", classes="view hidden"):

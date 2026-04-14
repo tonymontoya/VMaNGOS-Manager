@@ -1987,8 +1987,8 @@ snapshot = {
         "ok": True,
         "data": {
             "services": {
-                "auth": {"health": "active"},
-                "world": {"health": "warning"},
+                "auth": {"health": "active", "pid": 111, "uptime_human": "1h 0m", "cpu_percent": 0.5, "memory_mb": 20, "restart_count_1h": 0},
+                "world": {"health": "warning", "pid": 222, "uptime_human": "2h 0m", "cpu_percent": 12.5, "memory_mb": 512, "restart_count_1h": 1},
             },
             "checks": {
                 "database_connectivity": {"ok": True, "message": "ok"},
@@ -1997,10 +1997,10 @@ snapshot = {
             "players": {"online": 1, "source": "auth.account.online"},
             "host": {
                 "cpu": {"usage_percent": 31.5, "status": "ok", "cores": 8},
-                "memory": {"used_percent": 48.0, "status": "ok", "used_kb": 3145728},
+                "memory": {"used_percent": 48.0, "status": "ok", "used_kb": 3145728, "total_kb": 6291456},
                 "load": {"load_1": 0.62, "load_5": 0.55, "load_15": 0.44, "status": "ok"},
             },
-            "storage_io": {"available": True, "util_percent": 33.0, "status": "ok", "device": "sda"},
+            "storage_io": {"available": True, "util_percent": 33.0, "status": "ok", "device": "sda", "read_ops_per_sec": 1.4, "write_ops_per_sec": 2.6},
             "alerts": {
                 "status": "healthy",
                 "active": [],
@@ -2111,17 +2111,17 @@ PY
     schedule_output=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["schedule"])')
     compact_schedule=$(printf '%s' "$schedule_output" | tr -d '[:space:]')
 
-    assert_true "[[ \$compact_banner == *'VMaNGOSManager'* && \$compact_banner == *'realmconsole'* && \$compact_banner == *'Accounts'* && \$compact_banner == *'result[/][bold#34d399]READY'* && \$compact_banner == *'ThisView[/]Provision,secure,andmoderateaccountswithoutleavingtheconsole.'* ]]" "dashboard action banner exposes app framing, active view, and result state" || all_passed=1
+    assert_true "[[ \$compact_banner == *'VMaNGOSManager'* && \$compact_banner == *'realmconsole'* && \$compact_banner == *'Accounts'* && \$compact_banner == *'result[/][bold#34d399]READY'* && \$compact_banner == *'ThisView[/]Worktheselected-accountadminflowforprovisioning,access,andmoderation.'* ]]" "dashboard action banner exposes app framing, active view, and result state" || all_passed=1
     assert_true "[[ \$compact_ops_banner == *'Operations'* && \$compact_ops_banner == *'result[/][bold#f59e0b]CHECK'* && \$compact_ops_banner == *'ThisView[/]Reviewthemaintenancequeueandpreflightriskychangewindows.'* ]]" "dashboard operations banner frames the screen as maintenance queue plus change-window preflight" || all_passed=1
     assert_true "[[ \$compact_sidebar == *'VMaNGOSManager'* && \$compact_sidebar == *'RealmPulse'* && \$compact_sidebar == *'Snapshot[/]'* && \$compact_sidebar == *'Players[/]1online'* && \$compact_sidebar == *'Backups[/]3known'* && \$compact_sidebar != *'ActiveHotkeys'* ]]" "dashboard sidebar stays focused on navigation and realm pulse" || all_passed=1
     assert_true "[[ \$compact_overview_command == *'ThisView[/][bold#f59e0b]o[/]roster'* && \$compact_overview_command == *'[bold#f59e0b]k[/]validateconfig'* ]]" "dashboard overview command rail exposes roster drilldown and core actions" || all_passed=1
     assert_true "[[ \$compact_command == *'Navigate[/][bold#f59e0b]1[/]overview'* && \$compact_command == *'Global[/][bold#f59e0b]r[/]refresh'* && \$compact_command == *'ThisView[/][bold#f59e0b]h[/]honorjob'* && \$compact_command == *'[bold#f59e0b]j[/]canceljob'* && \$compact_command == *'[bold#f59e0b]P[/]updateplan'* && \$compact_command == *'[bold#f59e0b]l[/]rotatelogs'* ]]" "dashboard command rail provides the canonical contextual action surface" || all_passed=1
-    assert_true "[[ \$compact_metrics == *'HostMetrics'* && \$compact_metrics == *'Machinepressureandshort-termtrendonly.'* && \$compact_metrics == *'Recentwindow[/]4samples/~6s'* && \$compact_metrics == *'CPU[/]31.5%'* && \$compact_metrics != *'Players[/]'* && \$compact_metrics != *'Logs[/]'* ]]" "dashboard metrics panel stays scoped to host pressure and trends" || all_passed=1
-    assert_true "[[ \$compact_player_pulse == *'PlayerPulse'* && \$compact_player_pulse == *'OnlineNow[/][bold#f59e0b]1[/]'* && \$compact_player_pulse == *'CountSource[/]auth.account.online'* && \$compact_player_pulse == *'GMsOnline[/]1'* && \$compact_player_pulse == *'Drilldown[/][bold#f59e0b]o[/]onlineroster'* ]]" "dashboard player pulse replaces the old roster table with summary-first player state" || all_passed=1
-    assert_true "[[ \$compact_alerts == *'AlertsandEvents'* && \$compact_alerts == *'Overall[/][bold#34d399]healthy[/]'* && \$compact_alerts == *'Noactivealerts'* && \$compact_alerts == *'Honorqueuerefreshed'* ]]" "dashboard alerts panel surfaces recent operator-relevant events" || all_passed=1
-    assert_true "[[ \$compact_backups == *'BackupState'* && \$compact_backups == *'ScheduleState'* && \$compact_backups == *'Daily[/]'* && \$compact_backups == *'daily04:00'* && \$compact_backups == *'Readyfor[/]verifyorrestoredry-runfromthisselection.'* && \$compact_backups != *'Coverage[/]'* ]]" "dashboard backups panel centers state and selected backup readiness without extra product copy" || all_passed=1
-    assert_true "[[ \$compact_config == *'ConfigOverview'* && \$compact_config == *'DBSecret[/]inlinevaluemasked'* && \$compact_config == *'Read-only[/]validateandreviewwiringhere;editmanager.confand.dbpassintheshell.'* && \$compact_config != *'ConfigPreview'* ]]" "dashboard config panel is read-only and masks sensitive configuration handling" || all_passed=1
-    assert_true "[[ \$compact_player == *'Selected[/][bold#2dd4bf]PLAYERONE'* && \$compact_player != *'Playersnow'* && \$compact_player == *'Nextstep[/]open[bold#f59e0b]Accounts[/]forpassword,GM,ban,andunbanactions.'* ]]" "dashboard player details stay scoped to the selected player workflow" || all_passed=1
+    assert_true "[[ \$compact_metrics == *'HostMetrics'* && \$compact_metrics == *'Machinepressure,capacity,andshort-termtrendonly.'* && \$compact_metrics == *'Recentwindow[/]4samples/~6s'* && \$compact_metrics == *'CPU[/]31.5%'* && \$compact_metrics == *'cores[/]8'* && \$compact_metrics == *'used[/]3.0GB/6.0GB'* && \$compact_metrics == *'r/wops[/]1.4/2.6'* && \$compact_metrics != *'Players[/]'* && \$compact_metrics != *'Logs[/]'* ]]" "dashboard metrics panel stays scoped to host pressure and trends while improving capacity density" || all_passed=1
+    assert_true "[[ \$compact_player_pulse == *'PlayerPulse'* && \$compact_player_pulse == *'OnlineNow[/][bold#f59e0b]1[/]'* && \$compact_player_pulse == *'Mix[/]players=0staff=1'* && \$compact_player_pulse == *'GMCoverage[/]1GM/1online'* && \$compact_player_pulse == *'GMsOnline[/]1'* && \$compact_player_pulse == *'Drilldown[/][bold#f59e0b]o[/]onlineroster'* && \$compact_player_pulse != *'Roster[/]'* ]]" "dashboard player pulse focuses on operator-facing summary stats instead of roster sampling" || all_passed=1
+    assert_true "[[ \$compact_alerts == *'AlertsandEvents'* && \$compact_alerts == *'Overall[/][bold#34d399]healthy[/][#cbd5e1]active[/]0'* && \$compact_alerts == *'Noactivealerts'* && \$compact_alerts == *'Honorqueuerefreshed'* ]]" "dashboard alerts panel surfaces recent operator-relevant events with explicit active-alert count" || all_passed=1
+    assert_true "[[ \$compact_backups == *'BackupReadiness'* && \$compact_backups == *'Protection[/][bold#34d399]healthy[/]'* && \$compact_backups == *'TimerState'* && \$compact_backups == *'Daily[/]'* && \$compact_backups == *'daily04:00'* && \$compact_backups == *'Readyfor[/]verifyorrestoredry-runfromthisselection.'* ]]" "dashboard backups panel centers protection posture and selected backup readiness" || all_passed=1
+    assert_true "[[ \$compact_config == *'ConfigurationWiring'* && \$compact_config == *'RealmWiring'* && \$compact_config == *'DatabaseWiring'* && \$compact_config == *'DBSecret[/]inlinevaluemasked'* && \$compact_config == *'Read-only[/]validateandreviewwiringhere;editmanager.confand.dbpassintheshell.'* && \$compact_config != *'ConfigPreview'* ]]" "dashboard config panel is regrouped into clearer wiring sections without exposing secrets" || all_passed=1
+    assert_true "[[ \$compact_player == *'SelectedPlayer'* && \$compact_player == *'Selected[/][bold#2dd4bf]PLAYERONE'* && \$compact_player != *'Playersnow'* && \$compact_player == *'Nextstep[/]open[bold#f59e0b]Accounts[/]forpassword,GM,ban,andunbanactions.'* ]]" "dashboard player details stay scoped to the selected player workflow" || all_passed=1
     assert_true "[[ \$compact_empty_player != *'Onlinenow'* && \$compact_empty_player == *'chooseaplayerrowtoinspectthataccount.'* ]]" "dashboard empty player state stays item-scoped" || all_passed=1
     assert_true "[[ \$compact_logs == *'MaintenanceGuardrails'* && \$compact_logs == *'Loghygieneandstoragepressurebeforeamaintenancewindow.'* && \$compact_logs == *'Scope[/]supportingcontextonly;thequeuelivesbelow.'* && \$compact_logs == *'Retention[/]max=100Mmin=1M'* ]]" "dashboard operations support panel scopes itself to maintenance guardrails instead of queue ownership" || all_passed=1
     assert_true "[[ \$compact_update == *'UpdateReadiness'* && \$compact_update == *'Repositorydriftanddatabaseimpactbeforeriskycodechanges.'* && \$compact_update == *'Assessment[/][bold#f59e0b]schemamigrationspending'* && \$compact_update == *'PlanSnapshot'* && \$compact_update == *'Next[/]vmangos-managerbackupnow--verify'* ]]" "dashboard update panel stays focused on preflight readiness and plan steps" || all_passed=1

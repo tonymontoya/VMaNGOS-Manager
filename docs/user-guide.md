@@ -127,9 +127,9 @@ Use this view when:
 
 Panel roles in this view:
 
-- `Realm Services` is the fast service and DB pulse
-- `Host Metrics` is the machine-level pressure panel only
-- `Player Pulse` is the summary-first player panel: online count, trend, GM presence, and roster signal
+- `Realm Services` is the fast service and DB pulse plus per-service footprint
+- `Host Metrics` is the machine-level pressure and capacity panel only
+- `Player Pulse` is the summary-first population panel: online count, trend, player/staff mix, and GM coverage
 - `Alerts and Events` is the fast-read maintenance and risk panel
 
 The full online roster is still available, but it is now a drill-down instead of taking over summary space:
@@ -160,7 +160,7 @@ Recommended flow:
 
 This is especially useful for GMs and operators who do not want to remember a pile of account-management command forms.
 
-In this view, the table is the inventory and the detail pane is the selected account action surface. Global counts should not be mixed into that right-hand pane.
+In this view, `Account Inventory` is the inventory and `Selected Account` is the action surface. Global counts should not be mixed into that right-hand pane.
 
 ## Backups View
 
@@ -187,8 +187,9 @@ This is one of the biggest quality-of-life wins in Manager. Backup discipline be
 
 Current boundary:
 
-- the dashboard shows backup directory, inventory, and configured timer state
-- the left panel is now split between realm backup state and selected backup readiness
+- the dashboard shows protection posture, backup inventory, and configured timer state
+- `Backup Readiness` is the summary and selected-backup decision panel
+- `Backup Inventory` is the archive list you browse and act from
 - creating or replacing daily and weekly backup timers is available in the dashboard
 - cleanup policy changes, timer removal, and deeper backup surgery still live in the CLI or systemd today
 
@@ -216,7 +217,9 @@ Release C boundary:
 - this view is intentionally read-only
 - edit `manager.conf` and `.dbpass` in the shell, then return here to validate the result
 
-If the Config view looks wrong, fix that before you trust any higher-level workflow.
+The panel is grouped into `Realm Wiring`, `Database Wiring`, and `Dashboard Role` so it is easier to spot whether the problem is host wiring, DB targeting, or a workflow misunderstanding.
+
+If the configuration wiring view looks wrong, fix that before you trust any higher-level workflow.
 
 ## Operations View
 
@@ -294,9 +297,9 @@ This is the current dashboard-to-CLI split for Release C:
 | Area | In dashboard now | Still outside the dashboard |
 | --- | --- | --- |
 | Server | status, start, stop, restart | text watch mode, raw JSON output |
-| Accounts | create, password reset, GM changes, ban, unban, account visibility | scripted bulk workflows |
-| Backups | inventory, backup now, verify, restore dry-run, timer visibility, daily/weekly timer create | cleanup, timer removal, live restore |
-| Config | validation plus read-only wiring summary | config creation, detect, show, and file editing |
+| Accounts | account inventory, create, password reset, GM changes, ban, unban, account visibility | scripted bulk workflows |
+| Backups | backup readiness, inventory, backup now, verify, restore dry-run, timer visibility, daily/weekly timer create | cleanup, timer removal, live restore |
+| Config | validation plus read-only configuration wiring summary | config creation, detect, show, and file editing |
 | Operations | maintenance queue, honor and restart scheduling, schedule cancel, logs guardrails, update planning visibility | update apply and other source-tree workflows |
 
 Use these supporting docs when you need that lower-level surface:
