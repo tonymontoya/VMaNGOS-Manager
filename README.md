@@ -110,6 +110,30 @@ Inside the dashboard you get:
 
 It keeps the deployment terminal-first while still giving admins something that looks and feels deliberate.
 
+## How To Read The Dashboard
+
+The dashboard is organized around a simple split:
+
+- the top banner tells you where you are, what that view is for, and what the last action did
+- the left sidebar keeps realm pulse and active hotkeys visible from every screen
+- the main panels are view-specific and should stay scoped to the thing they are showing
+
+That last point matters. Summary counts belong in summary panels. Detail panes are meant to stay item-scoped: selected player, selected account, selected backup, selected job.
+
+## Current TUI Coverage
+
+Release C gives you a broad operator surface, but not every CLI path is fully absorbed into the dashboard yet.
+
+| Area | In the dashboard now | Still CLI / shell backed |
+| --- | --- | --- |
+| Server | status, start, stop, restart | watch mode, raw JSON |
+| Accounts | create, reset password, set GM, ban, unban, visibility | scripted bulk workflows |
+| Backups | inventory, create, verify, restore dry-run, timer visibility, daily/weekly timer create | cleanup, timer removal, real restore |
+| Config | validation and read-only wiring summary | detect, create, show, file editing |
+| Operations | logs workflows, honor/restart scheduling, cancel job, update visibility | update apply and source-tree work |
+
+The user guide tracks these boundaries in more detail and is the best place to see the current product surface with screenshots.
+
 ## Learn The Product
 
 - [User guide](docs/user-guide.md)

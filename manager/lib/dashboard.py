@@ -1090,10 +1090,7 @@ def render_player_details(player: dict[str, Any] | None, online_count: int) -> s
             [
                 f"[bold {ACCENT_GOLD}]Player Details[/]",
                 "",
-                f"[{ACCENT_MUTED}]Online now[/]   [bold {ACCENT_GOLD}]{online_count}[/]",
-                f"[{ACCENT_MUTED}]Snapshot[/]     no active player row selected",
-                "",
-                f"[{ACCENT_MUTED}]Selection[/]    choose a player row when someone logs in.",
+                f"[{ACCENT_MUTED}]Selection[/]    choose a player row to inspect the selected account state.",
                 "",
                 f"[{ACCENT_MUTED}]Operator move[/] use [bold {ACCENT_GOLD}]2[/] [bold {ACCENT_GOLD}]Accounts[/] for account actions.",
             ]
@@ -1108,7 +1105,6 @@ def render_player_details(player: dict[str, Any] | None, online_count: int) -> s
             f"[{ACCENT_MUTED}]GM Level[/]     {player.get('gm_level', 0)}",
             f"[{ACCENT_MUTED}]Online[/]       {format_flag(player.get('online'))}",
             f"[{ACCENT_MUTED}]Banned[/]       {format_flag(player.get('banned'), true_color=ACCENT_ROSE)}",
-            f"[{ACCENT_MUTED}]Players now[/]  [bold {ACCENT_GOLD}]{online_count}[/]",
             "",
             f"[{ACCENT_MUTED}]Operator move[/] switch to [bold {ACCENT_GOLD}]Accounts[/] for password, GM, and ban actions.",
         ]
@@ -1120,9 +1116,6 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
         return "\n".join(
             [
                 f"[bold {ACCENT_GOLD}]Account Details[/]",
-                "",
-                f"[{ACCENT_MUTED}]Accounts[/]     {total_accounts} loaded",
-                f"[{ACCENT_MUTED}]Snapshot[/]     account list ready",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]    choose a row to inspect or act on an account.",
                 "",
@@ -1140,7 +1133,6 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
             f"[{ACCENT_MUTED}]GM Level[/]     {account.get('gm_level', 0)}",
             f"[{ACCENT_MUTED}]Online[/]       {format_flag(account.get('online'))}",
             f"[{ACCENT_MUTED}]Banned[/]       {format_flag(account.get('banned'), true_color=ACCENT_ROSE)}",
-            f"[{ACCENT_MUTED}]Accounts[/]     {total_accounts} loaded",
             "",
             f"[{ACCENT_MUTED}]Operator move[/] [bold {ACCENT_GOLD}]c[/] create  [bold {ACCENT_GOLD}]p[/] password  [bold {ACCENT_GOLD}]g[/] GM",
             f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]n[/] ban     [bold {ACCENT_GOLD}]u[/] unban",
@@ -1414,9 +1406,6 @@ def render_schedule_details(
         return "\n".join(
             [
                 f"[bold {ACCENT_GOLD}]Job Details[/]",
-                "",
-                f"[{ACCENT_MUTED}]Scheduled[/]     {total_schedules} known",
-                f"[{ACCENT_MUTED}]Snapshot[/]      operations queue ready",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]     choose a job row to inspect or cancel it.",
                 "",

@@ -82,6 +82,21 @@ The dashboard is organized into five views:
 
 The footer shows the most important hotkeys for the active screen, while the sidebar keeps the realm pulse visible at all times.
 
+## How To Read The Screen
+
+The dashboard works best when each region has a clear job:
+
+- the top banner tells you the active view, why that view exists, and the result of the last action
+- the sidebar is always-on navigation plus realm pulse
+- the main panels are where view-specific work happens
+
+The rule to keep in mind is simple:
+
+- summary counts belong in summary panels
+- detail panes belong to the selected row or selected object
+
+If a panel starts mixing realm-wide counters into a selected-item view, that is usually an IA defect, not an operator requirement.
+
 If you are new to Manager, the best first pass is simple:
 
 1. Start in `Overview` and make sure the host and services look sane.
@@ -109,6 +124,13 @@ Use this view when:
 - you are validating that a restart actually settled
 - you want a top-like operational snapshot instead of several separate shell commands
 
+Panel roles in this view:
+
+- `Realm Services` is the fast service and DB pulse
+- `Host Metrics` is the machine-level pressure panel
+- `Online Players` is the current list view
+- `Player Details` is intentionally scoped to the selected player row, not to global realm counts
+
 ## Accounts View
 
 ![Accounts view](assets/dashboard-accounts.svg)
@@ -131,6 +153,8 @@ Recommended flow:
 4. Let the dashboard feed you back into the updated table state after the action completes.
 
 This is especially useful for GMs and operators who do not want to remember a pile of account-management command forms.
+
+In this view, the table is the inventory and the detail pane is the selected account action surface. Global counts should not be mixed into that right-hand pane.
 
 ## Backups View
 
