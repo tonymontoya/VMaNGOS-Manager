@@ -39,8 +39,8 @@ ACCENT_GREEN = "#34d399"
 ACCENT_BLUE = "#3b82f6"
 
 ACTION_STYLES = {
-    "info": ("STANDBY", ACCENT_SKY),
-    "running": ("RUNNING", ACCENT_GOLD),
+    "info": ("LIVE", ACCENT_SKY),
+    "running": ("WORKING", ACCENT_GOLD),
     "success": ("READY", ACCENT_GREEN),
     "warning": ("CHECK", ACCENT_GOLD),
     "error": ("ERROR", ACCENT_ROSE),
@@ -333,6 +333,22 @@ def render_sparkline(values: list[float | None], width: int = 10) -> str:
     return "".join(chars)
 
 
+def strip_markup(value: str) -> str:
+    return re.sub(r"\[[^\]]*\]", "", value)
+
+
+def pad_markup(value: str, width: int) -> str:
+    visible_length = len(strip_markup(value))
+    return f"{value}{' ' * max(width - visible_length, 0)}"
+
+
+def compact_metric_state(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in ("", "ok", "healthy", "active"):
+        return ""
+    return f" {normalized}"
+
+
 def describe_trend(values: list[float | None], metric_key: str) -> str:
     available = [value for value in values if value is not None]
     if len(available) < 2:
@@ -377,6 +393,15 @@ def iso_to_clock(value: Any) -> str:
         return datetime.fromisoformat(normalized).astimezone().strftime("%H:%M:%S")
     except ValueError:
         return text
+
+
+def schedule_job_type_label(job_type: Any) -> str:
+    normalized = str(job_type or "").strip().lower()
+    if normalized == "honor":
+        return "run job"
+    if not normalized:
+        return "n/a"
+    return normalized.replace("_", " ")
 
 
 def parse_ini_content(content: str) -> dict[str, str]:
@@ -455,7 +480,7 @@ def view_command_tokens(active_view: str) -> list[tuple[str, str]]:
         ]
     if active_view == "operations":
         return [
-            ("h", "honor job"),
+            ("h", "run job"),
             ("m", "restart job"),
             ("j", "cancel job"),
             ("P", "update plan"),
@@ -689,8 +714,9 @@ def build_dashboard_action_request(
                 command.extend(["--announce", announce])
 
         cadence = f"{schedule_type} {day} {time_value}".strip()
+        label = f"schedule {'run job' if action_name == 'schedule_honor_create' else 'restart'} {cadence}"
         return {
-            "label": f"schedule {subcommand} {cadence}",
+            "label": label,
             "command": command,
             "env": {},
             "refresh_after": True,
@@ -948,7 +974,7 @@ def render_action_banner(
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]  [{ACCENT_MUTED}]realm console[/]  [bold {ACCENT_SKY}]{view_title}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
-            f"[{ACCENT_MUTED}]snapshot[/] {captured_at}  [{ACCENT_MUTED}]result[/] [bold {tone_color}]{tone_label}[/]",
+            f"[{ACCENT_MUTED}]last refresh[/] {captured_at}  [{ACCENT_MUTED}]status[/] [bold {tone_color}]{tone_label}[/]",
             "",
             f"[bold {ACCENT_SKY}]This View[/] {escape_markup(view_summary)}",
             f"[{ACCENT_MUTED}]Last action[/] {message}",
@@ -989,7 +1015,7 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
         [
             "",
             f"[bold {ACCENT_SKY}]Realm Pulse[/]",
-            f"[{ACCENT_MUTED}]Snapshot[/] {iso_to_clock(snapshot.get('captured_at'))}",
+            f"[{ACCENT_MUTED}]Updated[/]  {iso_to_clock(snapshot.get('captured_at'))}",
             f"[{ACCENT_MUTED}]Refresh[/]  {refresh_interval}s",
             f"[{ACCENT_MUTED}]Players[/]  {players_online} online",
             f"[{ACCENT_MUTED}]Backups[/]  {backups.get('count', 0)} known",
@@ -1046,8 +1072,8 @@ def render_metrics_panel(
     metric_history = metric_history or []
     lines = [
         f"[bold {ACCENT_GOLD}]Host Metrics[/]",
-        f"[{ACCENT_MUTED}]Machine pressure, capacity, and short-term trend only.[/]",
-        f"[{ACCENT_MUTED}]Recent window[/] {history_window_label(metric_history, refresh_interval)}",
+        f"[{ACCENT_MUTED}]Host pressure, capacity, and trend.[/]",
+        f"[{ACCENT_MUTED}]Window[/] {history_window_label(metric_history, refresh_interval)}",
         "",
     ]
 
@@ -1064,17 +1090,44 @@ def render_metrics_panel(
         load_history = history_values(metric_history, "load")
         disk_history = history_values(metric_history, "disk")
         io_history = history_values(metric_history, "io")
-        lines.extend(
-            [
-                f"[bold {ACCENT_SKY}]CPU[/]      {cpu.get('usage_percent', 0)}%  [{ACCENT_MUTED}]cores[/] {cpu.get('cores', 'n/a')}  {format_state(cpu.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(cpu_history)}[/] [{ACCENT_MUTED}]{describe_trend(cpu_history, 'cpu')}[/]",
-                f"[bold {ACCENT_SKY}]Memory[/]   {memory.get('used_percent', 0)}%  [{ACCENT_MUTED}]used[/] {format_gb_from_kb(memory.get('used_kb', 0))} / {format_gb_from_kb(memory.get('total_kb', 0))}  {format_state(memory.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(memory_history)}[/] [{ACCENT_MUTED}]{describe_trend(memory_history, 'memory')}[/]",
-                f"[bold {ACCENT_SKY}]Load[/]     {load.get('load_1', 0)}  [{ACCENT_MUTED}]5m[/] {load.get('load_5', 0)}  [{ACCENT_MUTED}]15m[/] {load.get('load_15', 0)}  {format_state(load.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(load_history)}[/] [{ACCENT_MUTED}]{describe_trend(load_history, 'load')}[/]",
-                f"[bold {ACCENT_SKY}]Disk[/]     {disk.get('used_percent', 0)}%  [{ACCENT_MUTED}]free[/] {format_gb_from_kb(disk.get('available_kb', 0))}  {format_state(disk.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(disk_history)}[/] [{ACCENT_MUTED}]{describe_trend(disk_history, 'disk')}[/]",
-            ]
-        )
-        if storage_io.get("available"):
+        metric_rows = [
+            (
+                "CPU",
+                f"{cpu.get('usage_percent', 0)}% / {cpu.get('cores', 'n/a')}c{compact_metric_state(cpu.get('status', 'unavailable'))}",
+                cpu_history,
+            ),
+            (
+                "Memory",
+                f"{memory.get('used_percent', 0)}% / {format_gb_from_kb(memory.get('used_kb', 0)).replace(' GB', 'G')}/{format_gb_from_kb(memory.get('total_kb', 0)).replace(' GB', 'G')}{compact_metric_state(memory.get('status', 'unavailable'))}",
+                memory_history,
+            ),
+            (
+                "Load",
+                f"1m {load.get('load_1', 0)} / 5m {load.get('load_5', 0)}{compact_metric_state(load.get('status', 'unavailable'))}",
+                load_history,
+            ),
+            (
+                "Disk",
+                f"{disk.get('used_percent', 0)}% / {format_gb_from_kb(disk.get('available_kb', 0)).replace(' GB', 'G')} free{compact_metric_state(disk.get('status', 'unavailable'))}",
+                disk_history,
+            ),
+        ]
+        for label, summary, history_values_for_metric in metric_rows:
+            label_segment = f"[bold {ACCENT_SKY}]{label:<6}[/]"
+            summary_segment = pad_markup(
+                summary,
+                24,
+            )
             lines.append(
-                f"[bold {ACCENT_SKY}]I/O[/]      {storage_io.get('util_percent', 0)}% [{ACCENT_MUTED}]util[/]  [{ACCENT_MUTED}]r/w ops[/] {storage_io.get('read_ops_per_sec', 0)}/{storage_io.get('write_ops_per_sec', 0)}  {format_state(storage_io.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(io_history)}[/] [{ACCENT_MUTED}]{describe_trend(io_history, 'io')}[/]"
+                f"{label_segment} {summary_segment}  [{ACCENT_TEAL}]{render_sparkline(history_values_for_metric, width=8)}[/]"
+            )
+        if storage_io.get("available"):
+            io_summary = pad_markup(
+                f"{storage_io.get('util_percent', 0)}% / {storage_io.get('read_ops_per_sec', 0)}:{storage_io.get('write_ops_per_sec', 0)} rw{compact_metric_state(storage_io.get('status', 'unavailable'))}",
+                24,
+            )
+            lines.append(
+                f"[bold {ACCENT_SKY}]{'I/O':<6}[/] {io_summary}  [{ACCENT_TEAL}]{render_sparkline(io_history, width=8)}[/]"
             )
         else:
             lines.append(
@@ -1161,7 +1214,9 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
         return "\n".join(
             [
                 f"[bold {ACCENT_GOLD}]Selected Account[/]",
+                f"[{ACCENT_MUTED}]Focused account state and account-scoped actions.[/]",
                 "",
+                f"[{ACCENT_MUTED}]Inventory[/]     {total_accounts} account{'s' if total_accounts != 1 else ''} loaded",
                 f"[{ACCENT_MUTED}]Selection[/]    choose a row to inspect or act on an account.",
                 "",
                 f"[{ACCENT_MUTED}]Actions[/]      create new accounts here, then select a row for account-level changes.",
@@ -1171,7 +1226,9 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]Selected Account[/]",
+            f"[{ACCENT_MUTED}]Focused account state and account-scoped actions.[/]",
             "",
+            f"[{ACCENT_MUTED}]Inventory[/]     {total_accounts} account{'s' if total_accounts != 1 else ''} loaded",
             f"[{ACCENT_MUTED}]Selected[/]     [bold {ACCENT_TEAL}]{escape_markup(account.get('username', '-'))}[/]",
             f"[{ACCENT_MUTED}]Account ID[/]   [bold {ACCENT_SKY}]{account.get('id', 0)}[/]",
             f"[{ACCENT_MUTED}]GM Level[/]     {account.get('gm_level', 0)}",
@@ -1474,7 +1531,7 @@ def render_schedule_details(
                 f"[{ACCENT_MUTED}]Selection[/]     choose a job row from the queue to inspect or cancel it.",
                 f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
                 "",
-                f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] honor job  [bold {ACCENT_GOLD}]m[/] restart job",
+                f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] run job  [bold {ACCENT_GOLD}]m[/] restart job",
                 f"[{ACCENT_MUTED}]Cancel[/]        [bold {ACCENT_GOLD}]j[/] cancel the selected job",
             ]
         )
@@ -1487,7 +1544,7 @@ def render_schedule_details(
             "",
             f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
             f"[{ACCENT_MUTED}]Job ID[/]        {escape_markup(schedule.get('id', 'n/a'))}",
-            f"[{ACCENT_MUTED}]Type[/]          {escape_markup(schedule.get('job_type', 'n/a'))}",
+            f"[{ACCENT_MUTED}]Type[/]          {escape_markup(schedule_job_type_label(schedule.get('job_type', 'n/a')))}",
             f"[{ACCENT_MUTED}]Cadence[/]       {escape_markup(schedule.get('schedule_type', 'n/a'))}",
             f"[{ACCENT_MUTED}]Schedule[/]      {escape_markup(schedule_label(schedule))}",
             f"[{ACCENT_MUTED}]Next Run[/]      {escape_markup(schedule.get('next_run', 'n/a') or 'n/a')}",
@@ -1800,7 +1857,7 @@ def create_app(
             layout: grid;
             grid-size: 2 2;
             grid-columns: 1fr 1fr;
-            grid-rows: 12 1fr;
+            grid-rows: 15 1fr;
             grid-gutter: 1 2;
             height: 1fr;
         }
@@ -1862,6 +1919,22 @@ def create_app(
 
         #accounts-layout,
         #backups-layout {
+            height: 1fr;
+        }
+
+        #accounts-layout {
+            layout: horizontal;
+        }
+
+        #accounts-table-layout {
+            width: 1fr;
+            height: 1fr;
+            margin-right: 1;
+        }
+
+        #account-details {
+            width: 40;
+            min-width: 36;
             height: 1fr;
         }
 
@@ -2078,7 +2151,7 @@ def create_app(
             ("u", "unban_account", "Unban"),
             ("l", "rotate_logs", "Rotate Logs"),
             ("T", "test_logs_config", "Test Logs"),
-            ("h", "create_honor_schedule", "Honor Job"),
+            ("h", "create_honor_schedule", "Run Job"),
             ("m", "create_restart_schedule", "Restart Job"),
             ("P", "refresh_update_plan", "Update Plan"),
             ("d", "restore_selected_backup_dry_run", "Dry Run"),
@@ -2105,7 +2178,7 @@ def create_app(
             self.screenshot_taken = False
             self.screenshot_pending = False
             self.active_view = initial_view if initial_view in VIEW_TITLES else "overview"
-            self.last_action = "dashboard started"
+            self.last_action = "loading dashboard data..."
             self.action_tone = "info"
             self.snapshot = empty_snapshot("waiting for first refresh")
             self.metric_history: list[dict[str, Any]] = []
@@ -2130,11 +2203,11 @@ def create_app(
                                 yield Static("", id="player-pulse-pane", classes="panel hero-panel")
                                 yield Static("", id="alerts-pane", classes="panel accent-panel")
                         with Container(id="accounts-view", classes="view hidden"):
-                            with Vertical(classes="panel table-panel table-detail", id="accounts-layout"):
-                                yield Static("[b]Account Inventory[/b]", classes="table-detail-title")
-                                with Horizontal(classes="table-detail-body"):
+                            with Horizontal(id="accounts-layout"):
+                                with Vertical(classes="panel table-panel", id="accounts-table-layout"):
+                                    yield Static("[b]Account Inventory[/b]", classes="table-detail-title")
                                     yield DataTable(id="accounts-table", classes="detail-table")
-                                    yield Static("", id="account-details", classes="detail-pane")
+                                yield Static("", id="account-details", classes="panel hero-panel")
                         with Container(id="backups-view", classes="view hidden"):
                             with Horizontal(id="backups-layout"):
                                 yield Static("", id="backup-summary", classes="panel hero-panel")
@@ -2231,6 +2304,9 @@ def create_app(
 
         def apply_snapshot(self, snapshot: dict[str, Any]) -> None:
             self.snapshot = snapshot
+            if self.last_action == "loading dashboard data...":
+                self.last_action = "latest data loaded"
+                self.action_tone = "info"
             if not self.metric_history:
                 self.metric_history = extract_seed_metric_history(snapshot)
             self.metric_history = append_monitoring_sample(self.metric_history, snapshot)
@@ -2336,7 +2412,7 @@ def create_app(
                     selected_index = index
                     selected_schedule = schedule
                 table.add_row(
-                    str(schedule.get("job_type", "")),
+                    schedule_job_type_label(schedule.get("job_type", "")),
                     schedule_label(schedule),
                     str(schedule.get("next_run", "") or "n/a"),
                     schedule_id,
@@ -2654,7 +2730,7 @@ def create_app(
             self.apply_view_state()
             self.open_command_form(
                 "schedule_honor_create",
-                "Schedule Honor Job",
+                "Schedule Run Job",
                 "Schedule",
                 [
                     {"name": "schedule_type", "label": "Cadence (daily|weekly)", "value": "daily", "placeholder": "daily"},
@@ -2662,7 +2738,7 @@ def create_app(
                     {"name": "time", "label": "Time (HH:MM)", "value": "06:00", "placeholder": "06:00"},
                     {"name": "timezone", "label": "Timezone", "value": "UTC", "placeholder": "UTC"},
                 ],
-                "Create an honor schedule using the existing Manager scheduler backend.",
+                "Schedule the configured maintenance job backend. This uses maintenance.honor_command under the hood.",
             )
 
         def action_create_restart_schedule(self) -> None:

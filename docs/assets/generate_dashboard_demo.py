@@ -124,7 +124,7 @@ def build_snapshot() -> dict[str, object]:
             "day": "",
             "time": "03:00",
             "timezone": "UTC",
-            "id": "honor-daily",
+            "id": "run-job-daily",
             "next_run": "2026-04-15 03:00 UTC",
             "warnings": "none",
             "announce_message": "none",
@@ -210,7 +210,7 @@ def build_snapshot() -> dict[str, object]:
                     "active": [],
                     "recent_events": [
                         {"timestamp": "05:18", "service": "world", "message": "backup verify dry-run completed", "raw": "backup verify dry-run completed"},
-                        {"timestamp": "05:12", "service": "schedule", "message": "nightly honor job queued", "raw": "nightly honor job queued"},
+                        {"timestamp": "05:12", "service": "schedule", "message": "nightly run job queued", "raw": "nightly run job queued"},
                     ],
                 },
             },
