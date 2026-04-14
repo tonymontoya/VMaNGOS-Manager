@@ -2,30 +2,32 @@
 
 ![CI](https://github.com/tonymontoya/VMANGOS-Manager/actions/workflows/ci.yml/badge.svg)
 ![Ubuntu 22.04](https://img.shields.io/badge/ubuntu-22.04-E95420)
-![Release](https://img.shields.io/badge/release-v0.1.0-0f766e)
+![Status](https://img.shields.io/badge/status-v0.2%20candidate-0f766e)
 ![Interface](https://img.shields.io/badge/interface-Textual%20TUI-0f172a)
 
-Stop running a VMaNGOS realm from shell scraps, one-off SQL, and tribal knowledge. VMaNGOS Manager turns install, operations, backups, account administration, and update planning into one terminal-native admin product built for real realm operators.
+Operate a VMaNGOS realm like a product, not a pile of shell scraps, one-off SQL, and tribal knowledge. VMaNGOS Manager turns install automation, day-two operations, backups, account administration, and update planning into one terminal-native admin product built for real realm operators.
+
+VMaNGOS already gives you the server core. Manager gives you the operator layer communities usually have to assemble for themselves: a real terminal dashboard, safer recurring workflows, and one consistent control surface for the work that normally gets scattered across shell history, handwritten notes, and ad hoc scripts.
 
 ![VMANGOS Manager Textual dashboard](docs/assets/dashboard-overview.svg)
 
 The screenshot above is generated from the shipped dashboard renderer against a reproducible demo snapshot. It is not a painted mockup.
 
-## What You Get
+## Why Operators Reach For It
 
-- fresh-host install automation for `VMANGOS only` or `VMANGOS + Manager`
-- existing-host adoption through config detection instead of forced rebuilds
-- a real Textual TUI you can run directly on the server over SSH
-- integrated workflows for accounts, backups, logs, schedules, config checks, and updates
-- one operational backend shared by the CLI, dashboard, and automation flows
+- bring a fresh Ubuntu host online with `VMANGOS only` or `VMANGOS + Manager`
+- adopt an existing realm through config detection instead of a forced rebuild
+- run a real Textual TUI directly on the server over SSH
+- manage accounts, backups, logs, schedules, config checks, and update prep from one surface
+- rely on one operational backend shared by the CLI, dashboard, and automation flows
 
-In practice, that means less time stitching together service commands, SQL snippets, backup habits, and update notes by hand, and more time running the realm from one place.
+The result is less improvisation and more repeatable operations from a surface that feels deliberate.
 
-## Why It Sticks
+## Why It Feels Different
 
-VMaNGOS already gives communities a strong server core. What it usually does not give them is a polished operator layer.
+Most VMaNGOS tooling assumes the operator is willing to live in shell fragments forever. Manager takes the opposite stance: terminal-first does not have to mean rough, fragmented, or forgettable.
 
-Manager closes that gap. It helps you bring a host online faster, keep routine admin work in one place, and give your realm a control surface that feels intentional instead of improvised.
+That is why the product matters. It gives realm operators something they are not used to getting: a server admin experience that is still SSH-native, but finally feels like software instead of glue.
 
 ## Start The Right Way
 
@@ -81,9 +83,9 @@ sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
 sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
 ```
 
-## The TUI Is The Product Moment
+## The Interface That Sells It
 
-The dashboard is the thing most VMaNGOS admins are not used to getting: a terminal UI that actually feels like a product.
+The dashboard is the thing most VMaNGOS admins are not used to getting: a terminal UI that actually earns its screen space.
 
 It is not a detached frontend experiment. It runs on the same Manager commands and JSON surfaces used by the CLI, which keeps the interface honest and useful on a real server.
 
@@ -108,7 +110,7 @@ Inside the dashboard you get:
 - account workflows for create, password reset, GM level changes, and ban or unban actions
 - a dedicated Ops surface for maintenance queue visibility, update readiness, and log guardrails
 
-It keeps the deployment terminal-first while still giving admins something that looks and feels deliberate.
+It keeps the deployment terminal-first while still giving admins something that looks credible, legible, and worth keeping open.
 
 ## How To Read The Dashboard
 
@@ -121,11 +123,11 @@ The dashboard is organized around a simple split:
 
 That last point matters. Summary panels should answer operator decisions first. Inventory tables feed selected-detail panes, and selected-detail panes stay item-scoped: selected player, selected account, selected backup, selected job.
 
-## Current TUI Coverage
+## What The Dashboard Covers Today
 
-Release C gives you a broad operator surface, but not every CLI path is fully absorbed into the dashboard yet.
+The dashboard already covers the work most realm operators do every week. The CLI remains available for automation, raw output, and a few advanced or higher-friction paths.
 
-| Area | In the dashboard now | Still CLI / shell backed |
+| Area | In the dashboard now | Best handled in the CLI |
 | --- | --- | --- |
 | Server | status, start, stop, restart | watch mode, raw JSON |
 | Accounts | account inventory, create, reset password, set GM, ban, unban, visibility | scripted bulk workflows |
@@ -135,7 +137,7 @@ Release C gives you a broad operator surface, but not every CLI path is fully ab
 
 The user guide tracks these boundaries in more detail and is the best place to see the current product surface with screenshots.
 
-## Learn The Product
+## Start Here
 
 - [User guide](docs/user-guide.md)
 - [Install automation reference](docs/install-automation.md)
@@ -145,7 +147,7 @@ The user guide tracks these boundaries in more detail and is the best place to s
 
 Start with the user guide if you want the best end-to-end walkthrough of what Manager can do.
 
-## Why Trust It
+## Why It Is Credible
 
 - validated on a real Ubuntu VMaNGOS host, not just mocked local shell tests
 - the dashboard screenshot in this README is generated from the shipped Textual app export path using a reproducible demo payload

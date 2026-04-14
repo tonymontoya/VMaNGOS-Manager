@@ -1,6 +1,6 @@
 # User Guide
 
-VMaNGOS Manager is at its best when you use it as a complete operator layer, not just a pile of commands. This guide is the shortest path to that outcome.
+VMaNGOS Manager is at its best when you use it as a complete operator layer, not just a pile of commands. This guide is the shortest path from install to confident day-to-day operation.
 
 It shows you how to:
 
@@ -93,7 +93,7 @@ The dashboard works best when each region has a clear job:
 
 The rule to keep in mind is simple:
 
-- summary counts belong in summary panels
+- summary panels answer the operator question first
 - detail panes belong to the selected row or selected object
 
 If a panel starts mixing realm-wide counters into a selected-item view, that is usually an IA defect, not an operator requirement.
@@ -185,7 +185,7 @@ Recommended habit:
 
 This is one of the biggest quality-of-life wins in Manager. Backup discipline becomes part of the normal operator experience instead of a separate ritual.
 
-Current boundary:
+Still handled in the shell:
 
 - the dashboard shows protection posture, backup inventory, and configured timer state
 - `Backup Readiness` is the summary and selected-backup decision panel
@@ -212,7 +212,7 @@ This screen is especially valuable after:
 - changing service names or install paths
 - reinstalling Manager onto a machine with an older realm layout
 
-Release C boundary:
+Still handled in the shell:
 
 - this view is intentionally read-only
 - edit `manager.conf` and `.dbpass` in the shell, then return here to validate the result
@@ -249,7 +249,7 @@ Recommended flow before a realm update:
 4. Take and verify a backup.
 5. Only then move into a real update workflow.
 
-The command rail follows the same hierarchy as the screen: queue actions first, then update planning, then log guardrail actions. If a task is not in the rail, it is probably still a CLI-first path for now.
+The command rail follows the same hierarchy as the screen: queue actions first, then update planning, then log guardrail actions. If a task is not in the rail, use the CLI as the source of truth for that workflow today.
 
 ## Updates Workflow
 
@@ -290,11 +290,11 @@ The dashboard should be your main control surface, but the CLI still matters whe
 - non-interactive host workflows
 - command-by-command precision for an unusual task
 
-## Dashboard Coverage Today
+## Dashboard vs CLI
 
-This is the current dashboard-to-CLI split for Release C:
+Use the dashboard for everyday operation, then drop to the CLI for the narrower paths listed here:
 
-| Area | In dashboard now | Still outside the dashboard |
+| Area | Use the dashboard for | Use the CLI for |
 | --- | --- | --- |
 | Server | status, start, stop, restart | text watch mode, raw JSON output |
 | Accounts | account inventory, create, password reset, GM changes, ban, unban, account visibility | scripted bulk workflows |
@@ -308,7 +308,7 @@ Use these supporting docs when you need that lower-level surface:
 - [Troubleshooting](troubleshooting.md)
 - [Security notes](security.md)
 
-## Final Advice
+## Operating Style
 
 Manager is strongest when you let it be the place where routine realm operations live.
 
