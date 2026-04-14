@@ -1,5 +1,7 @@
 # Install Automation
 
+If you are learning Manager as a product, start with the [user guide](user-guide.md). This page is the installer-focused reference.
+
 VMANGOS Manager ships two installer entry points aimed at different operator styles:
 
 - `auto_install.sh` for a mostly hands-off first-time host bootstrap

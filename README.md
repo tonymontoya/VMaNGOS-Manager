@@ -5,27 +5,38 @@
 ![Release](https://img.shields.io/badge/release-v0.1.0-0f766e)
 ![Interface](https://img.shields.io/badge/interface-Textual%20TUI-0f172a)
 
-VMaNGOS Manager is the operator layer VMaNGOS usually does not get out of the box. It can stand up a fresh Ubuntu host, adopt an existing realm install, and put a real terminal dashboard on top of the day-two work instead of leaving admins buried in shell history, scattered notes, and ad hoc SQL.
+Stop running a VMaNGOS realm from shell scraps, one-off SQL, and tribal knowledge. VMaNGOS Manager turns install, operations, backups, account administration, and update planning into one terminal-native admin product built for real realm operators.
 
 ![VMANGOS Manager Textual dashboard](docs/assets/dashboard-overview.svg)
 
-This screenshot is generated from the shipped Textual dashboard renderer against a reproducible demo snapshot, not a hand-edited mockup.
+The screenshot above is generated from the shipped dashboard renderer against a reproducible demo snapshot. It is not a painted mockup.
 
-## Why Admins Install It
+## What You Get
 
-- take a blank Ubuntu 22.04 host to `VMANGOS only` or `VMANGOS + Manager` without maintaining a private install playbook
-- adopt an already-running realm through config detection instead of rebuilding the machine from scratch
-- run a real terminal-native dashboard on the server itself without needing GNOME, KDE, or a separate web stack
-- unify backups, logs, account operations, scheduling, updates, and status under one operator surface and one CLI backend
+- fresh-host install automation for `VMANGOS only` or `VMANGOS + Manager`
+- existing-host adoption through config detection instead of forced rebuilds
+- a real Textual TUI you can run directly on the server over SSH
+- integrated workflows for accounts, backups, logs, schedules, config checks, and updates
+- one operational backend shared by the CLI, dashboard, and automation flows
 
-## Install Automation
+In practice, that means less time stitching together service commands, SQL snippets, backup habits, and update notes by hand, and more time running the realm from one place.
 
-For a fresh Ubuntu 22.04 host, the repo ships installer flows that can provision either:
+## Why It Sticks
+
+VMaNGOS already gives communities a strong server core. What it usually does not give them is a polished operator layer.
+
+Manager closes that gap. It helps you bring a host online faster, keep routine admin work in one place, and give your realm a control surface that feels intentional instead of improvised.
+
+## Start The Right Way
+
+### Fresh Host
+
+For a blank Ubuntu 22.04 machine, the repo ships two installer entry points. Both can provision either:
 
 - `VMANGOS only`
 - `VMANGOS + Manager`
 
-Both installer paths support:
+Both paths support:
 
 - `Automated`
 - `Guided`
@@ -45,7 +56,7 @@ wget https://raw.githubusercontent.com/tonymontoya/VMANGOS-Manager/main/vmangos_
 sudo bash vmangos_setup.sh
 ```
 
-The installer handles the ugly parts that usually get scattered across local notes:
+The installer handles the heavy lifting that usually gets lost in private notes:
 
 - dependency installation and long-build orchestration
 - database creation and credentials
@@ -54,13 +65,27 @@ The installer handles the ugly parts that usually get scattered across local not
 - manager provisioning under `/opt/mangos/manager`
 - dashboard prerequisites when Manager is included
 
-`auto_install.sh` stays non-interactive and defaults to `VMANGOS + Manager` with automated inputs. `vmangos_setup.sh` prompts early for the provisioning target and input mode so the operator knows what path they are on before the long-running phases start.
+`auto_install.sh` stays non-interactive and defaults to `VMANGOS + Manager` with automated inputs. `vmangos_setup.sh` prompts early for the provisioning target and input mode so the operator knows exactly what path they are taking before the long-running phases start.
 
-Use the [install automation guide](docs/install-automation.md) for the full installer story.
+### Existing Host
 
-## A TUI Worth Running On The Server
+If you already have VMaNGOS running, Manager does not force you into a reinstall story. Install it, detect the local layout, then launch the dashboard:
 
-The dashboard is the headline feature. It is a terminal operator console built on the same Manager commands and JSON output used by the CLI, so the UI stays grounded in the real product instead of drifting into a separate frontend fiction.
+```bash
+git clone https://github.com/tonymontoya/VMANGOS-Manager.git
+cd VMANGOS-Manager/manager
+make test
+sudo make install PREFIX=/opt/mangos/manager
+sudo /opt/mangos/manager/bin/vmangos-manager config detect
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
+```
+
+## The TUI Is The Product Moment
+
+The dashboard is the thing most VMaNGOS admins are not used to getting: a terminal UI that actually feels like a product.
+
+It is not a detached frontend experiment. It runs on the same Manager commands and JSON surfaces used by the CLI, which keeps the interface honest and useful on a real server.
 
 Bootstrap once:
 
@@ -74,7 +99,7 @@ Launch it:
 sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
 ```
 
-The dashboard gives you a practical top-like realm view with:
+Inside the dashboard you get:
 
 - auth/world service health, PID, uptime, and control actions
 - host CPU, memory, disk, load, disk I/O, and short-term monitoring trends
@@ -83,39 +108,23 @@ The dashboard gives you a practical top-like realm view with:
 - account workflows for create, password reset, GM level changes, and ban or unban actions
 - log rotation and config visibility for safer day-two operations
 
-It keeps the deployment terminal-first while still giving admins something that feels intentional and productized.
+It keeps the deployment terminal-first while still giving admins something that looks and feels deliberate.
 
-## Existing Host Adoption
+## Learn The Product
 
-If you already have VMaNGOS running, Manager does not force a reinstall story. Install it, detect the local layout, then bootstrap the dashboard:
+- [User guide](docs/user-guide.md)
+- [Install automation reference](docs/install-automation.md)
+- [CLI reference](docs/cli-reference.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Security notes](docs/security.md)
 
-```bash
-git clone https://github.com/tonymontoya/VMANGOS-Manager.git
-cd VMANGOS-Manager/manager
-make test
-sudo make install PREFIX=/opt/mangos/manager
-sudo /opt/mangos/manager/bin/vmangos-manager config detect
-sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
-sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
-```
+Start with the user guide if you want the best end-to-end walkthrough of what Manager can do.
 
-The lower-level command surface still exists for operators who prefer it. Use the [CLI reference](docs/cli-reference.md) for command-by-command detail instead of packing that material into the README.
-
-## Proof
+## Why Trust It
 
 - validated on a real Ubuntu VMaNGOS host, not just mocked local shell tests
 - the dashboard screenshot in this README is generated from the shipped Textual app export path using a reproducible demo payload
 - the test suite covers config, status, logs, schedule, backup, update, account, and dashboard seams
-
-## Documentation
-
-- [Install automation](docs/install-automation.md)
-- [CLI reference](docs/cli-reference.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Security notes](docs/security.md)
-- [Research notes](docs/research)
-
-If you want command-by-command detail, use the CLI reference instead of the README.
 
 ## VMaNGOS Context
 

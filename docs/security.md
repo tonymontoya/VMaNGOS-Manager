@@ -1,5 +1,7 @@
 # Security
 
+If you are looking for normal usage guidance, start with the [user guide](user-guide.md). This page focuses on the safety model behind Manager's operational features.
+
 ## Security Model
 
 VMANGOS Manager is intentionally conservative:

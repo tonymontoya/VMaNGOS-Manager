@@ -1,5 +1,7 @@
 # Troubleshooting
 
+If you are still getting oriented, use the [user guide](user-guide.md) first. This page is for diagnosing problems once you are already in the tool.
+
 ## Config Problems
 
 ### `Configuration file not found`

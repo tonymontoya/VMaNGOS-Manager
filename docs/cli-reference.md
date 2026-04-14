@@ -1,5 +1,7 @@
 # CLI Reference
 
+If you want the best feature walkthrough first, start with the [user guide](user-guide.md). This page is the command reference.
+
 `vmangos-manager` is the operational backend for the dashboard, installer-provisioned automation, and direct host administration.
 
 Default installed paths:

@@ -2165,6 +2165,44 @@ PY
     return $all_passed
 }
 
+test_dashboard_parse_args_supports_demo_capture() {
+    local all_passed=0 output compact_output
+
+    output=$(python3 - "$MANAGER_DIR/lib/dashboard.py" <<'PY'
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("dashboard_module", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+args = module.parse_args([
+    "--manager-bin", "/tmp/mock-manager",
+    "--config", "/tmp/manager.conf",
+    "--theme", "dark",
+    "--view", "operations",
+    "--snapshot-file", "/tmp/demo-snapshot.json",
+    "--screenshot", "/tmp/operations.svg",
+])
+
+print(json.dumps({
+    "view": args.view,
+    "snapshot_file": args.snapshot_file,
+    "screenshot": args.screenshot,
+    "theme": args.theme,
+}, sort_keys=True))
+PY
+)
+
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+
+    assert_true "[[ \$compact_output == *'\"view\":\"operations\"'* && \$compact_output == *'\"snapshot_file\":\"/tmp/demo-snapshot.json\"'* ]]" "dashboard parse_args accepts view-specific demo capture options" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"screenshot\":\"/tmp/operations.svg\"'* && \$compact_output == *'\"theme\":\"dark\"'* ]]" "dashboard parse_args preserves screenshot capture arguments" || all_passed=1
+
+    return $all_passed
+}
+
 test_server_player_count_fallback() {
     # shellcheck source=../lib/server.sh
     source "$LIB_DIR/server.sh"
@@ -3376,6 +3414,7 @@ main() {
     run_test "Dashboard: Render helpers" test_dashboard_render_helpers
     run_test "Dashboard: Monitoring history" test_dashboard_monitoring_history_helpers
     run_test "Dashboard: Snapshot fixture helpers" test_dashboard_snapshot_fixture_helpers
+    run_test "Dashboard: Parse args demo capture" test_dashboard_parse_args_supports_demo_capture
     run_test "Server: Player count fallback" test_server_player_count_fallback
     run_test "Server: Interval validation" test_server_validate_interval
     run_test "Server: Start fails on DB preflight" test_server_start_fails_when_database_unreachable

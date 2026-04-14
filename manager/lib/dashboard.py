@@ -90,6 +90,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to manager.conf")
     parser.add_argument("--refresh", type=int, default=2, help="Refresh interval in seconds")
     parser.add_argument("--theme", choices=("dark", "light"), default="dark", help="Dashboard theme")
+    parser.add_argument("--view", choices=tuple(VIEW_TITLES.keys()), default="overview", help="Initial dashboard view")
     parser.add_argument("--screenshot", help="Write an SVG screenshot after the first refresh and exit")
     parser.add_argument(
         "--snapshot-file",
@@ -1427,6 +1428,7 @@ def create_app(
     config_path: str,
     refresh: int,
     theme: str,
+    initial_view: str,
     screenshot_path: str | None,
     snapshot_file: str | None = None,
 ):
@@ -1854,7 +1856,7 @@ def create_app(
             self.snapshot_file = snapshot_file
             self.screenshot_taken = False
             self.screenshot_pending = False
-            self.active_view = "overview"
+            self.active_view = initial_view if initial_view in VIEW_TITLES else "overview"
             self.last_action = "dashboard started"
             self.action_tone = "info"
             self.snapshot = empty_snapshot("waiting for first refresh")
@@ -2584,7 +2586,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        app = create_app(args.manager_bin, args.config, args.refresh, args.theme, args.screenshot, args.snapshot_file)
+        app = create_app(
+            args.manager_bin,
+            args.config,
+            args.refresh,
+            args.theme,
+            args.view,
+            args.screenshot,
+            args.snapshot_file,
+        )
     except DashboardRuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
