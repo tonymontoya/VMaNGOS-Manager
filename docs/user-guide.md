@@ -230,13 +230,13 @@ Operations is the maintenance queue and change-window preflight screen.
 Use it for:
 
 - seeing what maintenance is already queued
-- inspecting or canceling a selected honor or restart job
+- inspecting or canceling a selected run or restart job
 - checking log guardrails before a maintenance window
 - reviewing update readiness and DB impact before risky source changes
 
 Read it in this order:
 
-1. Start with `Maintenance Queue` to see what restart or honor work is already scheduled.
+1. Start with `Maintenance Queue` to see what restart or run-job work is already scheduled.
 2. Use `Selected Job` to inspect cadence, warnings, and cancellation impact for the highlighted item.
 3. Glance at `Maintenance Guardrails` to confirm logs and storage are not about to betray the window.
 4. Use `Update Readiness` when the next change involves source pulls or database movement.
@@ -300,7 +300,7 @@ Use the dashboard for everyday operation, then drop to the CLI for the narrower 
 | Accounts | account inventory, create, password reset, GM changes, ban, unban, account visibility | scripted bulk workflows |
 | Backups | backup readiness, inventory, backup now, verify, restore dry-run, timer visibility, daily/weekly timer create | cleanup, timer removal, live restore |
 | Config | validation plus read-only configuration wiring summary | config creation, detect, show, and file editing |
-| Operations | maintenance queue, honor and restart scheduling, schedule cancel, logs guardrails, update planning visibility | update apply and other source-tree workflows |
+| Operations | maintenance queue, run-job and restart scheduling, schedule cancel, logs guardrails, update planning visibility | update apply and other source-tree workflows |
 
 Use these supporting docs when you need that lower-level surface:
 
