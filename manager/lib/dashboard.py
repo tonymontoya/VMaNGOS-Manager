@@ -1406,12 +1406,29 @@ def format_update_assessment(value: Any) -> str:
     return f"[bold {ACCENT_MUTED}]{label}[/]"
 
 
+def maintenance_window_state(logs_data: dict[str, Any]) -> str:
+    config = logs_data.get("config", {})
+    log_counts = logs_data.get("logs", {})
+    disk = logs_data.get("disk", {})
+
+    if not logs_data:
+        return "unavailable"
+    if not config.get("present") or not config.get("in_sync"):
+        return "warning"
+    if not log_counts.get("sensitive_permissions_ok", False):
+        return "warning"
+    if clamp_int(disk.get("used_percent", 0)) >= 85:
+        return "warning"
+    return "healthy"
+
+
 def render_logs_panel(snapshot: dict[str, Any]) -> str:
     logs = snapshot.get("logs", {})
+    queue_count = len(snapshot.get("schedules", []))
     lines = [
-        f"[bold {ACCENT_GOLD}]Maintenance Guardrails[/]",
+        f"[bold {ACCENT_GOLD}]Change Window Readiness[/]",
         "",
-        f"[{ACCENT_MUTED}]Log hygiene and storage pressure before a maintenance window.[/]",
+        f"[{ACCENT_MUTED}]Can this host safely absorb scheduled maintenance right now?[/]",
         "",
     ]
 
@@ -1424,12 +1441,14 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
     log_counts = data.get("logs", {})
     disk = data.get("disk", {})
     policy = data.get("policy", {})
+    readiness = maintenance_window_state(data)
     config_state = "healthy" if config.get("present") and config.get("in_sync") else "warning"
     sensitive_state = "healthy" if log_counts.get("sensitive_permissions_ok") else "warning"
 
     lines.extend(
         [
-            f"[{ACCENT_MUTED}]Scope[/]         supporting context only; the queue lives below.",
+            f"[{ACCENT_MUTED}]Overall[/]       {format_state(readiness)}",
+            f"[{ACCENT_MUTED}]Queue[/]         {queue_count} scheduled job{'s' if queue_count != 1 else ''}",
             f"[{ACCENT_MUTED}]Logs[/]          {format_state(data.get('status', 'unavailable'))}",
             f"[{ACCENT_MUTED}]Rotation[/]      {format_state(config_state)}  present={config.get('present', False)}  in_sync={config.get('in_sync', False)}",
             f"[{ACCENT_MUTED}]Sensitive[/]     {format_state(sensitive_state)}  perms_ok={log_counts.get('sensitive_permissions_ok', False)}",
@@ -1437,7 +1456,8 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
             f"[{ACCENT_MUTED}]Headroom[/]      {disk.get('used_percent', 0)}% used  free {format_gb_from_kb(disk.get('available_kb', 0))}",
             f"[{ACCENT_MUTED}]Retention[/]     max={policy.get('max_size', 'n/a')}  min={policy.get('min_size', 'n/a')}",
             "",
-            f"[{ACCENT_MUTED}]Actions[/]       [bold {ACCENT_GOLD}]T[/] test logs  [bold {ACCENT_GOLD}]l[/] rotate logs",
+            f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] run job  [bold {ACCENT_GOLD}]m[/] restart job",
+            f"[{ACCENT_MUTED}]Support[/]       [bold {ACCENT_GOLD}]T[/] test logs  [bold {ACCENT_GOLD}]l[/] rotate logs",
         ]
     )
     return "\n".join(lines)
@@ -1518,6 +1538,26 @@ def schedule_label(schedule: dict[str, Any]) -> str:
     return f"{time_value} {timezone}".strip() or "n/a"
 
 
+def schedule_origin_label(schedule: dict[str, Any]) -> str:
+    job_type = str(schedule.get("job_type", "") or "").strip().lower()
+    if job_type == "honor":
+        return "schedule honor -> maintenance.honor_command"
+    if job_type == "restart":
+        return "schedule restart -> server restart workflow"
+    return "manager scheduler backend"
+
+
+def render_schedule_intro(schedules: list[dict[str, Any]]) -> str:
+    count = len(schedules)
+    return "\n".join(
+        [
+            f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] run job  [bold {ACCENT_GOLD}]m[/] restart job",
+            f"[{ACCENT_MUTED}]Queue Source[/]  jobs appear here after dashboard scheduling or the matching [bold {ACCENT_GOLD}]schedule[/] CLI commands.",
+            f"[{ACCENT_MUTED}]Now[/]           {count} scheduled job{'s' if count != 1 else ''} in the queue.",
+        ]
+    )
+
+
 def render_schedule_details(
     schedule: dict[str, Any] | None,
     total_schedules: int,
@@ -1527,12 +1567,14 @@ def render_schedule_details(
         return "\n".join(
             [
                 f"[bold {ACCENT_GOLD}]Selected Job[/]",
+                f"[{ACCENT_MUTED}]Origin, cadence, and next action for the highlighted schedule.[/]",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]     choose a job row from the queue to inspect or cancel it.",
                 f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
                 "",
-                f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] run job  [bold {ACCENT_GOLD}]m[/] restart job",
-                f"[{ACCENT_MUTED}]Cancel[/]        [bold {ACCENT_GOLD}]j[/] cancel the selected job",
+                f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] run job  [bold {ACCENT_GOLD}]m[/] restart job",
+                f"[{ACCENT_MUTED}]CLI Path[/]      [bold {ACCENT_GOLD}]schedule honor[/] or [bold {ACCENT_GOLD}]schedule restart[/]",
+                f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] cancel the selected job once one is highlighted.",
             ]
         )
 
@@ -1541,17 +1583,20 @@ def render_schedule_details(
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]Selected Job[/]",
+            f"[{ACCENT_MUTED}]Origin, cadence, and next action for the highlighted schedule.[/]",
             "",
             f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
             f"[{ACCENT_MUTED}]Job ID[/]        {escape_markup(schedule.get('id', 'n/a'))}",
             f"[{ACCENT_MUTED}]Type[/]          {escape_markup(schedule_job_type_label(schedule.get('job_type', 'n/a')))}",
+            f"[{ACCENT_MUTED}]Origin[/]        {escape_markup(schedule_origin_label(schedule))}",
             f"[{ACCENT_MUTED}]Cadence[/]       {escape_markup(schedule.get('schedule_type', 'n/a'))}",
             f"[{ACCENT_MUTED}]Schedule[/]      {escape_markup(schedule_label(schedule))}",
             f"[{ACCENT_MUTED}]Next Run[/]      {escape_markup(schedule.get('next_run', 'n/a') or 'n/a')}",
             f"[{ACCENT_MUTED}]Warnings[/]      {escape_markup(warnings)}",
             f"[{ACCENT_MUTED}]Announce[/]      {escape_markup(announce_message)}",
             "",
-            f"[{ACCENT_MUTED}]Cancel[/]        [bold {ACCENT_GOLD}]j[/] remove this job if the schedule is no longer desired.",
+            f"[{ACCENT_MUTED}]Create More[/]   [bold {ACCENT_GOLD}]h[/] run job  [bold {ACCENT_GOLD}]m[/] restart job",
+            f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] remove this job if the schedule is no longer desired.",
         ]
     )
 
@@ -1879,9 +1924,19 @@ def create_app(
         }
 
         .table-detail-body {
-            layout: vertical;
+            layout: horizontal;
             height: 1fr;
             margin-top: 1;
+        }
+
+        #schedule-intro {
+            height: auto;
+            margin-bottom: 1;
+            color: #cbd5e1;
+        }
+
+        Screen.theme-light #schedule-intro {
+            color: #475569;
         }
 
         .detail-table {
@@ -2222,7 +2277,8 @@ def create_app(
                                     yield Static("", id="logs-pane", classes="panel accent-panel")
                                     yield Static("", id="update-pane", classes="panel hero-panel")
                                 with Vertical(classes="panel table-panel table-detail", id="schedules-layout"):
-                                    yield Static("[b]Maintenance Queue[/b]", classes="table-detail-title")
+                                    yield Static("[b]Scheduled Maintenance[/b]", classes="table-detail-title")
+                                    yield Static("", id="schedule-intro")
                                     with Horizontal(classes="table-detail-body"):
                                         yield DataTable(id="schedules-table", classes="detail-table")
                                         yield Static("", id="schedule-details", classes="detail-pane")
@@ -2401,6 +2457,7 @@ def create_app(
         def refresh_schedules(self, schedules: list[dict[str, Any]]) -> None:
             table = self.query_one("#schedules-table", DataTable)
             table.clear(columns=False)
+            self.query_one("#schedule-intro", Static).update(render_schedule_intro(schedules))
 
             selected_index = 0
             selected_schedule: dict[str, Any] | None = None
