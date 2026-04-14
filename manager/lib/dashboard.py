@@ -45,6 +45,22 @@ ACTION_STYLES = {
     "error": ("ERROR", ACCENT_ROSE),
 }
 
+VIEW_TITLES = {
+    "overview": "Overview",
+    "accounts": "Accounts",
+    "backups": "Backups",
+    "config": "Config",
+    "operations": "Operations",
+}
+
+VIEW_SUMMARIES = {
+    "overview": "Watch live realm health, host pressure, and player presence.",
+    "accounts": "Provision, secure, and moderate accounts without leaving the console.",
+    "backups": "Inspect backup inventory and queue protection workflows.",
+    "config": "Validate Manager wiring against the host it is operating.",
+    "operations": "Run logs, schedule, and update workflows from one surface.",
+}
+
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9]{2,32}$")
 GM_LEVEL_PATTERN = re.compile(r"^[0-3]$")
 DURATION_PATTERN = re.compile(r"^[1-9][0-9]*[smhdw]$")
@@ -197,6 +213,20 @@ def truncate_text(value: Any, max_length: int = 76) -> str:
 
 def escape_markup(value: Any) -> str:
     return str(value or "").replace("[", "\\[").replace("]", "\\]")
+
+
+def format_error_text(value: Any, max_length: int = 92) -> str:
+    text = " ".join(str(value or "unknown error").split())
+    message_match = re.search(r'"message":"([^"]+)"', text)
+    suggestion_match = re.search(r'"suggestion":"([^"]+)"', text)
+
+    if message_match:
+        parts = [message_match.group(1)]
+        if suggestion_match:
+            parts.append(suggestion_match.group(1))
+        text = " ".join(parts)
+
+    return escape_markup(truncate_text(text, max_length))
 
 
 def player_key_value(value: Any) -> str:
@@ -731,11 +761,15 @@ def render_action_banner(
     tone_label, tone_color = ACTION_STYLES.get(action_tone, ACTION_STYLES["info"])
     captured_at = iso_to_display(snapshot.get("captured_at"))
     message = escape_markup(truncate_text(last_action or "dashboard started", 140))
+    view_title = VIEW_TITLES.get(active_view, active_view.title())
+    view_summary = VIEW_SUMMARIES.get(active_view, "Operate the realm from one console.")
     return "\n".join(
         [
-            f"[bold {tone_color}]{tone_label}[/]  [{ACCENT_MUTED}]view[/] [bold {ACCENT_GOLD}]{active_view.title()}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s  [{ACCENT_MUTED}]snapshot[/] {captured_at}",
+            f"[bold {tone_color}]{tone_label}[/]  [bold {ACCENT_GOLD}]{view_title}[/] [{ACCENT_MUTED}]command deck[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
+            f"[{ACCENT_MUTED}]snapshot[/] {captured_at}",
             "",
-            message,
+            f"[bold {ACCENT_SKY}]Focus[/] {escape_markup(view_summary)}",
+            f"[{ACCENT_MUTED}]Last result[/] {message}",
         ]
     )
 
@@ -757,7 +791,12 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
     backups = snapshot.get("backups", {}).get("summary", {})
     players_online = len(snapshot.get("players", []))
 
-    lines = [f"[bold {ACCENT_GOLD}]Manager Console[/]", "", f"[bold {ACCENT_SKY}]Views[/]"]
+    lines = [
+        f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]",
+        f"[{ACCENT_MUTED}]Realm operator console[/]",
+        "",
+        f"[bold {ACCENT_SKY}]Modules[/]",
+    ]
     for name, key, label in sections:
         if name == active_view:
             lines.append(f"[bold {ACCENT_TEAL}]▶[/] [bold {ACCENT_GOLD}]{key}[/] [bold {ACCENT_TEAL}]{label}[/]")
@@ -774,8 +813,11 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
             f"[{ACCENT_MUTED}]Auth[/]     {format_state(auth.get('health', auth.get('state', 'unavailable')))}",
             f"[{ACCENT_MUTED}]World[/]    {format_state(world.get('health', world.get('state', 'unavailable')))}",
             "",
-            f"[bold {ACCENT_SKY}]Quick Keys[/]",
+            f"[bold {ACCENT_SKY}]Active Hotkeys[/]",
             *render_context_actions(active_view),
+            "",
+            f"[bold {ACCENT_SKY}]Focus[/]",
+            f"[{ACCENT_MUTED}]{escape_markup(VIEW_SUMMARIES.get(active_view, 'Operate the realm from one console.'))}[/]",
             "",
             f"[bold {ACCENT_SKY}]Last Result[/]",
             f"[{ACCENT_MUTED}]{escape_markup(truncate_text(last_action, 68)) or 'dashboard started'}[/]",
@@ -791,7 +833,7 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
             [
                 f"[bold {ACCENT_GOLD}]Service Overview[/]",
                 "",
-                f"[bold {ACCENT_ROSE}]Server snapshot failed:[/] {server['error']}",
+                f"[bold {ACCENT_ROSE}]Server snapshot failed:[/] {format_error_text(server['error'])}",
                 "",
                 f"[{ACCENT_MUTED}]Current view:[/] {active_view}",
             ]
@@ -849,7 +891,7 @@ def render_metrics_panel(snapshot: dict[str, Any]) -> str:
                 f"[bold {ACCENT_SKY}]I/O[/]      {format_state(storage_io.get('status', 'unavailable'))}  [{ACCENT_MUTED}]install sysstat/iostat for live disk stats[/]"
             )
     else:
-        lines.append(f"[bold {ACCENT_ROSE}]Server metrics unavailable:[/] {server['error']}")
+        lines.append(f"[bold {ACCENT_ROSE}]Server metrics unavailable:[/] {format_error_text(server['error'])}")
 
     lines.extend(["", f"[bold {ACCENT_SKY}]Log Rotation[/]"])
     if logs["ok"]:
@@ -866,7 +908,7 @@ def render_metrics_panel(snapshot: dict[str, Any]) -> str:
             ]
         )
     else:
-        lines.append(f"[bold {ACCENT_ROSE}]Logs snapshot unavailable:[/] {logs['error']}")
+        lines.append(f"[bold {ACCENT_ROSE}]Logs snapshot unavailable:[/] {format_error_text(logs['error'])}")
 
     return "\n".join(lines)
 
@@ -878,10 +920,11 @@ def render_player_details(player: dict[str, Any] | None, online_count: int) -> s
                 f"[bold {ACCENT_GOLD}]Player Details[/]",
                 "",
                 f"[{ACCENT_MUTED}]Online now[/]   [bold {ACCENT_GOLD}]{online_count}[/]",
+                f"[{ACCENT_MUTED}]Snapshot[/]     no active player row selected",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]    choose a player row when someone logs in.",
                 "",
-                f"[{ACCENT_MUTED}]Workflow[/]     use [bold {ACCENT_GOLD}]2[/] [bold {ACCENT_GOLD}]Accounts[/] for account actions.",
+                f"[{ACCENT_MUTED}]Operator move[/] use [bold {ACCENT_GOLD}]2[/] [bold {ACCENT_GOLD}]Accounts[/] for account actions.",
             ]
         )
 
@@ -896,7 +939,7 @@ def render_player_details(player: dict[str, Any] | None, online_count: int) -> s
             f"[{ACCENT_MUTED}]Banned[/]       {format_flag(player.get('banned'), true_color=ACCENT_ROSE)}",
             f"[{ACCENT_MUTED}]Players now[/]  [bold {ACCENT_GOLD}]{online_count}[/]",
             "",
-            f"[{ACCENT_MUTED}]Workflow[/]     switch to [bold {ACCENT_GOLD}]Accounts[/] for password, GM, and ban actions.",
+            f"[{ACCENT_MUTED}]Operator move[/] switch to [bold {ACCENT_GOLD}]Accounts[/] for password, GM, and ban actions.",
         ]
     )
 
@@ -908,6 +951,7 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
                 f"[bold {ACCENT_GOLD}]Account Details[/]",
                 "",
                 f"[{ACCENT_MUTED}]Accounts[/]     {total_accounts} loaded",
+                f"[{ACCENT_MUTED}]Snapshot[/]     account list ready",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]    choose a row to inspect or act on an account.",
                 "",
@@ -927,7 +971,7 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
             f"[{ACCENT_MUTED}]Banned[/]       {format_flag(account.get('banned'), true_color=ACCENT_ROSE)}",
             f"[{ACCENT_MUTED}]Accounts[/]     {total_accounts} loaded",
             "",
-            f"[{ACCENT_MUTED}]Hotkeys[/]      [bold {ACCENT_GOLD}]c[/] create  [bold {ACCENT_GOLD}]p[/] password  [bold {ACCENT_GOLD}]g[/] GM",
+            f"[{ACCENT_MUTED}]Operator move[/] [bold {ACCENT_GOLD}]c[/] create  [bold {ACCENT_GOLD}]p[/] password  [bold {ACCENT_GOLD}]g[/] GM",
             f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]n[/] ban     [bold {ACCENT_GOLD}]u[/] unban",
         ]
     )
@@ -1077,10 +1121,10 @@ def format_update_assessment(value: Any) -> str:
 
 def render_logs_panel(snapshot: dict[str, Any]) -> str:
     logs = snapshot.get("logs", {})
-    lines = [f"[bold {ACCENT_GOLD}]Logs Health[/]", ""]
+    lines = [f"[bold {ACCENT_GOLD}]Logs Health[/]", "", f"[{ACCENT_MUTED}]Rotation hygiene, retention, and storage pressure.[/]", ""]
 
     if not logs.get("ok"):
-        lines.append(f"[bold {ACCENT_ROSE}]Logs snapshot unavailable:[/] {logs.get('error', 'unknown error')}")
+        lines.append(f"[bold {ACCENT_ROSE}]Logs snapshot unavailable:[/] {format_error_text(logs.get('error', 'unknown error'))}")
         return "\n".join(lines)
 
     data = logs.get("data", {})
@@ -1105,7 +1149,7 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
 def render_update_panel(snapshot: dict[str, Any], update_plan_data: dict[str, Any] | None = None) -> str:
     check = snapshot.get("update_check", {})
     inspect = snapshot.get("update_inspect", {})
-    lines = [f"[bold {ACCENT_GOLD}]Update State[/]", ""]
+    lines = [f"[bold {ACCENT_GOLD}]Update State[/]", "", f"[{ACCENT_MUTED}]Git tracking plus database-impact awareness.[/]", ""]
 
     if check.get("ok"):
         data = check.get("data", {})
@@ -1120,7 +1164,7 @@ def render_update_panel(snapshot: dict[str, Any], update_plan_data: dict[str, An
             ]
         )
     else:
-        lines.append(f"[bold {ACCENT_ROSE}]Update check unavailable:[/] {check.get('error', 'unknown error')}")
+        lines.append(f"[bold {ACCENT_ROSE}]Update check unavailable:[/] {format_error_text(check.get('error', 'unknown error'))}")
 
     lines.extend(["", f"[bold {ACCENT_SKY}]DB Impact[/]"])
     if inspect.get("ok"):
@@ -1134,7 +1178,7 @@ def render_update_panel(snapshot: dict[str, Any], update_plan_data: dict[str, An
             ]
         )
     else:
-        lines.append(f"[{ACCENT_MUTED}]Inspect unavailable:[/] {escape_markup(inspect.get('error', 'no update metadata'))}")
+        lines.append(f"[{ACCENT_MUTED}]Inspect unavailable:[/] {format_error_text(inspect.get('error', 'no update metadata'))}")
 
     if update_plan_data:
         lines.extend(["", f"[bold {ACCENT_SKY}]Plan[/]"])
@@ -1176,6 +1220,7 @@ def render_schedule_details(
                 f"[bold {ACCENT_GOLD}]Job Details[/]",
                 "",
                 f"[{ACCENT_MUTED}]Scheduled[/]     {total_schedules} known",
+                f"[{ACCENT_MUTED}]Snapshot[/]      operations queue ready",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]     choose a job row to inspect or cancel it.",
                 "",
@@ -1296,7 +1341,7 @@ def create_app(
     class VMangosDashboard(App[None]):
         CSS = """
         Screen {
-            background: #06111d;
+            background: #071522;
             color: #e6edf7;
         }
 
@@ -1306,7 +1351,7 @@ def create_app(
         }
 
         Header {
-            background: #1447a6;
+            background: #143b7a;
             color: #f8fafc;
         }
 
@@ -1316,7 +1361,7 @@ def create_app(
         }
 
         Footer {
-            background: #0a2a43;
+            background: #0c2340;
             color: #f8fafc;
         }
 
@@ -1331,10 +1376,10 @@ def create_app(
         }
 
         #sidebar {
-            width: 30;
-            min-width: 30;
+            width: 32;
+            min-width: 32;
             border-right: heavy #f59e0b;
-            background: #081420;
+            background: #091827;
             padding: 1 2;
         }
 
@@ -1346,15 +1391,15 @@ def create_app(
         #content {
             width: 1fr;
             layout: vertical;
-            padding: 1 2;
+            padding: 1 2 1 1;
         }
 
         #action-banner {
             height: auto;
             margin-bottom: 1;
-            border: round #f59e0b;
-            background: #0d1d2d;
-            padding: 1 2;
+            border: heavy #f59e0b;
+            background: #11243a;
+            padding: 1 2 0 2;
         }
 
         Screen.theme-light #action-banner {
@@ -1375,8 +1420,8 @@ def create_app(
         }
 
         .panel {
-            border: round #14b8a6;
-            background: #102033;
+            border: round #2563eb;
+            background: #0d1d30;
             padding: 1 2;
             overflow: auto;
         }
@@ -1386,11 +1431,25 @@ def create_app(
             background: #fffdf7;
         }
 
+        .hero-panel {
+            border: round #f59e0b;
+            background: #13243a;
+        }
+
+        .accent-panel {
+            border: round #14b8a6;
+            background: #0f2234;
+        }
+
+        .table-panel {
+            background: #0a1828;
+        }
+
         #overview-grid {
             layout: grid;
             grid-size: 2 2;
             grid-columns: 1fr 1fr;
-            grid-rows: 1fr 1fr;
+            grid-rows: 11 1fr;
             grid-gutter: 1 2;
             height: 1fr;
         }
@@ -1402,13 +1461,13 @@ def create_app(
 
         .table-detail-title {
             height: auto;
-            color: #f8fafc;
+            color: #f59e0b;
             text-style: bold;
             padding-bottom: 1;
         }
 
         Screen.theme-light .table-detail-title {
-            color: #111827;
+            color: #1d4ed8;
         }
 
         .table-detail-body {
@@ -1422,21 +1481,28 @@ def create_app(
         }
 
         .detail-pane {
-            width: 38%;
+            width: 42%;
             min-width: 30;
             height: 1fr;
             margin-left: 1;
-            border-left: heavy #334155;
-            padding-left: 1;
+            border-left: heavy #f59e0b;
+            padding-left: 2;
+            background: #0d1d30;
         }
 
         Screen.theme-light .detail-pane {
             border-left: heavy #93c5fd;
+            background: #fff9ef;
         }
 
         #players-table {
             height: 1fr;
             margin-top: 1;
+        }
+
+        #players-pane,
+        #player-details {
+            min-height: 16;
         }
 
         #accounts-table {
@@ -1454,7 +1520,7 @@ def create_app(
         }
 
         #operations-summary {
-            height: 13;
+            height: 15;
             margin-bottom: 1;
         }
 
@@ -1473,10 +1539,20 @@ def create_app(
         }
 
         #backup-summary {
-            width: 44;
-            min-width: 42;
+            width: 48;
+            min-width: 46;
             height: 1fr;
             margin-right: 1;
+        }
+
+        DataTable {
+            background: #0a1828;
+            color: #e6edf7;
+        }
+
+        Screen.theme-light DataTable {
+            background: #ffffff;
+            color: #111827;
         }
 
         #backups-table {
@@ -1498,11 +1574,11 @@ def create_app(
         }
 
         #command-modal {
-            width: 78;
+            width: 84;
             max-width: 100;
             height: auto;
-            border: round #f59e0b;
-            background: #081420;
+            border: heavy #f59e0b;
+            background: #0c1b2c;
             padding: 1 2 2 2;
         }
 
@@ -1513,12 +1589,12 @@ def create_app(
 
         #command-modal-title {
             text-style: bold;
-            color: #f8fafc;
+            color: #f59e0b;
             margin-bottom: 1;
         }
 
         CommandFormScreen.theme-light #command-modal-title {
-            color: #111827;
+            color: #1d4ed8;
         }
 
         #command-modal-intro {
@@ -1631,30 +1707,30 @@ def create_app(
                     with Container(id="view-stack"):
                         with Container(id="overview-view", classes="view"):
                             with Container(id="overview-grid"):
-                                yield Static("", id="service-pane", classes="panel")
-                                yield Static("", id="metrics-pane", classes="panel")
-                                with Vertical(id="players-pane", classes="panel"):
+                                yield Static("", id="service-pane", classes="panel hero-panel")
+                                yield Static("", id="metrics-pane", classes="panel accent-panel")
+                                with Vertical(id="players-pane", classes="panel table-panel"):
                                     yield Static("[b]Online Players[/b]", classes="table-detail-title")
                                     yield DataTable(id="players-table")
-                                yield Static("", id="player-details", classes="panel")
+                                yield Static("", id="player-details", classes="panel hero-panel")
                         with Container(id="accounts-view", classes="view hidden"):
-                            with Vertical(classes="panel table-detail", id="accounts-layout"):
+                            with Vertical(classes="panel table-panel table-detail", id="accounts-layout"):
                                 yield Static("[b]Accounts[/b]", classes="table-detail-title")
                                 with Horizontal(classes="table-detail-body"):
                                     yield DataTable(id="accounts-table", classes="detail-table")
                                     yield Static("", id="account-details", classes="detail-pane")
                         with Container(id="backups-view", classes="view hidden"):
                             with Horizontal(id="backups-layout"):
-                                yield Static("", id="backup-summary", classes="panel")
-                                yield DataTable(id="backups-table", classes="panel")
+                                yield Static("", id="backup-summary", classes="panel hero-panel")
+                                yield DataTable(id="backups-table", classes="panel table-panel")
                         with Container(id="config-view", classes="view hidden"):
-                            yield Static("", id="config-pane", classes="panel")
+                            yield Static("", id="config-pane", classes="panel hero-panel")
                         with Container(id="operations-view", classes="view hidden"):
                             with Vertical(id="operations-layout"):
                                 with Horizontal(id="operations-summary"):
-                                    yield Static("", id="logs-pane", classes="panel")
-                                    yield Static("", id="update-pane", classes="panel")
-                                with Vertical(classes="panel table-detail", id="schedules-layout"):
+                                    yield Static("", id="logs-pane", classes="panel accent-panel")
+                                    yield Static("", id="update-pane", classes="panel hero-panel")
+                                with Vertical(classes="panel table-panel table-detail", id="schedules-layout"):
                                     yield Static("[b]Scheduled Jobs[/b]", classes="table-detail-title")
                                     with Horizontal(classes="table-detail-body"):
                                         yield DataTable(id="schedules-table", classes="detail-table")

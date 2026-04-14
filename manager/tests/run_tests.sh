@@ -1992,12 +1992,12 @@ PY
 
     compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
 
-    assert_true "[[ \$compact_output == *'READY'* && \$compact_output == *'Accounts'* && \$compact_output == *'refresh[/]2s'* ]]" "dashboard action banner exposes tone, view, and interval" || all_passed=1
-    assert_true "[[ \$compact_output == *'RealmPulse'* && \$compact_output == *'Players[/]1online'* && \$compact_output == *'Backups[/]3known'* && \$compact_output == *'l[/]rotatelogs'* && \$compact_output == *'P[/]updateplan'* ]]" "dashboard sidebar exposes live pulse summary and operations keys" || all_passed=1
-    assert_true "[[ \$compact_output == *'Selected[/][bold#2dd4bf]PLAYERONE'* && \$compact_output == *'Workflow[/]switchto[bold#f59e0b]Accounts[/]forpassword,GM,andbanactions.'* ]]" "dashboard player details emphasize the selected player workflow" || all_passed=1
-    assert_true "[[ \$compact_output == *'chooseaplayerrowwhensomeonelogsin.'* ]]" "dashboard empty player state explains next operator step" || all_passed=1
-    assert_true "[[ \$compact_output == *'LogsHealth'* && \$compact_output == *'Retention[/]max=100Mmin=1M'* ]]" "dashboard logs panel summarizes health and retention" || all_passed=1
-    assert_true "[[ \$compact_output == *'UpdateState'* && \$compact_output == *'Assessment[/][bold#f59e0b]schemamigrationspending'* && \$compact_output == *'Next[/]vmangos-managerbackupnow--verify'* ]]" "dashboard update panel surfaces DB-aware update state and plan steps" || all_passed=1
+    assert_true "[[ \$compact_output == *'READY'* && \$compact_output == *'Accounts'* && \$compact_output == *'commanddeck'* && \$compact_output == *'refresh[/]2s'* ]]" "dashboard action banner exposes tone, view, interval, and command-deck framing" || all_passed=1
+    assert_true "[[ \$compact_output == *'VMaNGOSManager'* && \$compact_output == *'RealmPulse'* && \$compact_output == *'Players[/]1online'* && \$compact_output == *'Backups[/]3known'* && \$compact_output == *'ActiveHotkeys'* && \$compact_output == *'l[/]rotatelogs'* && \$compact_output == *'P[/]updateplan'* ]]" "dashboard sidebar exposes live pulse summary, operator framing, and operations keys" || all_passed=1
+    assert_true "[[ \$compact_output == *'Selected[/][bold#2dd4bf]PLAYERONE'* && \$compact_output == *'Operatormove[/]switchto[bold#f59e0b]Accounts[/]forpassword,GM,andbanactions.'* ]]" "dashboard player details emphasize the selected player workflow" || all_passed=1
+    assert_true "[[ \$compact_output == *'Snapshot[/]noactiveplayerrowselected'* && \$compact_output == *'chooseaplayerrowwhensomeonelogsin.'* ]]" "dashboard empty player state explains next operator step" || all_passed=1
+    assert_true "[[ \$compact_output == *'LogsHealth'* && \$compact_output == *'Rotationhygiene,retention,andstoragepressure.'* && \$compact_output == *'Retention[/]max=100Mmin=1M'* ]]" "dashboard logs panel summarizes health and retention" || all_passed=1
+    assert_true "[[ \$compact_output == *'UpdateState'* && \$compact_output == *'database-impactawareness.'* && \$compact_output == *'Assessment[/][bold#f59e0b]schemamigrationspending'* && \$compact_output == *'Next[/]vmangos-managerbackupnow--verify'* ]]" "dashboard update panel surfaces DB-aware update state and plan steps" || all_passed=1
     assert_true "[[ \$compact_output == *'JobDetails'* && \$compact_output == *'logsrotatecompleted'* && \$compact_output == *'cancelselectedjob'* ]]" "dashboard schedule details include module-local result context" || all_passed=1
 
     return $all_passed
