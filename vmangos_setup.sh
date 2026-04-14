@@ -524,7 +524,7 @@ BUILDEOF
     log_info "Waiting for build to complete..."
     
     # Wait for build to complete
-    if wait $BUILD_PID; then
+    if wait "$BUILD_PID"; then
         log_info "Background build completed successfully"
         return 0
     else
@@ -624,7 +624,7 @@ validate_client_data() {
         log_info "Found dbc.MPQ - basic structure looks valid"
     fi
     
-    if [ $errors -gt 0 ]; then
+    if [ "$errors" -gt 0 ]; then
         log_warn "Client data validation found $errors issues"
         return 1
     else
@@ -1144,8 +1144,8 @@ phase_data_extraction() {
             log_warn "MoveMapGen completed with warnings (this is usually OK)"
         
         # Stop the heartbeat
-        kill $HEARTBEAT_PID 2>/dev/null || true
-        wait $HEARTBEAT_PID 2>/dev/null || true
+        kill "$HEARTBEAT_PID" 2>/dev/null || true
+        wait "$HEARTBEAT_PID" 2>/dev/null || true
         
         log_info "====================================================================="
         log_info "Movement map generation completed at $(date '+%H:%M:%S')"
@@ -1317,12 +1317,23 @@ phase_database_import() {
         if [ "$MIGRATIONS_EXIST" -gt 0 ] && [ "$WORLD_DB_DOWNLOADED" != "true" ]; then
             log_info "Running database migrations..."
             cd "$INSTALLROOT/source/sql/migrations"
-            [ -f "merge.sh" ] && chmod +x merge.sh && ./merge.sh 2>&1 | tee -a "$INSTALL_LOG" || true
-            
-            [ -f "world_db_updates.sql" ] && mysql "$WORLDDB" < world_db_updates.sql || true
-            [ -f "logs_db_updates.sql" ] && mysql "$LOGSDB" < logs_db_updates.sql || true
-            [ -f "characters_db_updates.sql" ] && mysql "$CHARACTERDB" < characters_db_updates.sql || true
-            [ -f "logon_db_updates.sql" ] && mysql "$AUTHDB" < logon_db_updates.sql || true
+            if [ -f "merge.sh" ]; then
+                chmod +x merge.sh
+                ./merge.sh 2>&1 | tee -a "$INSTALL_LOG" || true
+            fi
+
+            if [ -f "world_db_updates.sql" ]; then
+                mysql "$WORLDDB" < world_db_updates.sql || true
+            fi
+            if [ -f "logs_db_updates.sql" ]; then
+                mysql "$LOGSDB" < logs_db_updates.sql || true
+            fi
+            if [ -f "characters_db_updates.sql" ]; then
+                mysql "$CHARACTERDB" < characters_db_updates.sql || true
+            fi
+            if [ -f "logon_db_updates.sql" ]; then
+                mysql "$AUTHDB" < logon_db_updates.sql || true
+            fi
         else
             log_info "Skipping migrations (using pre-built database or no migrations table)"
         fi
