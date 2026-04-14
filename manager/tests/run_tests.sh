@@ -1864,6 +1864,23 @@ payload = {
         "backup_schedule_weekly",
         {"schedule": "Sun 04:00"},
     ),
+    "logs_rotate": module.build_dashboard_action_request(snapshot, "", "", "", "logs_rotate", {}),
+    "honor": module.build_dashboard_action_request(
+        snapshot,
+        "",
+        "",
+        "",
+        "schedule_honor_create",
+        {"schedule_type": "weekly", "day": "Sun", "time": "06:00", "timezone": "UTC"},
+    ),
+    "restart_job": module.build_dashboard_action_request(
+        snapshot,
+        "",
+        "",
+        "",
+        "schedule_restart_create",
+        {"schedule_type": "weekly", "day": "Sun", "time": "04:00", "timezone": "UTC", "warnings": "30,15,5,1", "announce": "Weekly maintenance"},
+    ),
     "cancel": module.build_dashboard_action_request(snapshot, "", "", "20260413220000-1111", "schedule_cancel", {}),
     "config": module.build_dashboard_action_request(snapshot, "", "", "", "config_validate", {}),
     "bad_ban": module.build_dashboard_action_request(
@@ -1886,6 +1903,9 @@ PY
     assert_true "[[ \$compact_output == *'\"setgm\":{\"command\":[\"account\",\"setgm\",\"GMADMIN\",\"2\"]'* ]]" "dashboard action builder targets selected account for GM updates" || all_passed=1
     assert_true "[[ \$compact_output == *'\"restore\":{\"command\":[\"backup\",\"restore\",\"/tmp/vmangos-backups/backup-20260413-213000.tar.gz\",\"--dry-run\"]'* ]]" "dashboard action builder resolves restore dry-run path from backup selection" || all_passed=1
     assert_true "[[ \$compact_output == *'\"weekly\":{\"command\":[\"backup\",\"schedule\",\"--weekly\",\"Sun04:00\"]'* ]]" "dashboard action builder emits weekly backup schedule commands" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"logs_rotate\":{\"command\":[\"logs\",\"rotate\"]'* && \$compact_output == *'\"view\":\"operations\"'* ]]" "dashboard action builder exposes logs rotate in the operations view" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"honor\":{\"command\":[\"schedule\",\"honor\",\"--time\",\"06:00\",\"--weekly\",\"Sun\",\"--timezone\",\"UTC\"]'* ]]" "dashboard action builder emits honor schedule commands" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"restart_job\":{\"command\":[\"schedule\",\"restart\",\"--time\",\"04:00\",\"--weekly\",\"Sun\",\"--timezone\",\"UTC\",\"--warnings\",\"30,15,5,1\",\"--announce\",\"Weeklymaintenance\"]'* ]]" "dashboard action builder emits restart schedule commands" || all_passed=1
     assert_true "[[ \$compact_output == *'\"cancel\":{\"command\":[\"schedule\",\"cancel\",\"20260413220000-1111\"]'* && \$compact_output == *'\"view\":\"operations\"'* ]]" "dashboard action builder exposes schedule cancellation in the operations view" || all_passed=1
     assert_true "[[ \$compact_output == *'\"config\":{\"command\":[\"config\",\"validate\"]'* && \$compact_output == *'\"view\":\"config\"'* ]]" "dashboard action builder exposes config validation as a workflow action" || all_passed=1
     assert_true "[[ \$compact_output == *'\"bad_ban\":{\"error\":\"accountbanskipped:durationmustuseformslike30m,12h,or7d\"'* ]]" "dashboard action builder validates account ban input before dispatch" || all_passed=1
@@ -1957,10 +1977,12 @@ payload = {
     "player": module.render_player_details(snapshot["players"][0], len(snapshot["players"])),
     "empty_player": module.render_player_details(None, 0),
     "logs": module.render_logs_panel(snapshot),
-    "update": module.render_update_panel(snapshot),
+    "update": module.render_update_panel(snapshot, {"warning": "Supported DB migrations are pending.", "steps": ["vmangos-manager backup now --verify", "vmangos-manager server stop --graceful"]}),
     "schedule": module.render_schedule_details(
         {"id": "20260413220000-1111", "job_type": "restart", "schedule_type": "weekly", "time": "04:00", "day": "Sun", "timezone": "UTC", "warnings": "30,15,5,1", "announce_message": "Weekly maintenance", "next_run": "Sun 2026-04-19 04:00:00 UTC"},
         1,
+        "logs rotate completed",
+        "success",
     ),
 }
 
@@ -1971,12 +1993,12 @@ PY
     compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
 
     assert_true "[[ \$compact_output == *'READY'* && \$compact_output == *'Accounts'* && \$compact_output == *'refresh[/]2s'* ]]" "dashboard action banner exposes tone, view, and interval" || all_passed=1
-    assert_true "[[ \$compact_output == *'RealmPulse'* && \$compact_output == *'Players[/]1online'* && \$compact_output == *'Backups[/]3known'* && \$compact_output == *'j[/]canceljob'* ]]" "dashboard sidebar exposes live pulse summary and operations keys" || all_passed=1
+    assert_true "[[ \$compact_output == *'RealmPulse'* && \$compact_output == *'Players[/]1online'* && \$compact_output == *'Backups[/]3known'* && \$compact_output == *'l[/]rotatelogs'* && \$compact_output == *'P[/]updateplan'* ]]" "dashboard sidebar exposes live pulse summary and operations keys" || all_passed=1
     assert_true "[[ \$compact_output == *'Selected[/][bold#2dd4bf]PLAYERONE'* && \$compact_output == *'Workflow[/]switchto[bold#f59e0b]Accounts[/]forpassword,GM,andbanactions.'* ]]" "dashboard player details emphasize the selected player workflow" || all_passed=1
     assert_true "[[ \$compact_output == *'chooseaplayerrowwhensomeonelogsin.'* ]]" "dashboard empty player state explains next operator step" || all_passed=1
     assert_true "[[ \$compact_output == *'LogsHealth'* && \$compact_output == *'Retention[/]max=100Mmin=1M'* ]]" "dashboard logs panel summarizes health and retention" || all_passed=1
-    assert_true "[[ \$compact_output == *'UpdateState'* && \$compact_output == *'Assessment[/][bold#f59e0b]schemamigrationspending'* ]]" "dashboard update panel surfaces DB-aware update state" || all_passed=1
-    assert_true "[[ \$compact_output == *'JobDetails'* && \$compact_output == *'cancelselectedjob'* ]]" "dashboard schedule details include cancel guidance" || all_passed=1
+    assert_true "[[ \$compact_output == *'UpdateState'* && \$compact_output == *'Assessment[/][bold#f59e0b]schemamigrationspending'* && \$compact_output == *'Next[/]vmangos-managerbackupnow--verify'* ]]" "dashboard update panel surfaces DB-aware update state and plan steps" || all_passed=1
+    assert_true "[[ \$compact_output == *'JobDetails'* && \$compact_output == *'logsrotatecompleted'* && \$compact_output == *'cancelselectedjob'* ]]" "dashboard schedule details include module-local result context" || all_passed=1
 
     return $all_passed
 }

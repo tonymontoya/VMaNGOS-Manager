@@ -51,6 +51,9 @@ DURATION_PATTERN = re.compile(r"^[1-9][0-9]*[smhdw]$")
 BAN_REASON_PATTERN = re.compile(r"^[A-Za-z0-9]+(?: [A-Za-z0-9]+)*$")
 DAILY_TIME_PATTERN = re.compile(r"^([0-1][0-9]|2[0-3]):[0-5][0-9]$")
 WEEKLY_SCHEDULE_PATTERN = re.compile(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([0-1][0-9]|2[0-3]):[0-5][0-9]$")
+SCHEDULE_TYPE_PATTERN = re.compile(r"^(daily|weekly)$", re.IGNORECASE)
+DAY_NAME_PATTERN = re.compile(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)$")
+WARNINGS_PATTERN = re.compile(r"^[1-9][0-9]*(,[1-9][0-9]*)*$")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -294,7 +297,16 @@ def render_context_actions(active_view: str) -> list[str]:
             ]
         )
     elif active_view == "operations":
-        lines.append(f"[bold {ACCENT_GOLD}]j[/]  cancel job")
+        lines.extend(
+            [
+                f"[bold {ACCENT_GOLD}]l[/]  rotate logs",
+                f"[bold {ACCENT_GOLD}]T[/]  test logs",
+                f"[bold {ACCENT_GOLD}]h[/]  schedule honor",
+                f"[bold {ACCENT_GOLD}]m[/]  schedule restart",
+                f"[bold {ACCENT_GOLD}]P[/]  update plan",
+                f"[bold {ACCENT_GOLD}]j[/]  cancel job",
+            ]
+        )
     elif active_view == "config":
         lines.append(f"[bold {ACCENT_GOLD}]k[/]  validate config")
     else:
@@ -350,6 +362,24 @@ def build_dashboard_action_request(
             "env": {},
             "refresh_after": True,
             "view": "config",
+        }
+
+    if action_name == "logs_rotate":
+        return {
+            "label": "logs rotate",
+            "command": ["logs", "rotate"],
+            "env": {},
+            "refresh_after": True,
+            "view": "operations",
+        }
+
+    if action_name == "logs_test_config":
+        return {
+            "label": "logs test-config",
+            "command": ["logs", "test-config"],
+            "env": {},
+            "refresh_after": False,
+            "view": "operations",
         }
 
     account = find_selected_account(snapshot, selected_account_id)
@@ -454,6 +484,49 @@ def build_dashboard_action_request(
                 "refresh_after": True,
                 "view": "backups",
             }
+
+    if action_name in ("schedule_honor_create", "schedule_restart_create"):
+        schedule_type = values.get("schedule_type", "").lower()
+        time_value = values.get("time", "")
+        day = values.get("day", "")
+        timezone_value = values.get("timezone", "")
+
+        if not SCHEDULE_TYPE_PATTERN.fullmatch(schedule_type):
+            return {"error": "schedule create skipped: type must be daily or weekly"}
+        if not DAILY_TIME_PATTERN.fullmatch(time_value):
+            return {"error": "schedule create skipped: time must use HH:MM in 24-hour format"}
+        if schedule_type == "weekly" and not DAY_NAME_PATTERN.fullmatch(day):
+            return {"error": "schedule create skipped: weekly schedules require a day like Sun"}
+        if timezone_value and not re.fullmatch(r"^[A-Za-z0-9_+./-]+$", timezone_value):
+            return {"error": "schedule create skipped: timezone contains unsupported characters"}
+
+        subcommand = "honor" if action_name == "schedule_honor_create" else "restart"
+        command = ["schedule", subcommand, "--time", time_value]
+        if schedule_type == "weekly":
+            command.extend(["--weekly", day])
+        else:
+            command.append("--daily")
+        if timezone_value:
+            command.extend(["--timezone", timezone_value])
+
+        if action_name == "schedule_restart_create":
+            warnings = values.get("warnings", "")
+            announce = values.get("announce", "")
+            if warnings and not WARNINGS_PATTERN.fullmatch(warnings):
+                return {"error": "schedule create skipped: warnings must use comma-separated minutes like 30,15,5,1"}
+            if warnings:
+                command.extend(["--warnings", warnings])
+            if announce:
+                command.extend(["--announce", announce])
+
+        cadence = f"{schedule_type} {day} {time_value}".strip()
+        return {
+            "label": f"schedule {subcommand} {cadence}",
+            "command": command,
+            "env": {},
+            "refresh_after": True,
+            "view": "operations",
+        }
 
     if action_name == "schedule_cancel":
         schedule = find_selected_schedule(snapshot, selected_schedule_id)
@@ -1029,7 +1102,7 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_update_panel(snapshot: dict[str, Any]) -> str:
+def render_update_panel(snapshot: dict[str, Any], update_plan_data: dict[str, Any] | None = None) -> str:
     check = snapshot.get("update_check", {})
     inspect = snapshot.get("update_inspect", {})
     lines = [f"[bold {ACCENT_GOLD}]Update State[/]", ""]
@@ -1063,6 +1136,19 @@ def render_update_panel(snapshot: dict[str, Any]) -> str:
     else:
         lines.append(f"[{ACCENT_MUTED}]Inspect unavailable:[/] {escape_markup(inspect.get('error', 'no update metadata'))}")
 
+    if update_plan_data:
+        lines.extend(["", f"[bold {ACCENT_SKY}]Plan[/]"])
+        warning_text = str(update_plan_data.get("warning", "") or "")
+        if warning_text:
+            lines.append(f"[{ACCENT_MUTED}]Warning[/]      {escape_markup(truncate_text(warning_text, 56))}")
+        steps = update_plan_data.get("steps", [])
+        if isinstance(steps, list) and steps:
+            lines.append(f"[{ACCENT_MUTED}]Next[/]         {escape_markup(truncate_text(steps[0], 56))}")
+            if len(steps) > 1:
+                lines.append(f"[{ACCENT_MUTED}]Then[/]         {escape_markup(truncate_text(steps[1], 56))}")
+        else:
+            lines.append(f"[{ACCENT_MUTED}]Next[/]         no pending plan steps")
+
     return "\n".join(lines)
 
 
@@ -1077,7 +1163,13 @@ def schedule_label(schedule: dict[str, Any]) -> str:
     return f"{time_value} {timezone}".strip() or "n/a"
 
 
-def render_schedule_details(schedule: dict[str, Any] | None, total_schedules: int) -> str:
+def render_schedule_details(
+    schedule: dict[str, Any] | None,
+    total_schedules: int,
+    last_action: str = "",
+    action_tone: str = "info",
+) -> str:
+    tone_label, tone_color = ACTION_STYLES.get(action_tone, ACTION_STYLES["info"])
     if not schedule:
         return "\n".join(
             [
@@ -1086,6 +1178,9 @@ def render_schedule_details(schedule: dict[str, Any] | None, total_schedules: in
                 f"[{ACCENT_MUTED}]Scheduled[/]     {total_schedules} known",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]     choose a job row to inspect or cancel it.",
+                "",
+                f"[{ACCENT_MUTED}]Ops Result[/]    [bold {tone_color}]{tone_label}[/]",
+                f"[{ACCENT_MUTED}]                {escape_markup(truncate_text(last_action or 'operations ready', 60))}",
                 "",
                 f"[{ACCENT_MUTED}]Hotkeys[/]       [bold {ACCENT_GOLD}]j[/] cancel selected job",
             ]
@@ -1103,6 +1198,9 @@ def render_schedule_details(schedule: dict[str, Any] | None, total_schedules: in
             f"[{ACCENT_MUTED}]Next Run[/]      {escape_markup(schedule.get('next_run', 'n/a') or 'n/a')}",
             f"[{ACCENT_MUTED}]Warnings[/]      {escape_markup(warnings)}",
             f"[{ACCENT_MUTED}]Announce[/]      {escape_markup(announce_message)}",
+            "",
+            f"[{ACCENT_MUTED}]Ops Result[/]    [bold {tone_color}]{tone_label}[/]",
+            f"[{ACCENT_MUTED}]                {escape_markup(truncate_text(last_action or 'operations ready', 60))}",
             "",
             f"[{ACCENT_MUTED}]Hotkeys[/]       [bold {ACCENT_GOLD}]j[/] cancel selected job",
         ]
@@ -1485,6 +1583,11 @@ def create_app(
             ("g", "set_account_gm", "Set GM"),
             ("n", "ban_account", "Ban"),
             ("u", "unban_account", "Unban"),
+            ("l", "rotate_logs", "Rotate Logs"),
+            ("T", "test_logs_config", "Test Logs"),
+            ("h", "create_honor_schedule", "Honor Job"),
+            ("m", "create_restart_schedule", "Restart Job"),
+            ("P", "refresh_update_plan", "Update Plan"),
             ("d", "restore_selected_backup_dry_run", "Dry Run"),
             ("y", "schedule_daily_backup", "Daily"),
             ("w", "schedule_weekly_backup", "Weekly"),
@@ -1515,6 +1618,7 @@ def create_app(
             self.selected_account_id = ""
             self.selected_backup_file = ""
             self.selected_schedule_id = ""
+            self.update_plan_data: dict[str, Any] | None = None
             self.refresh_inflight = False
             self.action_inflight = False
 
@@ -1641,7 +1745,7 @@ def create_app(
             self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot))
             self.query_one("#config-pane", Static).update(render_config_panel(snapshot))
             self.query_one("#logs-pane", Static).update(render_logs_panel(snapshot))
-            self.query_one("#update-pane", Static).update(render_update_panel(snapshot))
+            self.query_one("#update-pane", Static).update(render_update_panel(snapshot, self.update_plan_data))
             self.refresh_players(snapshot.get("players", []))
             self.refresh_accounts(snapshot.get("all_accounts", []))
             self.refresh_backups(snapshot.get("backups", {}).get("entries", []))
@@ -1779,7 +1883,9 @@ def create_app(
             else:
                 self.selected_schedule_id = ""
 
-            self.query_one("#schedule-details", Static).update(render_schedule_details(selected_schedule, len(schedules)))
+            self.query_one("#schedule-details", Static).update(
+                render_schedule_details(selected_schedule, len(schedules), self.last_action, self.action_tone)
+            )
 
         def update_selected_player(self, row_key: Any) -> None:
             key_value = player_key_value(row_key)
@@ -1817,7 +1923,9 @@ def create_app(
             if schedule is None and schedules:
                 schedule = schedules[0]
             self.selected_schedule_id = str(schedule.get("id", "")) if schedule else ""
-            self.query_one("#schedule-details", Static).update(render_schedule_details(schedule, len(schedules)))
+            self.query_one("#schedule-details", Static).update(
+                render_schedule_details(schedule, len(schedules), self.last_action, self.action_tone)
+            )
 
         def open_command_form(
             self,
@@ -2059,6 +2167,55 @@ def create_app(
         def action_validate_config(self) -> None:
             self.dispatch_dashboard_action("config_validate")
 
+        def action_rotate_logs(self) -> None:
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.dispatch_dashboard_action("logs_rotate")
+
+        def action_test_logs_config(self) -> None:
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.dispatch_dashboard_action("logs_test_config")
+
+        def action_create_honor_schedule(self) -> None:
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.open_command_form(
+                "schedule_honor_create",
+                "Schedule Honor Job",
+                "Schedule",
+                [
+                    {"name": "schedule_type", "label": "Cadence (daily|weekly)", "value": "daily", "placeholder": "daily"},
+                    {"name": "day", "label": "Weekly Day", "value": "Sun", "placeholder": "Sun"},
+                    {"name": "time", "label": "Time (HH:MM)", "value": "06:00", "placeholder": "06:00"},
+                    {"name": "timezone", "label": "Timezone", "value": "UTC", "placeholder": "UTC"},
+                ],
+                "Create an honor schedule using the existing Manager scheduler backend.",
+            )
+
+        def action_create_restart_schedule(self) -> None:
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.open_command_form(
+                "schedule_restart_create",
+                "Schedule Restart Job",
+                "Schedule",
+                [
+                    {"name": "schedule_type", "label": "Cadence (daily|weekly)", "value": "weekly", "placeholder": "weekly"},
+                    {"name": "day", "label": "Weekly Day", "value": "Sun", "placeholder": "Sun"},
+                    {"name": "time", "label": "Time (HH:MM)", "value": "04:00", "placeholder": "04:00"},
+                    {"name": "timezone", "label": "Timezone", "value": "UTC", "placeholder": "UTC"},
+                    {"name": "warnings", "label": "Warnings", "value": "30,15,5,1", "placeholder": "30,15,5,1"},
+                    {"name": "announce", "label": "Announcement", "value": "Weekly maintenance", "placeholder": "Weekly maintenance"},
+                ],
+                "Create a scheduled restart with warning timers via the existing Manager scheduler backend.",
+            )
+
+        def action_refresh_update_plan(self) -> None:
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.request_update_plan_refresh()
+
         def action_cancel_selected_schedule(self) -> None:
             schedule = self.selected_schedule()
             if schedule is None:
@@ -2074,6 +2231,43 @@ def create_app(
                 [],
                 f"Remove scheduled job {schedule_id} from Manager and systemd.",
             )
+
+        def request_update_plan_refresh(self) -> None:
+            if self.action_inflight:
+                self.set_action_result("another dashboard action is already running", tone="warning")
+                return
+            self.action_inflight = True
+            self.set_action_result("update plan running...", tone="running")
+            threading.Thread(target=self.run_update_plan_action, daemon=True).start()
+
+        def run_update_plan_action(self) -> None:
+            try:
+                full_command = [self.manager_bin, "-c", self.config_path, "-f", "json", "update", "plan", "--include-db"]
+                completed = subprocess.run(full_command, capture_output=True, text=True, check=False)
+                if completed.returncode != 0:
+                    output = (completed.stderr or completed.stdout or "").strip().splitlines()
+                    message = output[-1] if output else f"update plan exited with code {completed.returncode}"
+                    self.call_from_thread(self.set_action_result, f"update plan failed: {message}", "error")
+                    return
+
+                try:
+                    data = parse_manager_json(completed.stdout)
+                except (json.JSONDecodeError, RuntimeError) as exc:
+                    self.call_from_thread(self.set_action_result, f"update plan failed: {exc}", "error")
+                    return
+
+                self.call_from_thread(self.apply_update_plan_data, data)
+            finally:
+                self.action_inflight = False
+
+        def apply_update_plan_data(self, data: dict[str, Any]) -> None:
+            self.update_plan_data = data
+            warning_text = str(data.get("warning", "") or "")
+            if warning_text:
+                self.set_action_result(f"update plan refreshed: {warning_text}", tone="warning")
+            else:
+                self.set_action_result("update plan refreshed", tone="success")
+            self.query_one("#update-pane", Static).update(render_update_panel(self.snapshot, self.update_plan_data))
 
         def request_command_action(
             self,
@@ -2122,6 +2316,11 @@ def create_app(
             self.action_tone = tone
             self.refresh_chrome()
             self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view))
+            if self.active_view == "operations":
+                self.query_one("#schedule-details", Static).update(
+                    render_schedule_details(self.selected_schedule(), len(self.snapshot.get("schedules", [])), self.last_action, self.action_tone)
+                )
+                self.query_one("#update-pane", Static).update(render_update_panel(self.snapshot, self.update_plan_data))
 
     return VMangosDashboard()
 
