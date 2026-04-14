@@ -225,31 +225,34 @@ If the configuration wiring view looks wrong, fix that before you trust any high
 
 ![Operations view](assets/dashboard-operations.svg)
 
-Operations is the maintenance queue and change-window preflight screen.
+Operations is the maintenance scheduling and change-window screen.
 
 Use it for:
 
+- deciding whether the host is ready for scheduled maintenance
+- creating run or restart jobs from the Ops surface
 - seeing what maintenance is already queued
 - inspecting or canceling a selected run or restart job
-- checking log guardrails before a maintenance window
 - reviewing update readiness and DB impact before risky source changes
 
 Read it in this order:
 
-1. Start with `Maintenance Queue` to see what restart or run-job work is already scheduled.
-2. Use `Selected Job` to inspect cadence, warnings, and cancellation impact for the highlighted item.
-3. Glance at `Maintenance Guardrails` to confirm logs and storage are not about to betray the window.
-4. Use `Update Readiness` when the next change involves source pulls or database movement.
+1. Start with `Change Window Readiness` to confirm logs, storage, and queue state look safe enough for maintenance work.
+2. Use the on-screen create paths to schedule a `run job` or `restart job` from the Ops surface.
+3. Review `Scheduled Maintenance` to confirm what is already queued and when it will fire.
+4. Use `Selected Job` to inspect origin, cadence, warnings, and cancellation impact for the highlighted item.
+5. Use `Update Readiness` when the next change involves source pulls or database movement.
 
 Recommended flow before a realm update:
 
-1. Review `Maintenance Queue` so you know whether any restart work is already timed near the window.
-2. Review `Update Readiness` and the DB-impact summary.
-3. Generate or refresh the update plan.
-4. Take and verify a backup.
-5. Only then move into a real update workflow.
+1. Review `Change Window Readiness` so you know whether the host and log posture are healthy enough for the window.
+2. Review `Scheduled Maintenance` so you know whether any restart work is already timed near the window.
+3. Review `Update Readiness` and the DB-impact summary.
+4. Generate or refresh the update plan.
+5. Take and verify a backup.
+6. Only then move into a real update workflow.
 
-The command rail follows the same hierarchy as the screen: queue actions first, then update planning, then log guardrail actions. If a task is not in the rail, use the CLI as the source of truth for that workflow today.
+Jobs shown in `Scheduled Maintenance` come from the Ops scheduling actions in the dashboard or the matching `schedule` CLI commands. The command rail still mirrors those paths, but the screen now calls out where maintenance gets created so the queue does not feel detached from the workflow.
 
 ## Updates Workflow
 

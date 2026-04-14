@@ -2026,6 +2026,19 @@ snapshot = {
         "db_secret_source": "inline",
     },
     "config_path": "/opt/mangos/manager/config/manager.conf",
+    "schedules": [
+        {
+            "id": "20260413220000-1111",
+            "job_type": "restart",
+            "schedule_type": "weekly",
+            "time": "04:00",
+            "day": "Sun",
+            "timezone": "UTC",
+            "warnings": "30,15,5,1",
+            "announce_message": "Weekly maintenance",
+            "next_run": "Sun 2026-04-19 04:00:00 UTC",
+        }
+    ],
 }
 
 history = []
@@ -2068,6 +2081,7 @@ payload = {
     "player": module.render_player_details(snapshot["players"][0], len(snapshot["players"])),
     "empty_player": module.render_player_details(None, 0),
     "logs": module.render_logs_panel(snapshot),
+    "schedule_intro": module.render_schedule_intro(snapshot["schedules"]),
     "update": module.render_update_panel(snapshot, {"warning": "Supported DB migrations are pending.", "steps": ["vmangos-manager backup now --verify", "vmangos-manager server stop --graceful"]}),
     "schedule": module.render_schedule_details(
         {"id": "20260413220000-1111", "job_type": "restart", "schedule_type": "weekly", "time": "04:00", "day": "Sun", "timezone": "UTC", "warnings": "30,15,5,1", "announce_message": "Weekly maintenance", "next_run": "Sun 2026-04-19 04:00:00 UTC"},
@@ -2106,6 +2120,8 @@ PY
     compact_empty_player=$(printf '%s' "$empty_player_output" | tr -d '[:space:]')
     logs_output=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["logs"])')
     compact_logs=$(printf '%s' "$logs_output" | tr -d '[:space:]')
+    schedule_intro_output=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["schedule_intro"])')
+    compact_schedule_intro=$(printf '%s' "$schedule_intro_output" | tr -d '[:space:]')
     update_output=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["update"])')
     compact_update=$(printf '%s' "$update_output" | tr -d '[:space:]')
     schedule_output=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["schedule"])')
@@ -2123,9 +2139,10 @@ PY
     assert_true "[[ \$compact_config == *'ConfigurationWiring'* && \$compact_config == *'RealmWiring'* && \$compact_config == *'DatabaseWiring'* && \$compact_config == *'DBSecret[/]inlinevaluemasked'* && \$compact_config == *'Read-only[/]validateandreviewwiringhere;editmanager.confand.dbpassintheshell.'* && \$compact_config != *'ConfigPreview'* ]]" "dashboard config panel is regrouped into clearer wiring sections without exposing secrets" || all_passed=1
     assert_true "[[ \$compact_player == *'SelectedPlayer'* && \$compact_player == *'Selected[/][bold#2dd4bf]PLAYERONE'* && \$compact_player != *'Playersnow'* && \$compact_player == *'Nextstep[/]open[bold#f59e0b]Accounts[/]forpassword,GM,ban,andunbanactions.'* ]]" "dashboard player details stay scoped to the selected player workflow" || all_passed=1
     assert_true "[[ \$compact_empty_player != *'Onlinenow'* && \$compact_empty_player == *'chooseaplayerrowtoinspectthataccount.'* ]]" "dashboard empty player state stays item-scoped" || all_passed=1
-    assert_true "[[ \$compact_logs == *'MaintenanceGuardrails'* && \$compact_logs == *'Loghygieneandstoragepressurebeforeamaintenancewindow.'* && \$compact_logs == *'Scope[/]supportingcontextonly;thequeuelivesbelow.'* && \$compact_logs == *'Retention[/]max=100Mmin=1M'* ]]" "dashboard operations support panel scopes itself to maintenance guardrails instead of queue ownership" || all_passed=1
+    assert_true "[[ \$compact_logs == *'ChangeWindowReadiness'* && \$compact_logs == *'Canthishostsafelyabsorbscheduledmaintenancerightnow?'* && \$compact_logs == *'Overall[/][bold#34d399]healthy[/]'* && \$compact_logs == *'Queue[/]1scheduledjob'* && \$compact_logs == *'CreateHere[/][bold#f59e0b]h[/]runjob'* && \$compact_logs == *'Support[/][bold#f59e0b]T[/]testlogs'* ]]" "dashboard operations support panel answers change-window readiness and points to maintenance creation paths" || all_passed=1
+    assert_true "[[ \$compact_schedule_intro == *'CreateHere[/][bold#f59e0b]h[/]runjob'* && \$compact_schedule_intro == *'QueueSource[/]jobsappearhereafterdashboardschedulingorthematching[bold#f59e0b]schedule[/]CLIcommands.'* && \$compact_schedule_intro == *'Now[/]1scheduledjobinthequeue.'* ]]" "dashboard scheduled-maintenance intro explains creation paths and queue provenance" || all_passed=1
     assert_true "[[ \$compact_update == *'UpdateReadiness'* && \$compact_update == *'Repositorydriftanddatabaseimpactbeforeriskycodechanges.'* && \$compact_update == *'Assessment[/][bold#f59e0b]schemamigrationspending'* && \$compact_update == *'PlanSnapshot'* && \$compact_update == *'Next[/]vmangos-managerbackupnow--verify'* ]]" "dashboard update panel stays focused on preflight readiness and plan steps" || all_passed=1
-    assert_true "[[ \$compact_schedule == *'SelectedJob'* && \$compact_schedule == *'Queue[/]1queuedjob'* && \$compact_schedule == *'Cadence[/]weekly'* && \$compact_schedule == *'[bold#f59e0b]j[/]removethisjobifthescheduleisnolongerdesired.'* && \$compact_schedule != *'OpsResult'* ]]" "dashboard selected-job details stay scoped to queue inspection and cancellation" || all_passed=1
+    assert_true "[[ \$compact_schedule == *'SelectedJob'* && \$compact_schedule == *'Origin,cadence,andnextactionforthehighlightedschedule.'* && \$compact_schedule == *'Queue[/]1queuedjob'* && \$compact_schedule == *'Origin[/]schedulerestart->serverrestartworkflow'* && \$compact_schedule == *'CreateMore[/][bold#f59e0b]h[/]runjob'* && \$compact_schedule == *'NextAction[/][bold#f59e0b]j[/]removethisjobifthescheduleisnolongerdesired.'* && \$compact_schedule != *'OpsResult'* ]]" "dashboard selected-job details stay scoped to queue inspection, origin, and next action" || all_passed=1
 
     return $all_passed
 }
