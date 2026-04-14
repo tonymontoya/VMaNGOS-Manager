@@ -256,6 +256,15 @@ def find_selected_backup(snapshot: dict[str, Any], selected_backup_file: str) ->
     return max(entries, key=lambda item: str(item.get("timestamp", ""))) if entries else None
 
 
+def find_selected_schedule(snapshot: dict[str, Any], selected_schedule_id: str) -> dict[str, Any] | None:
+    entries = snapshot.get("schedules", [])
+    if selected_schedule_id:
+        for entry in entries:
+            if str(entry.get("id", "")) == selected_schedule_id:
+                return entry
+    return entries[0] if entries else None
+
+
 def render_context_actions(active_view: str) -> list[str]:
     lines = [
         f"[bold {ACCENT_GOLD}]r[/]  refresh",
@@ -284,6 +293,8 @@ def render_context_actions(active_view: str) -> list[str]:
                 f"[bold {ACCENT_GOLD}]w[/]  schedule weekly",
             ]
         )
+    elif active_view == "operations":
+        lines.append(f"[bold {ACCENT_GOLD}]j[/]  cancel job")
     elif active_view == "config":
         lines.append(f"[bold {ACCENT_GOLD}]k[/]  validate config")
     else:
@@ -308,6 +319,7 @@ def build_dashboard_action_request(
     snapshot: dict[str, Any],
     selected_account_id: str,
     selected_backup_file: str,
+    selected_schedule_id: str,
     action_name: str,
     form_values: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -443,6 +455,21 @@ def build_dashboard_action_request(
                 "view": "backups",
             }
 
+    if action_name == "schedule_cancel":
+        schedule = find_selected_schedule(snapshot, selected_schedule_id)
+        if schedule is None:
+            return {"error": "schedule cancel skipped: no job selected"}
+        schedule_id = str(schedule.get("id", "")).strip()
+        if not schedule_id:
+            return {"error": "schedule cancel skipped: selected job has no id"}
+        return {
+            "label": f"schedule cancel {schedule_id}",
+            "command": ["schedule", "cancel", schedule_id],
+            "env": {},
+            "refresh_after": True,
+            "view": "operations",
+        }
+
     return {"error": f"unsupported dashboard action: {action_name}"}
 
 
@@ -482,6 +509,9 @@ def empty_snapshot(error_message: str) -> dict[str, Any]:
         "config_path": "",
         "server": {"ok": False, "data": {}, "error": error_message},
         "logs": {"ok": False, "data": {}, "error": error_message},
+        "schedule_list": {"ok": False, "data": {}, "error": error_message},
+        "update_check": {"ok": False, "data": {}, "error": error_message},
+        "update_inspect": {"ok": False, "data": {}, "error": error_message},
         "accounts_online": {"ok": False, "data": {}, "error": error_message},
         "accounts": {"ok": False, "data": {}, "error": error_message},
         "backup_list": {"ok": False, "data": [], "error": error_message},
@@ -492,6 +522,7 @@ def empty_snapshot(error_message: str) -> dict[str, Any]:
         "backups": {"entries": [], "summary": {}},
         "players": [],
         "all_accounts": [],
+        "schedules": [],
     }
 
 
@@ -521,6 +552,27 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         manager_bin,
         config_path,
         ["account", "list"],
+        parser_mode="envelope",
+        use_global_json=True,
+    )
+    schedules = run_manager_command(
+        manager_bin,
+        config_path,
+        ["schedule", "list"],
+        parser_mode="envelope",
+        use_global_json=True,
+    )
+    update_check = run_manager_command(
+        manager_bin,
+        config_path,
+        ["update", "check"],
+        parser_mode="envelope",
+        use_global_json=True,
+    )
+    update_inspect = run_manager_command(
+        manager_bin,
+        config_path,
+        ["update", "inspect"],
         parser_mode="envelope",
         use_global_json=True,
     )
@@ -554,6 +606,7 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
     backup_entries = backups["data"] if backups["ok"] and isinstance(backups["data"], list) else []
     players = online_accounts["data"].get("accounts", []) if online_accounts["ok"] else []
     all_accounts = accounts["data"].get("accounts", []) if accounts["ok"] else []
+    schedule_entries = schedules["data"].get("schedules", []) if schedules["ok"] else []
     backup_dir = config_values.get("backup.backup_dir", "")
     backup_summary = summarize_backups(backup_entries, backup_dir)
 
@@ -575,6 +628,9 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         "config_path": config_path,
         "server": server,
         "logs": logs,
+        "schedule_list": schedules,
+        "update_check": update_check,
+        "update_inspect": update_inspect,
         "accounts_online": online_accounts,
         "accounts": accounts,
         "backup_list": backups,
@@ -588,6 +644,7 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         },
         "players": players,
         "all_accounts": all_accounts,
+        "schedules": schedule_entries,
     }
 
 
@@ -616,6 +673,7 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
         ("accounts", "2", "Accounts"),
         ("backups", "3", "Backups"),
         ("config", "4", "Config"),
+        ("operations", "5", "Ops"),
     ]
 
     server = snapshot.get("server", {})
@@ -927,6 +985,130 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def short_commit(value: Any) -> str:
+    text = str(value or "")
+    return text[:8] if len(text) >= 8 else text or "n/a"
+
+
+def format_update_assessment(value: Any) -> str:
+    text = str(value or "unknown")
+    label = text.replace("_", " ")
+    if text == "schema_migrations_pending":
+        return f"[bold {ACCENT_GOLD}]{label}[/]"
+    if text == "manual_review_required":
+        return f"[bold {ACCENT_ROSE}]{label}[/]"
+    if text == "no_changes":
+        return f"[bold {ACCENT_GREEN}]no changes[/]"
+    return f"[bold {ACCENT_MUTED}]{label}[/]"
+
+
+def render_logs_panel(snapshot: dict[str, Any]) -> str:
+    logs = snapshot.get("logs", {})
+    lines = [f"[bold {ACCENT_GOLD}]Logs Health[/]", ""]
+
+    if not logs.get("ok"):
+        lines.append(f"[bold {ACCENT_ROSE}]Logs snapshot unavailable:[/] {logs.get('error', 'unknown error')}")
+        return "\n".join(lines)
+
+    data = logs.get("data", {})
+    config = data.get("config", {})
+    log_counts = data.get("logs", {})
+    disk = data.get("disk", {})
+    policy = data.get("policy", {})
+
+    lines.extend(
+        [
+            f"[{ACCENT_MUTED}]Health[/]        {format_state(data.get('status', 'unavailable'))}",
+            f"[{ACCENT_MUTED}]Config[/]        present={config.get('present', False)}  in_sync={config.get('in_sync', False)}",
+            f"[{ACCENT_MUTED}]Sensitive[/]     perms_ok={log_counts.get('sensitive_permissions_ok', False)}",
+            f"[{ACCENT_MUTED}]Files[/]         active={log_counts.get('active_files', 0)}  rotated={log_counts.get('rotated_files', 0)}",
+            f"[{ACCENT_MUTED}]Disk[/]          {disk.get('used_percent', 0)}% used  free {format_gb_from_kb(disk.get('available_kb', 0))}",
+            f"[{ACCENT_MUTED}]Retention[/]     max={policy.get('max_size', 'n/a')}  min={policy.get('min_size', 'n/a')}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_update_panel(snapshot: dict[str, Any]) -> str:
+    check = snapshot.get("update_check", {})
+    inspect = snapshot.get("update_inspect", {})
+    lines = [f"[bold {ACCENT_GOLD}]Update State[/]", ""]
+
+    if check.get("ok"):
+        data = check.get("data", {})
+        lines.extend(
+            [
+                f"[{ACCENT_MUTED}]State[/]         {format_state('warning' if data.get('update_available') else 'healthy')}",
+                f"[{ACCENT_MUTED}]Branch[/]        {escape_markup(data.get('branch', 'n/a'))}",
+                f"[{ACCENT_MUTED}]Tracking[/]      {escape_markup(data.get('remote_ref', 'n/a'))}",
+                f"[{ACCENT_MUTED}]Behind[/]        {data.get('commits_behind', 0)}  [{ACCENT_MUTED}]dirty[/] {data.get('worktree_dirty', False)}",
+                f"[{ACCENT_MUTED}]Local[/]         {short_commit(data.get('local_commit'))}",
+                f"[{ACCENT_MUTED}]Remote[/]        {short_commit(data.get('remote_commit'))}",
+            ]
+        )
+    else:
+        lines.append(f"[bold {ACCENT_ROSE}]Update check unavailable:[/] {check.get('error', 'unknown error')}")
+
+    lines.extend(["", f"[bold {ACCENT_SKY}]DB Impact[/]"])
+    if inspect.get("ok"):
+        data = inspect.get("data", {})
+        lines.extend(
+            [
+                f"[{ACCENT_MUTED}]Assessment[/]    {format_update_assessment(data.get('db_assessment', 'unavailable'))}",
+                f"[{ACCENT_MUTED}]Automation[/]    {format_flag(data.get('db_automation_supported'), true_text='supported', false_text='manual')}",
+                f"[{ACCENT_MUTED}]Pending[/]       {len(data.get('pending_migrations', []))}",
+                f"[{ACCENT_MUTED}]Manual Review[/] {len(data.get('manual_review', []))}",
+            ]
+        )
+    else:
+        lines.append(f"[{ACCENT_MUTED}]Inspect unavailable:[/] {escape_markup(inspect.get('error', 'no update metadata'))}")
+
+    return "\n".join(lines)
+
+
+def schedule_label(schedule: dict[str, Any]) -> str:
+    schedule_type = str(schedule.get("schedule_type", "") or "")
+    day = str(schedule.get("day", "") or "")
+    time_value = str(schedule.get("time", "") or "")
+    timezone = str(schedule.get("timezone", "") or "")
+
+    if schedule_type == "weekly" and day:
+        return f"{day} {time_value} {timezone}".strip()
+    return f"{time_value} {timezone}".strip() or "n/a"
+
+
+def render_schedule_details(schedule: dict[str, Any] | None, total_schedules: int) -> str:
+    if not schedule:
+        return "\n".join(
+            [
+                f"[bold {ACCENT_GOLD}]Job Details[/]",
+                "",
+                f"[{ACCENT_MUTED}]Scheduled[/]     {total_schedules} known",
+                "",
+                f"[{ACCENT_MUTED}]Selection[/]     choose a job row to inspect or cancel it.",
+                "",
+                f"[{ACCENT_MUTED}]Hotkeys[/]       [bold {ACCENT_GOLD}]j[/] cancel selected job",
+            ]
+        )
+
+    warnings = str(schedule.get("warnings", "") or "none")
+    announce_message = str(schedule.get("announce_message", "") or "none")
+    return "\n".join(
+        [
+            f"[bold {ACCENT_GOLD}]Job Details[/]",
+            "",
+            f"[{ACCENT_MUTED}]Job ID[/]        {escape_markup(schedule.get('id', 'n/a'))}",
+            f"[{ACCENT_MUTED}]Type[/]          {escape_markup(schedule.get('job_type', 'n/a'))}",
+            f"[{ACCENT_MUTED}]Schedule[/]      {escape_markup(schedule_label(schedule))}",
+            f"[{ACCENT_MUTED}]Next Run[/]      {escape_markup(schedule.get('next_run', 'n/a') or 'n/a')}",
+            f"[{ACCENT_MUTED}]Warnings[/]      {escape_markup(warnings)}",
+            f"[{ACCENT_MUTED}]Announce[/]      {escape_markup(announce_message)}",
+            "",
+            f"[{ACCENT_MUTED}]Hotkeys[/]       [bold {ACCENT_GOLD}]j[/] cancel selected job",
+        ]
+    )
+
+
 class DashboardRuntimeError(RuntimeError):
     """Raised when the dashboard runtime cannot start."""
 
@@ -1168,6 +1350,30 @@ def create_app(
             height: 1fr;
         }
 
+        #operations-layout {
+            height: 1fr;
+            layout: vertical;
+        }
+
+        #operations-summary {
+            height: 13;
+            margin-bottom: 1;
+        }
+
+        #logs-pane,
+        #update-pane {
+            width: 1fr;
+            height: 1fr;
+        }
+
+        #logs-pane {
+            margin-right: 1;
+        }
+
+        #schedules-table {
+            height: 1fr;
+        }
+
         #backup-summary {
             width: 44;
             min-width: 42;
@@ -1282,11 +1488,13 @@ def create_app(
             ("d", "restore_selected_backup_dry_run", "Dry Run"),
             ("y", "schedule_daily_backup", "Daily"),
             ("w", "schedule_weekly_backup", "Weekly"),
+            ("j", "cancel_selected_schedule", "Cancel Job"),
             ("k", "validate_config", "Validate"),
             ("1", "show_overview", "Overview"),
             ("2", "show_accounts", "Accounts"),
             ("3", "show_backups", "Backups"),
             ("4", "show_config", "Config"),
+            ("5", "show_operations", "Ops"),
             ("t", "toggle_theme", "Theme"),
         ]
 
@@ -1306,6 +1514,7 @@ def create_app(
             self.selected_player_id = ""
             self.selected_account_id = ""
             self.selected_backup_file = ""
+            self.selected_schedule_id = ""
             self.refresh_inflight = False
             self.action_inflight = False
 
@@ -1336,6 +1545,16 @@ def create_app(
                                 yield DataTable(id="backups-table", classes="panel")
                         with Container(id="config-view", classes="view hidden"):
                             yield Static("", id="config-pane", classes="panel")
+                        with Container(id="operations-view", classes="view hidden"):
+                            with Vertical(id="operations-layout"):
+                                with Horizontal(id="operations-summary"):
+                                    yield Static("", id="logs-pane", classes="panel")
+                                    yield Static("", id="update-pane", classes="panel")
+                                with Vertical(classes="panel table-detail", id="schedules-layout"):
+                                    yield Static("[b]Scheduled Jobs[/b]", classes="table-detail-title")
+                                    with Horizontal(classes="table-detail-body"):
+                                        yield DataTable(id="schedules-table", classes="detail-table")
+                                        yield Static("", id="schedule-details", classes="detail-pane")
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1354,6 +1573,11 @@ def create_app(
             backups_table.zebra_stripes = True
             backups_table.add_columns("Timestamp", "Size", "File", "Created By")
 
+            schedules_table = self.query_one("#schedules-table", DataTable)
+            schedules_table.cursor_type = "row"
+            schedules_table.zebra_stripes = True
+            schedules_table.add_columns("Type", "Schedule", "Next Run", "ID")
+
             self.apply_theme()
             self.apply_view_state()
             self.request_snapshot_refresh()
@@ -1366,7 +1590,7 @@ def create_app(
             self.add_class(f"theme-{self.theme_name}")
 
         def apply_view_state(self) -> None:
-            for view_name in ("overview", "accounts", "backups", "config"):
+            for view_name in ("overview", "accounts", "backups", "config", "operations"):
                 widget = self.query_one(f"#{view_name}-view", Container)
                 if view_name == self.active_view:
                     widget.remove_class("hidden")
@@ -1380,6 +1604,8 @@ def create_app(
                 self.set_focus(self.query_one("#accounts-table", DataTable))
             elif self.active_view == "backups":
                 self.set_focus(self.query_one("#backups-table", DataTable))
+            elif self.active_view == "operations":
+                self.set_focus(self.query_one("#schedules-table", DataTable))
 
         def refresh_chrome(self) -> None:
             self.query_one("#sidebar", Static).update(
@@ -1414,9 +1640,12 @@ def create_app(
             self.query_one("#service-pane", Static).update(render_service_panel(snapshot, self.active_view))
             self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot))
             self.query_one("#config-pane", Static).update(render_config_panel(snapshot))
+            self.query_one("#logs-pane", Static).update(render_logs_panel(snapshot))
+            self.query_one("#update-pane", Static).update(render_update_panel(snapshot))
             self.refresh_players(snapshot.get("players", []))
             self.refresh_accounts(snapshot.get("all_accounts", []))
             self.refresh_backups(snapshot.get("backups", {}).get("entries", []))
+            self.refresh_schedules(snapshot.get("schedules", []))
             self.refresh_chrome()
             if self.screenshot_path and not self.screenshot_taken and not self.screenshot_pending:
                 self.screenshot_pending = True
@@ -1432,6 +1661,9 @@ def create_app(
 
         def selected_backup(self) -> dict[str, Any] | None:
             return find_selected_backup(self.snapshot, self.selected_backup_file)
+
+        def selected_schedule(self) -> dict[str, Any] | None:
+            return find_selected_schedule(self.snapshot, self.selected_schedule_id)
 
         def refresh_players(self, players: list[dict[str, Any]]) -> None:
             table = self.query_one("#players-table", DataTable)
@@ -1516,6 +1748,39 @@ def create_app(
                 render_backups_summary(snapshot=self.snapshot, selected_backup=selected_entry)
             )
 
+        def refresh_schedules(self, schedules: list[dict[str, Any]]) -> None:
+            table = self.query_one("#schedules-table", DataTable)
+            table.clear(columns=False)
+
+            selected_index = 0
+            selected_schedule: dict[str, Any] | None = None
+            for index, schedule in enumerate(
+                sorted(schedules, key=lambda item: (str(item.get("next_run", "")), str(item.get("id", ""))))
+            ):
+                schedule_id = str(schedule.get("id", ""))
+                if self.selected_schedule_id and schedule_id == self.selected_schedule_id:
+                    selected_index = index
+                    selected_schedule = schedule
+                table.add_row(
+                    str(schedule.get("job_type", "")),
+                    schedule_label(schedule),
+                    str(schedule.get("next_run", "") or "n/a"),
+                    schedule_id,
+                    key=schedule_id,
+                )
+
+            if schedules:
+                if selected_schedule is None:
+                    selected_schedule = sorted(
+                        schedules, key=lambda item: (str(item.get("next_run", "")), str(item.get("id", "")))
+                    )[selected_index]
+                self.selected_schedule_id = str(selected_schedule.get("id", ""))
+                table.move_cursor(row=selected_index, column=0, animate=False)
+            else:
+                self.selected_schedule_id = ""
+
+            self.query_one("#schedule-details", Static).update(render_schedule_details(selected_schedule, len(schedules)))
+
         def update_selected_player(self, row_key: Any) -> None:
             key_value = player_key_value(row_key)
             players = self.snapshot.get("players", [])
@@ -1545,6 +1810,15 @@ def create_app(
                 render_backups_summary(snapshot=self.snapshot, selected_backup=entry)
             )
 
+        def update_selected_schedule(self, row_key: Any) -> None:
+            key_value = player_key_value(row_key)
+            schedules = self.snapshot.get("schedules", [])
+            schedule = next((candidate for candidate in schedules if str(candidate.get("id", "")) == key_value), None)
+            if schedule is None and schedules:
+                schedule = schedules[0]
+            self.selected_schedule_id = str(schedule.get("id", "")) if schedule else ""
+            self.query_one("#schedule-details", Static).update(render_schedule_details(schedule, len(schedules)))
+
         def open_command_form(
             self,
             action_name: str,
@@ -1568,6 +1842,7 @@ def create_app(
                 self.snapshot,
                 self.selected_account_id,
                 self.selected_backup_file,
+                self.selected_schedule_id,
                 action_name,
                 form_values,
             )
@@ -1595,6 +1870,8 @@ def create_app(
                 self.update_selected_account(event.row_key)
             elif event.data_table.id == "backups-table":
                 self.update_selected_backup(event.row_key)
+            elif event.data_table.id == "schedules-table":
+                self.update_selected_schedule(event.row_key)
 
         def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
             if event.data_table.id == "players-table":
@@ -1603,6 +1880,8 @@ def create_app(
                 self.update_selected_account(event.row_key)
             elif event.data_table.id == "backups-table":
                 self.update_selected_backup(event.row_key)
+            elif event.data_table.id == "schedules-table":
+                self.update_selected_schedule(event.row_key)
 
         def action_show_overview(self) -> None:
             self.active_view = "overview"
@@ -1618,6 +1897,10 @@ def create_app(
 
         def action_show_config(self) -> None:
             self.active_view = "config"
+            self.apply_view_state()
+
+        def action_show_operations(self) -> None:
+            self.active_view = "operations"
             self.apply_view_state()
 
         def action_manual_refresh(self) -> None:
@@ -1775,6 +2058,22 @@ def create_app(
 
         def action_validate_config(self) -> None:
             self.dispatch_dashboard_action("config_validate")
+
+        def action_cancel_selected_schedule(self) -> None:
+            schedule = self.selected_schedule()
+            if schedule is None:
+                self.set_action_result("schedule cancel skipped: no job selected", tone="warning")
+                return
+            schedule_id = str(schedule.get("id", "selected job")).strip()
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.open_command_form(
+                "schedule_cancel",
+                "Cancel Scheduled Job",
+                "Cancel Job",
+                [],
+                f"Remove scheduled job {schedule_id} from Manager and systemd.",
+            )
 
         def request_command_action(
             self,

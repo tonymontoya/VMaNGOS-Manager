@@ -1735,6 +1735,27 @@ JSON
     exit 0
 fi
 
+if [[ "$args" == *"schedule list"* ]]; then
+    cat <<'JSON'
+{"success":true,"timestamp":"2026-04-13T22:00:00+00:00","data":{"schedules":[{"id":"20260413220000-1111","job_type":"restart","schedule_type":"weekly","time":"04:00","day":"Sun","timezone":"UTC","warnings":"30,15,5,1","announce_message":"Weekly maintenance","next_run":"Sun 2026-04-19 04:00:00 UTC"}]},"error":null}
+JSON
+    exit 0
+fi
+
+if [[ "$args" == *"update check"* ]]; then
+    cat <<'JSON'
+{"success":true,"timestamp":"2026-04-13T22:00:00+00:00","data":{"repo_root":"/opt/mangos/source","branch":"development","remote_ref":"origin/development","local_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","remote_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","commits_behind":2,"update_available":true,"worktree_dirty":false,"install_target":"/opt/mangos"},"error":null}
+JSON
+    exit 0
+fi
+
+if [[ "$args" == *"update inspect"* ]]; then
+    cat <<'JSON'
+{"success":true,"timestamp":"2026-04-13T22:00:00+00:00","data":{"target":"vmangos-core","source_repo":"/opt/mangos/source","branch":"development","remote_ref":"origin/development","local_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","remote_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","commits_behind":2,"commits_ahead":0,"worktree_dirty":false,"db_assessment":"schema_migrations_pending","db_automation_supported":true,"pending_migrations":[{"source":"git","role":"world","database":"world","id":"20260420000000","path":"sql/migrations/20260420000000_world.sql"}],"manual_review":[]},"error":null}
+JSON
+    exit 0
+fi
+
 if [[ "$args" == *"backup list --format json"* ]]; then
     cat <<'JSON'
 [{"timestamp":"2026-04-13T21:30:00+00:00","file":"backup-20260413-213000.tar.gz","size_bytes":52428800,"created_by":"manager","databases":["auth","characters","mangos","logs"]}]
@@ -1767,8 +1788,12 @@ EOF
 
     assert_true "[[ \$compact_output == *'\"server\":{\"ok\":true'* ]]" "dashboard snapshot records server payload" || all_passed=1
     assert_true "[[ \$compact_output == *'\"logs\":{\"ok\":true'* ]]" "dashboard snapshot records logs payload" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"schedule_list\":{\"ok\":true'* && \$compact_output == *'\"id\":\"20260413220000-1111\"'* ]]" "dashboard snapshot records schedule payload" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"update_check\":{\"ok\":true'* && \$compact_output == *'\"commits_behind\":2'* ]]" "dashboard snapshot records update check payload" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"update_inspect\":{\"ok\":true'* && \$compact_output == *'\"db_assessment\":\"schema_migrations_pending\"'* ]]" "dashboard snapshot records update inspect payload" || all_passed=1
     assert_true "[[ \$compact_output == *'\"players\":[{\"id\":7,\"username\":\"PLAYERONE\"'* ]]" "dashboard snapshot flattens online player list" || all_passed=1
     assert_true "[[ \$compact_output == *'\"all_accounts\":[{\"id\":7,\"username\":\"PLAYERONE\"'* ]]" "dashboard snapshot includes full account listing" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"schedules\":[{\"id\":\"20260413220000-1111\"'* ]]" "dashboard snapshot flattens scheduled job list" || all_passed=1
     assert_true "[[ \$compact_output == *'\"backups\":{\"entries\":[{\"timestamp\":\"2026-04-13T21:30:00+00:00\",\"file\":\"backup-20260413-213000.tar.gz\"'* ]]" "dashboard snapshot includes backup entries" || all_passed=1
     assert_true "[[ \$compact_output == *'\"summary\":{\"count\":1,\"backup_dir\":\"/tmp/vmangos-backups\",\"latest_file\":\"backup-20260413-213000.tar.gz\"'* ]]" "dashboard snapshot summarizes backup metadata" || all_passed=1
     assert_true "[[ \$compact_output == *'\"config_validate\":{\"ok\":true'* ]]" "dashboard snapshot includes config validation result" || all_passed=1
@@ -1795,6 +1820,9 @@ snapshot = {
     "all_accounts": [
         {"id": 8, "username": "GMADMIN", "gm_level": 3, "online": False, "banned": False}
     ],
+    "schedules": [
+        {"id": "20260413220000-1111", "job_type": "restart", "schedule_type": "weekly", "time": "04:00", "day": "Sun", "timezone": "UTC"}
+    ],
     "backups": {
         "entries": [
             {"timestamp": "2026-04-13T21:30:00+00:00", "file": "backup-20260413-213000.tar.gz"}
@@ -1808,12 +1836,14 @@ payload = {
         snapshot,
         "",
         "",
+        "",
         "account_create",
         {"username": "PLAYERTWO", "password": "Secret12", "confirm_password": "Secret12"},
     ),
     "setgm": module.build_dashboard_action_request(
         snapshot,
         "8",
+        "",
         "",
         "account_setgm",
         {"gm_level": "2"},
@@ -1822,6 +1852,7 @@ payload = {
         snapshot,
         "",
         "backup-20260413-213000.tar.gz",
+        "",
         "backup_restore_dry_run",
         {},
     ),
@@ -1829,13 +1860,16 @@ payload = {
         snapshot,
         "",
         "",
+        "",
         "backup_schedule_weekly",
         {"schedule": "Sun 04:00"},
     ),
-    "config": module.build_dashboard_action_request(snapshot, "", "", "config_validate", {}),
+    "cancel": module.build_dashboard_action_request(snapshot, "", "", "20260413220000-1111", "schedule_cancel", {}),
+    "config": module.build_dashboard_action_request(snapshot, "", "", "", "config_validate", {}),
     "bad_ban": module.build_dashboard_action_request(
         snapshot,
         "8",
+        "",
         "",
         "account_ban",
         {"duration": "soon", "reason": "Bad!"},
@@ -1852,6 +1886,7 @@ PY
     assert_true "[[ \$compact_output == *'\"setgm\":{\"command\":[\"account\",\"setgm\",\"GMADMIN\",\"2\"]'* ]]" "dashboard action builder targets selected account for GM updates" || all_passed=1
     assert_true "[[ \$compact_output == *'\"restore\":{\"command\":[\"backup\",\"restore\",\"/tmp/vmangos-backups/backup-20260413-213000.tar.gz\",\"--dry-run\"]'* ]]" "dashboard action builder resolves restore dry-run path from backup selection" || all_passed=1
     assert_true "[[ \$compact_output == *'\"weekly\":{\"command\":[\"backup\",\"schedule\",\"--weekly\",\"Sun04:00\"]'* ]]" "dashboard action builder emits weekly backup schedule commands" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"cancel\":{\"command\":[\"schedule\",\"cancel\",\"20260413220000-1111\"]'* && \$compact_output == *'\"view\":\"operations\"'* ]]" "dashboard action builder exposes schedule cancellation in the operations view" || all_passed=1
     assert_true "[[ \$compact_output == *'\"config\":{\"command\":[\"config\",\"validate\"]'* && \$compact_output == *'\"view\":\"config\"'* ]]" "dashboard action builder exposes config validation as a workflow action" || all_passed=1
     assert_true "[[ \$compact_output == *'\"bad_ban\":{\"error\":\"accountbanskipped:durationmustuseformslike30m,12h,or7d\"'* ]]" "dashboard action builder validates account ban input before dispatch" || all_passed=1
 
@@ -1874,6 +1909,37 @@ snapshot = {
     "captured_at": "2026-04-13T21:45:00+00:00",
     "players": [{"id": 8, "username": "PLAYERONE", "gm_level": 1, "online": True, "banned": False}],
     "backups": {"summary": {"count": 3}},
+    "logs": {
+        "ok": True,
+        "data": {
+            "status": "healthy",
+            "config": {"present": True, "in_sync": True},
+            "logs": {"active_files": 4, "rotated_files": 2, "sensitive_permissions_ok": True},
+            "disk": {"used_percent": 18, "available_kb": 2097152},
+            "policy": {"max_size": "100M", "min_size": "1M"},
+        },
+    },
+    "update_check": {
+        "ok": True,
+        "data": {
+            "branch": "development",
+            "remote_ref": "origin/development",
+            "commits_behind": 2,
+            "update_available": True,
+            "worktree_dirty": False,
+            "local_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "remote_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+    },
+    "update_inspect": {
+        "ok": True,
+        "data": {
+            "db_assessment": "schema_migrations_pending",
+            "db_automation_supported": True,
+            "pending_migrations": [{"id": "20260420000000"}],
+            "manual_review": [],
+        },
+    },
     "server": {
         "ok": True,
         "data": {
@@ -1887,9 +1953,15 @@ snapshot = {
 
 payload = {
     "banner": module.render_action_banner("accounts", snapshot, "backup completed", "success", 2),
-    "sidebar": module.render_sidebar("accounts", "backup completed", snapshot, 2),
+    "sidebar": module.render_sidebar("operations", "backup completed", snapshot, 2),
     "player": module.render_player_details(snapshot["players"][0], len(snapshot["players"])),
     "empty_player": module.render_player_details(None, 0),
+    "logs": module.render_logs_panel(snapshot),
+    "update": module.render_update_panel(snapshot),
+    "schedule": module.render_schedule_details(
+        {"id": "20260413220000-1111", "job_type": "restart", "schedule_type": "weekly", "time": "04:00", "day": "Sun", "timezone": "UTC", "warnings": "30,15,5,1", "announce_message": "Weekly maintenance", "next_run": "Sun 2026-04-19 04:00:00 UTC"},
+        1,
+    ),
 }
 
 print(json.dumps(payload, sort_keys=True))
@@ -1899,9 +1971,12 @@ PY
     compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
 
     assert_true "[[ \$compact_output == *'READY'* && \$compact_output == *'Accounts'* && \$compact_output == *'refresh[/]2s'* ]]" "dashboard action banner exposes tone, view, and interval" || all_passed=1
-    assert_true "[[ \$compact_output == *'RealmPulse'* && \$compact_output == *'Players[/]1online'* && \$compact_output == *'Backups[/]3known'* ]]" "dashboard sidebar exposes live pulse summary" || all_passed=1
+    assert_true "[[ \$compact_output == *'RealmPulse'* && \$compact_output == *'Players[/]1online'* && \$compact_output == *'Backups[/]3known'* && \$compact_output == *'j[/]canceljob'* ]]" "dashboard sidebar exposes live pulse summary and operations keys" || all_passed=1
     assert_true "[[ \$compact_output == *'Selected[/][bold#2dd4bf]PLAYERONE'* && \$compact_output == *'Workflow[/]switchto[bold#f59e0b]Accounts[/]forpassword,GM,andbanactions.'* ]]" "dashboard player details emphasize the selected player workflow" || all_passed=1
     assert_true "[[ \$compact_output == *'chooseaplayerrowwhensomeonelogsin.'* ]]" "dashboard empty player state explains next operator step" || all_passed=1
+    assert_true "[[ \$compact_output == *'LogsHealth'* && \$compact_output == *'Retention[/]max=100Mmin=1M'* ]]" "dashboard logs panel summarizes health and retention" || all_passed=1
+    assert_true "[[ \$compact_output == *'UpdateState'* && \$compact_output == *'Assessment[/][bold#f59e0b]schemamigrationspending'* ]]" "dashboard update panel surfaces DB-aware update state" || all_passed=1
+    assert_true "[[ \$compact_output == *'JobDetails'* && \$compact_output == *'cancelselectedjob'* ]]" "dashboard schedule details include cancel guidance" || all_passed=1
 
     return $all_passed
 }
