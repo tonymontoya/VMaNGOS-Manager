@@ -1858,6 +1858,54 @@ PY
     return $all_passed
 }
 
+test_dashboard_render_helpers() {
+    local all_passed=0 output compact_output
+
+    output=$(python3 - "$MANAGER_DIR/lib/dashboard.py" <<'PY'
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("dashboard_module", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+snapshot = {
+    "captured_at": "2026-04-13T21:45:00+00:00",
+    "players": [{"id": 8, "username": "PLAYERONE", "gm_level": 1, "online": True, "banned": False}],
+    "backups": {"summary": {"count": 3}},
+    "server": {
+        "ok": True,
+        "data": {
+            "services": {
+                "auth": {"health": "active"},
+                "world": {"health": "warning"},
+            }
+        },
+    },
+}
+
+payload = {
+    "banner": module.render_action_banner("accounts", snapshot, "backup completed", "success", 2),
+    "sidebar": module.render_sidebar("accounts", "backup completed", snapshot, 2),
+    "player": module.render_player_details(snapshot["players"][0], len(snapshot["players"])),
+    "empty_player": module.render_player_details(None, 0),
+}
+
+print(json.dumps(payload, sort_keys=True))
+PY
+)
+
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+
+    assert_true "[[ \$compact_output == *'READY'* && \$compact_output == *'Accounts'* && \$compact_output == *'refresh[/]2s'* ]]" "dashboard action banner exposes tone, view, and interval" || all_passed=1
+    assert_true "[[ \$compact_output == *'RealmPulse'* && \$compact_output == *'Players[/]1online'* && \$compact_output == *'Backups[/]3known'* ]]" "dashboard sidebar exposes live pulse summary" || all_passed=1
+    assert_true "[[ \$compact_output == *'Selected[/][bold#2dd4bf]PLAYERONE'* && \$compact_output == *'Workflow[/]switchto[bold#f59e0b]Accounts[/]forpassword,GM,andbanactions.'* ]]" "dashboard player details emphasize the selected player workflow" || all_passed=1
+    assert_true "[[ \$compact_output == *'chooseaplayerrowwhensomeonelogsin.'* ]]" "dashboard empty player state explains next operator step" || all_passed=1
+
+    return $all_passed
+}
+
 test_server_player_count_fallback() {
     # shellcheck source=../lib/server.sh
     source "$LIB_DIR/server.sh"
@@ -3066,6 +3114,7 @@ main() {
     run_test "Dashboard: Bootstrap and launch" test_dashboard_bootstrap_and_run
     run_test "Dashboard: Snapshot aggregation" test_dashboard_snapshot_json_aggregates_backend
     run_test "Dashboard: Action requests" test_dashboard_action_request_builder
+    run_test "Dashboard: Render helpers" test_dashboard_render_helpers
     run_test "Server: Player count fallback" test_server_player_count_fallback
     run_test "Server: Interval validation" test_server_validate_interval
     run_test "Server: Start fails on DB preflight" test_server_start_fails_when_database_unreachable
