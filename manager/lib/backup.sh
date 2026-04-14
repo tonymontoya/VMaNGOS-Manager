@@ -19,6 +19,7 @@ export BACKUP_DIR=""
 export BACKUP_RETENTION_DAYS=""
 export BACKUP_VERIFY_AFTER=""
 export MANAGER_BIN="${MANAGER_BIN:-}"
+export BACKUP_SYSTEMD_DIR="${BACKUP_SYSTEMD_DIR:-/etc/systemd/system}"
 
 export BACKUP_LOCK_FILE="/var/run/vmangos-manager/backup.lock"
 
@@ -87,6 +88,124 @@ backup_resolve_manager_bin() {
     else
         printf '%s' "$configured_path"
     fi
+}
+
+backup_systemctl() {
+    systemctl "$@"
+}
+
+backup_timer_file_path() {
+    printf '%s/%s\n' "$BACKUP_SYSTEMD_DIR" "$1"
+}
+
+backup_schedule_label_from_oncalendar() {
+    local on_calendar="${1:-}"
+    local normalized
+    local time_value
+    normalized=$(config_trim "$on_calendar")
+
+    case "$normalized" in
+        "*-*-* "*:*:*)
+            time_value="${normalized#*-*-* }"
+            printf 'daily %s\n' "${time_value%:00}"
+            ;;
+        Mon\ *-*-*\ *:*:*|Tue\ *-*-*\ *:*:*|Wed\ *-*-*\ *:*:*|Thu\ *-*-*\ *:*:*|Fri\ *-*-*\ *:*:*|Sat\ *-*-*\ *:*:*|Sun\ *-*-*\ *:*:*)
+            time_value="${normalized##* }"
+            printf 'weekly %s %s\n' "${normalized%% *}" "${time_value%:00}"
+            ;;
+        *)
+            printf '%s\n' "${normalized:-n/a}"
+            ;;
+    esac
+}
+
+backup_schedule_collect_state() {
+    local schedule_id="$1"
+    local timer_name="$2"
+    local timer_path description on_calendar configured enabled active next_run
+
+    timer_path=$(backup_timer_file_path "$timer_name")
+    if [[ ! -f "$timer_path" ]]; then
+        printf '{"id":"%s","timer":"%s","present":false,"enabled":false,"active":false,"configured":"n/a","next_run":"","timer_path":"%s"}' \
+            "$(json_escape "$schedule_id")" \
+            "$(json_escape "$timer_name")" \
+            "$(json_escape "$timer_path")"
+        return 0
+    fi
+
+    description=$(awk -F= '/^Description=/{print $2; exit}' "$timer_path" 2>/dev/null || true)
+    on_calendar=$(awk -F= '/^OnCalendar=/{print $2; exit}' "$timer_path" 2>/dev/null || true)
+    configured=$(backup_schedule_label_from_oncalendar "$on_calendar")
+
+    enabled=false
+    active=false
+    if backup_systemctl is-enabled "$timer_name" >/dev/null 2>&1; then
+        enabled=true
+    fi
+    if backup_systemctl is-active "$timer_name" >/dev/null 2>&1; then
+        active=true
+    fi
+
+    next_run=$(backup_systemctl show "$timer_name" --property=NextElapseUSecRealtime --value 2>/dev/null | head -n 1 || true)
+    if [[ "$next_run" == "n/a" ]]; then
+        next_run=""
+    fi
+
+    printf '{"id":"%s","timer":"%s","present":true,"enabled":%s,"active":%s,"configured":"%s","description":"%s","next_run":"%s","timer_path":"%s"}' \
+        "$(json_escape "$schedule_id")" \
+        "$(json_escape "$timer_name")" \
+        "$enabled" \
+        "$active" \
+        "$(json_escape "$configured")" \
+        "$(json_escape "$description")" \
+        "$(json_escape "$next_run")" \
+        "$(json_escape "$timer_path")"
+}
+
+backup_schedule_json_string_field() {
+    local json="$1"
+    local field="$2"
+    sed -n "s/.*\"$field\":\"\\([^\"]*\\)\".*/\\1/p" <<< "$json"
+}
+
+backup_schedule_json_bool_field() {
+    local json="$1"
+    local field="$2"
+    sed -n "s/.*\"$field\":\\(true\\|false\\).*/\\1/p" <<< "$json"
+}
+
+backup_schedule_status() {
+    local output_format="${1:-${OUTPUT_FORMAT:-text}}"
+    local daily weekly configured_count
+
+    daily=$(backup_schedule_collect_state "daily" "vmangos-backup-daily.timer")
+    weekly=$(backup_schedule_collect_state "weekly" "vmangos-backup-weekly.timer")
+    configured_count=$(printf '%s\n%s\n' "$daily" "$weekly" | awk '/"present":true/ {count++} END {print count+0}')
+
+    if [[ "$output_format" == "json" ]]; then
+        json_output true "{\"configured_count\":$configured_count,\"schedules\":[$daily,$weekly]}"
+        return 0
+    fi
+
+    echo "=== Backup Schedule State ==="
+    echo ""
+    printf '%s\n' "$daily" "$weekly" | while IFS= read -r entry; do
+        local schedule_id configured enabled active next_run
+        [[ -n "$entry" ]] || continue
+        schedule_id=$(backup_schedule_json_string_field "$entry" "id")
+        if [[ "$entry" == *'"present":false'* ]]; then
+            printf '%s: not configured\n' "$schedule_id"
+            continue
+        fi
+        configured=$(backup_schedule_json_string_field "$entry" "configured")
+        enabled=$(backup_schedule_json_bool_field "$entry" "enabled")
+        active=$(backup_schedule_json_bool_field "$entry" "active")
+        next_run=$(backup_schedule_json_string_field "$entry" "next_run")
+        printf '%s: %s  enabled=%s  active=%s\n' "$schedule_id" "$configured" "$enabled" "$active"
+        if [[ -n "$next_run" ]]; then
+            printf '  next run: %s\n' "$next_run"
+        fi
+    done
 }
 
 # ============================================================================

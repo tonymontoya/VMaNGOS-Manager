@@ -368,6 +368,17 @@ def iso_to_display(value: Any) -> str:
         return text
 
 
+def iso_to_clock(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return "n/a"
+    try:
+        normalized = text.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).astimezone().strftime("%H:%M:%S")
+    except ValueError:
+        return text
+
+
 def parse_ini_content(content: str) -> dict[str, str]:
     values: dict[str, str] = {}
     section = ""
@@ -421,63 +432,68 @@ def find_selected_schedule(snapshot: dict[str, Any], selected_schedule_id: str) 
     return entries[0] if entries else None
 
 
-def render_context_actions(active_view: str) -> list[str]:
-    lines = [
-        f"[bold {ACCENT_GOLD}]r[/]  refresh",
-        f"[bold {ACCENT_GOLD}]s[/]  start server",
-        f"[bold {ACCENT_GOLD}]x[/]  stop server",
-        f"[bold {ACCENT_GOLD}]R[/]  restart server",
+def format_command_tokens(tokens: list[tuple[str, str]]) -> str:
+    return "  ".join(f"[bold {ACCENT_GOLD}]{key}[/] {label}" for key, label in tokens)
+
+
+def view_command_tokens(active_view: str) -> list[tuple[str, str]]:
+    if active_view == "accounts":
+        return [
+            ("c", "create"),
+            ("p", "reset password"),
+            ("g", "set GM"),
+            ("n", "ban"),
+            ("u", "unban"),
+        ]
+    if active_view == "backups":
+        return [
+            ("b", "backup now"),
+            ("v", "verify"),
+            ("d", "restore dry-run"),
+            ("y", "daily timer"),
+            ("w", "weekly timer"),
+        ]
+    if active_view == "operations":
+        return [
+            ("l", "rotate logs"),
+            ("T", "test logs"),
+            ("h", "honor job"),
+            ("m", "restart job"),
+            ("P", "update plan"),
+            ("j", "cancel job"),
+        ]
+    if active_view == "config":
+        return [("k", "validate config")]
+    return [
+        ("o", "roster"),
+        ("s", "start"),
+        ("x", "stop"),
+        ("R", "restart"),
+        ("b", "backup"),
+        ("v", "verify"),
+        ("k", "validate config"),
     ]
 
-    if active_view == "accounts":
-        lines.extend(
-            [
-                f"[bold {ACCENT_GOLD}]c[/]  create account",
-                f"[bold {ACCENT_GOLD}]p[/]  reset password",
-                f"[bold {ACCENT_GOLD}]g[/]  set GM level",
-                f"[bold {ACCENT_GOLD}]n[/]  ban account",
-                f"[bold {ACCENT_GOLD}]u[/]  unban account",
-            ]
-        )
-    elif active_view == "backups":
-        lines.extend(
-            [
-                f"[bold {ACCENT_GOLD}]b[/]  backup now",
-                f"[bold {ACCENT_GOLD}]v[/]  verify backup",
-                f"[bold {ACCENT_GOLD}]d[/]  restore dry-run",
-                f"[bold {ACCENT_GOLD}]y[/]  schedule daily",
-                f"[bold {ACCENT_GOLD}]w[/]  schedule weekly",
-            ]
-        )
-    elif active_view == "operations":
-        lines.extend(
-            [
-                f"[bold {ACCENT_GOLD}]l[/]  rotate logs",
-                f"[bold {ACCENT_GOLD}]T[/]  test logs",
-                f"[bold {ACCENT_GOLD}]h[/]  schedule honor",
-                f"[bold {ACCENT_GOLD}]m[/]  schedule restart",
-                f"[bold {ACCENT_GOLD}]P[/]  update plan",
-                f"[bold {ACCENT_GOLD}]j[/]  cancel job",
-            ]
-        )
-    elif active_view == "config":
-        lines.append(f"[bold {ACCENT_GOLD}]k[/]  validate config")
-    else:
-        lines.extend(
-            [
-                f"[bold {ACCENT_GOLD}]b[/]  backup now",
-                f"[bold {ACCENT_GOLD}]v[/]  verify backup",
-                f"[bold {ACCENT_GOLD}]k[/]  validate config",
-            ]
-        )
 
-    lines.extend(
+def render_command_rail(active_view: str) -> str:
+    navigation = format_command_tokens(
         [
-            f"[bold {ACCENT_GOLD}]t[/]  theme",
-            f"[bold {ACCENT_GOLD}]q[/]  quit",
+            ("1", "overview"),
+            ("2", "accounts"),
+            ("3", "backups"),
+            ("4", "config"),
+            ("5", "ops"),
         ]
     )
-    return lines
+    global_actions = format_command_tokens([("r", "refresh"), ("t", "theme"), ("q", "quit")])
+    context_actions = format_command_tokens(view_command_tokens(active_view))
+    return "\n".join(
+        [
+            f"[bold {ACCENT_SKY}]Navigate[/]  {navigation}",
+            f"[bold {ACCENT_SKY}]Global[/]    {global_actions}",
+            f"[bold {ACCENT_SKY}]This View[/] {context_actions}",
+        ]
+    )
 
 
 def build_dashboard_action_request(
@@ -741,6 +757,7 @@ def empty_snapshot(error_message: str) -> dict[str, Any]:
         "accounts_online": {"ok": False, "data": {}, "error": error_message},
         "accounts": {"ok": False, "data": {}, "error": error_message},
         "backup_list": {"ok": False, "data": [], "error": error_message},
+        "backup_schedule_status": {"ok": False, "data": {}, "error": error_message},
         "config_validate": {"ok": False, "data": {}, "error": error_message},
         "config_show": {"ok": False, "data": {}, "error": error_message},
         "config_summary": {},
@@ -840,6 +857,13 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         parser_mode="json",
         use_global_json=False,
     )
+    backup_schedule_status = run_manager_command(
+        manager_bin,
+        config_path,
+        ["backup", "schedule", "status", "--format", "json"],
+        parser_mode="envelope",
+        use_global_json=False,
+    )
     config_validate = run_manager_command(
         manager_bin,
         config_path,
@@ -865,6 +889,8 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
     all_accounts = accounts["data"].get("accounts", []) if accounts["ok"] else []
     schedule_entries = schedules["data"].get("schedules", []) if schedules["ok"] else []
     backup_dir = config_values.get("backup.backup_dir", "")
+    password_file = str(config_values.get("database.password_file", "") or "")
+    inline_password = str(config_values.get("database.password", "") or "")
     backup_summary = summarize_backups(backup_entries, backup_dir)
 
     config_summary = {
@@ -878,6 +904,7 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         "world_db": config_values.get("database.world_db", ""),
         "logs_db": config_values.get("database.logs_db", ""),
         "backup_dir": backup_dir,
+        "db_secret_source": "password_file" if password_file else ("inline" if inline_password else "unset"),
     }
 
     return {
@@ -891,6 +918,7 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         "accounts_online": online_accounts,
         "accounts": accounts,
         "backup_list": backups,
+        "backup_schedule_status": backup_schedule_status,
         "config_validate": config_validate,
         "config_show": config_show,
         "config_summary": config_summary,
@@ -919,11 +947,11 @@ def render_action_banner(
     view_summary = VIEW_SUMMARIES.get(active_view, "Operate the realm from one console.")
     return "\n".join(
         [
-            f"[bold {tone_color}]{tone_label}[/]  [bold {ACCENT_GOLD}]{view_title}[/] [{ACCENT_MUTED}]command deck[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
-            f"[{ACCENT_MUTED}]snapshot[/] {captured_at}",
+            f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]  [{ACCENT_MUTED}]realm console[/]  [bold {ACCENT_SKY}]{view_title}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
+            f"[{ACCENT_MUTED}]snapshot[/] {captured_at}  [{ACCENT_MUTED}]result[/] [bold {tone_color}]{tone_label}[/]",
             "",
-            f"[bold {ACCENT_SKY}]Focus[/] {escape_markup(view_summary)}",
-            f"[{ACCENT_MUTED}]Last result[/] {message}",
+            f"[bold {ACCENT_SKY}]This View[/] {escape_markup(view_summary)}",
+            f"[{ACCENT_MUTED}]Last action[/] {message}",
         ]
     )
 
@@ -961,20 +989,12 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
         [
             "",
             f"[bold {ACCENT_SKY}]Realm Pulse[/]",
+            f"[{ACCENT_MUTED}]Snapshot[/] {iso_to_clock(snapshot.get('captured_at'))}",
             f"[{ACCENT_MUTED}]Refresh[/]  {refresh_interval}s",
             f"[{ACCENT_MUTED}]Players[/]  {players_online} online",
             f"[{ACCENT_MUTED}]Backups[/]  {backups.get('count', 0)} known",
             f"[{ACCENT_MUTED}]Auth[/]     {format_state(auth.get('health', auth.get('state', 'unavailable')))}",
             f"[{ACCENT_MUTED}]World[/]    {format_state(world.get('health', world.get('state', 'unavailable')))}",
-            "",
-            f"[bold {ACCENT_SKY}]Active Hotkeys[/]",
-            *render_context_actions(active_view),
-            "",
-            f"[bold {ACCENT_SKY}]Focus[/]",
-            f"[{ACCENT_MUTED}]{escape_markup(VIEW_SUMMARIES.get(active_view, 'Operate the realm from one console.'))}[/]",
-            "",
-            f"[bold {ACCENT_SKY}]Last Result[/]",
-            f"[{ACCENT_MUTED}]{escape_markup(truncate_text(last_action, 68)) or 'dashboard started'}[/]",
         ]
     )
     return "\n".join(lines)
@@ -985,7 +1005,7 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
     if not server["ok"]:
         return "\n".join(
             [
-                f"[bold {ACCENT_GOLD}]Service Overview[/]",
+                f"[bold {ACCENT_GOLD}]Realm Services[/]",
                 "",
                 f"[bold {ACCENT_ROSE}]Server snapshot failed:[/] {format_error_text(server['error'])}",
                 "",
@@ -998,19 +1018,16 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
     world = data.get("services", {}).get("world", {})
     checks = data.get("checks", {})
     db = checks.get("database_connectivity", {})
-    players = data.get("players", {})
 
     return "\n".join(
         [
-            f"[bold {ACCENT_GOLD}]Service Overview[/]",
+            f"[bold {ACCENT_GOLD}]Realm Services[/]",
+            f"[{ACCENT_MUTED}]Auth, world, and database readiness.[/]",
             "",
             f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
             f"[bold {ACCENT_SKY}]World[/]  {format_state(world.get('health', world.get('state')))}  [{ACCENT_MUTED}]pid[/] {world.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {world.get('uptime_human', 'N/A')}",
             "",
             f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}",
-            f"[bold {ACCENT_SKY}]Users[/]  [bold {ACCENT_GOLD}]{players.get('online', 0)}[/] [{ACCENT_MUTED}]online via[/] {players.get('source', 'unavailable')}",
-            "",
-            f"[{ACCENT_MUTED}]Snapshot[/] {iso_to_display(snapshot.get('captured_at'))}",
         ]
     )
 
@@ -1021,10 +1038,10 @@ def render_metrics_panel(
     refresh_interval: int = 2,
 ) -> str:
     server = snapshot["server"]
-    logs = snapshot["logs"]
     metric_history = metric_history or []
     lines = [
         f"[bold {ACCENT_GOLD}]Host Metrics[/]",
+        f"[{ACCENT_MUTED}]Machine pressure and short-term trend only.[/]",
         f"[{ACCENT_MUTED}]Recent window[/] {history_window_label(metric_history, refresh_interval)}",
         "",
     ]
@@ -1037,12 +1054,10 @@ def render_metrics_panel(
         load = host.get("load", {})
         disk = data.get("checks", {}).get("disk_space", {})
         storage_io = data.get("storage_io", {})
-        players = data.get("players", {})
         cpu_history = history_values(metric_history, "cpu")
         memory_history = history_values(metric_history, "memory")
         load_history = history_values(metric_history, "load")
         disk_history = history_values(metric_history, "disk")
-        players_history = history_values(metric_history, "players")
         io_history = history_values(metric_history, "io")
         lines.extend(
             [
@@ -1050,7 +1065,6 @@ def render_metrics_panel(
                 f"[bold {ACCENT_SKY}]Memory[/]   {memory.get('used_percent', 0)}%  {format_state(memory.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(memory_history)}[/] [{ACCENT_MUTED}]{describe_trend(memory_history, 'memory')}[/]",
                 f"[bold {ACCENT_SKY}]Load[/]     {load.get('load_1', 0)}  {format_state(load.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(load_history)}[/] [{ACCENT_MUTED}]{describe_trend(load_history, 'load')}[/]",
                 f"[bold {ACCENT_SKY}]Disk[/]     {disk.get('used_percent', 0)}%  {format_state(disk.get('status', 'unavailable'))}  [{ACCENT_TEAL}]{render_sparkline(disk_history)}[/] [{ACCENT_MUTED}]{describe_trend(disk_history, 'disk')}[/]",
-                f"[bold {ACCENT_SKY}]Players[/]  {players.get('online', len(snapshot.get('players', [])))} online  [{ACCENT_BLUE}]{render_sparkline(players_history)}[/] [{ACCENT_MUTED}]{describe_trend(players_history, 'players')}[/]",
             ]
         )
         if storage_io.get("available"):
@@ -1064,19 +1078,6 @@ def render_metrics_panel(
     else:
         lines.append(f"[bold {ACCENT_ROSE}]Server metrics unavailable:[/] {format_error_text(server['error'])}")
 
-    lines.extend(["", f"[bold {ACCENT_SKY}]Logs[/]"])
-    if logs["ok"]:
-        data = logs["data"]
-        config = data.get("config", {})
-        log_counts = data.get("logs", {})
-        lines.extend(
-            [
-                f"[{ACCENT_MUTED}]Health[/]   {format_state(data.get('status', 'unavailable'))}  [{ACCENT_MUTED}]active[/] {log_counts.get('active_files', 0)}  [{ACCENT_MUTED}]rotated[/] {log_counts.get('rotated_files', 0)}  [{ACCENT_MUTED}]in_sync[/] {config.get('in_sync', False)}",
-            ]
-        )
-    else:
-        lines.append(f"[bold {ACCENT_ROSE}]Logs snapshot unavailable:[/] {format_error_text(logs['error'])}")
-
     return "\n".join(lines)
 
 
@@ -1086,12 +1087,9 @@ def render_player_details(player: dict[str, Any] | None, online_count: int) -> s
             [
                 f"[bold {ACCENT_GOLD}]Player Details[/]",
                 "",
-                f"[{ACCENT_MUTED}]Online now[/]   [bold {ACCENT_GOLD}]{online_count}[/]",
-                f"[{ACCENT_MUTED}]Snapshot[/]     no active player row selected",
+                f"[{ACCENT_MUTED}]Selection[/]    choose a player row to inspect that account.",
                 "",
-                f"[{ACCENT_MUTED}]Selection[/]    choose a player row when someone logs in.",
-                "",
-                f"[{ACCENT_MUTED}]Operator move[/] use [bold {ACCENT_GOLD}]2[/] [bold {ACCENT_GOLD}]Accounts[/] for account actions.",
+                f"[{ACCENT_MUTED}]Next step[/]    open [bold {ACCENT_GOLD}]Accounts[/] when you need to manage that user.",
             ]
         )
 
@@ -1104,9 +1102,48 @@ def render_player_details(player: dict[str, Any] | None, online_count: int) -> s
             f"[{ACCENT_MUTED}]GM Level[/]     {player.get('gm_level', 0)}",
             f"[{ACCENT_MUTED}]Online[/]       {format_flag(player.get('online'))}",
             f"[{ACCENT_MUTED}]Banned[/]       {format_flag(player.get('banned'), true_color=ACCENT_ROSE)}",
-            f"[{ACCENT_MUTED}]Players now[/]  [bold {ACCENT_GOLD}]{online_count}[/]",
             "",
-            f"[{ACCENT_MUTED}]Operator move[/] switch to [bold {ACCENT_GOLD}]Accounts[/] for password, GM, and ban actions.",
+            f"[{ACCENT_MUTED}]Next step[/]    open [bold {ACCENT_GOLD}]Accounts[/] for password, GM, ban, and unban actions.",
+        ]
+    )
+
+
+def render_player_pulse(
+    snapshot: dict[str, Any],
+    metric_history: list[dict[str, Any]] | None = None,
+    refresh_interval: int = 2,
+) -> str:
+    metric_history = metric_history or []
+    server = snapshot.get("server", {})
+    server_data = server.get("data", {}) if server.get("ok") else {}
+    player_state = server_data.get("players", {})
+    players = snapshot.get("players", [])
+    online_now = clamp_int(player_state.get("online", len(players)))
+    player_history = history_values(metric_history, "players")
+    peak_window = int(max(player_history)) if player_history else online_now
+    gm_players = [player for player in players if clamp_int(player.get("gm_level", 0)) > 0]
+    gm_names = [str(player.get("username", "")).strip() for player in gm_players if str(player.get("username", "")).strip()]
+    gm_summary = ", ".join(gm_names[:3]) if gm_names else "none"
+    if len(gm_names) > 3:
+        gm_summary = f"{gm_summary} +{len(gm_names) - 3}"
+
+    roster_names = [str(player.get("username", "")).strip() for player in players if str(player.get("username", "")).strip()]
+    roster_sample = ", ".join(roster_names[:4]) if roster_names else "quiet realm"
+    if len(roster_names) > 4:
+        roster_sample = f"{roster_sample} +{len(roster_names) - 4}"
+
+    return "\n".join(
+        [
+            f"[bold {ACCENT_GOLD}]Player Pulse[/]",
+            f"[{ACCENT_MUTED}]Realm population, trend, and operator-presence summary.[/]",
+            "",
+            f"[{ACCENT_MUTED}]Online Now[/]   [bold {ACCENT_GOLD}]{online_now}[/]  [{ACCENT_MUTED}]trend[/] {describe_trend(player_history, 'players')}",
+            f"[{ACCENT_MUTED}]Peak Window[/] {peak_window}  [{ACCENT_MUTED}]window[/] {history_window_label(metric_history, refresh_interval)}",
+            f"[{ACCENT_MUTED}]Count Source[/] {escape_markup(player_state.get('source', 'unavailable'))}",
+            f"[{ACCENT_MUTED}]GMs Online[/]  {len(gm_players)}  [{ACCENT_MUTED}]names[/] {escape_markup(truncate_text(gm_summary, 36))}",
+            f"[{ACCENT_MUTED}]Roster[/]      {escape_markup(truncate_text(roster_sample, 44))}",
+            "",
+            f"[{ACCENT_MUTED}]Drilldown[/]   [bold {ACCENT_GOLD}]o[/] online roster  [bold {ACCENT_GOLD}]2[/] accounts",
         ]
     )
 
@@ -1117,13 +1154,9 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
             [
                 f"[bold {ACCENT_GOLD}]Account Details[/]",
                 "",
-                f"[{ACCENT_MUTED}]Accounts[/]     {total_accounts} loaded",
-                f"[{ACCENT_MUTED}]Snapshot[/]     account list ready",
-                "",
                 f"[{ACCENT_MUTED}]Selection[/]    choose a row to inspect or act on an account.",
                 "",
-                f"[{ACCENT_MUTED}]Hotkeys[/]      [bold {ACCENT_GOLD}]c[/] create  [bold {ACCENT_GOLD}]p[/] password  [bold {ACCENT_GOLD}]g[/] GM",
-                f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]n[/] ban     [bold {ACCENT_GOLD}]u[/] unban",
+                f"[{ACCENT_MUTED}]Actions[/]      create new accounts here, then select a row for account-level changes.",
             ]
         )
 
@@ -1136,17 +1169,15 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
             f"[{ACCENT_MUTED}]GM Level[/]     {account.get('gm_level', 0)}",
             f"[{ACCENT_MUTED}]Online[/]       {format_flag(account.get('online'))}",
             f"[{ACCENT_MUTED}]Banned[/]       {format_flag(account.get('banned'), true_color=ACCENT_ROSE)}",
-            f"[{ACCENT_MUTED}]Accounts[/]     {total_accounts} loaded",
             "",
-            f"[{ACCENT_MUTED}]Operator move[/] [bold {ACCENT_GOLD}]c[/] create  [bold {ACCENT_GOLD}]p[/] password  [bold {ACCENT_GOLD}]g[/] GM",
-            f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]n[/] ban     [bold {ACCENT_GOLD}]u[/] unban",
+            f"[{ACCENT_MUTED}]Actions[/]      reset password, set GM, ban, or unban from this selection.",
         ]
     )
 
 
 def render_alerts_panel(snapshot: dict[str, Any]) -> str:
     server = snapshot["server"]
-    lines = [f"[bold {ACCENT_GOLD}]Alerts and Events[/]", ""]
+    lines = [f"[bold {ACCENT_GOLD}]Alerts and Events[/]", f"[{ACCENT_MUTED}]Recent risk signals and maintenance events.[/]", ""]
 
     if not server["ok"]:
         lines.append(f"[bold {ACCENT_ROSE}]Alerts unavailable:[/] {server['error']}")
@@ -1157,12 +1188,11 @@ def render_alerts_panel(snapshot: dict[str, Any]) -> str:
     active_alerts = alerts.get("active", [])
     recent_events = alerts.get("recent_events", [])
 
-    lines.append(f"Overall  {format_state(alerts.get('status', 'healthy'))}")
-    lines.append("")
+    lines.append(f"[{ACCENT_MUTED}]Overall[/]      {format_state(alerts.get('status', 'healthy'))}")
     lines.append(f"[bold {ACCENT_SKY}]Active Alerts[/]")
 
     if active_alerts:
-        for alert in active_alerts[:6]:
+        for alert in active_alerts[:3]:
             lines.append(
                 f"{format_state(alert.get('severity', 'warning'))} {alert.get('source', 'unknown')}: {alert.get('message', '')}"
             )
@@ -1172,7 +1202,7 @@ def render_alerts_panel(snapshot: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"[bold {ACCENT_SKY}]Recent Events[/]")
     if recent_events:
-        for event in recent_events[:8]:
+        for event in recent_events[:4]:
             lines.append(f"{truncate_text(event.get('timestamp', ''), 19)} {event.get('service', 'unknown')}: {truncate_text(event.get('message', ''), 48)}")
     else:
         lines.append("No recent events in the last 30 minutes.")
@@ -1183,8 +1213,11 @@ def render_alerts_panel(snapshot: dict[str, Any]) -> str:
 def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, Any] | None) -> str:
     backups = snapshot.get("backups", {})
     summary = backups.get("summary", {})
+    backup_schedule_status = snapshot.get("backup_schedule_status", {})
+    schedule_data = backup_schedule_status.get("data", {}) if backup_schedule_status.get("ok") else {}
+    schedule_entries = schedule_data.get("schedules", []) if isinstance(schedule_data.get("schedules", []), list) else []
     lines = [
-        f"[bold {ACCENT_GOLD}]Backups[/]",
+        f"[bold {ACCENT_GOLD}]Backup State[/]",
         "",
         f"[{ACCENT_MUTED}]Count[/]       {summary.get('count', 0)}",
         f"[{ACCENT_MUTED}]Directory[/]   {summary.get('backup_dir', 'n/a') or 'n/a'}",
@@ -1202,6 +1235,23 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
     else:
         lines.append(f"[{ACCENT_MUTED}]Latest[/]      none")
 
+    lines.extend(["", f"[bold {ACCENT_SKY}]Schedule State[/]"])
+    configured_schedules = [entry for entry in schedule_entries if entry.get("present")]
+    if backup_schedule_status.get("ok"):
+        if configured_schedules:
+            for entry in configured_schedules:
+                schedule_name = str(entry.get("id", "backup")).title()
+                schedule_health = "healthy" if entry.get("enabled") and entry.get("active") else "warning"
+                lines.append(
+                    f"[{ACCENT_MUTED}]{schedule_name}[/]       {format_state(schedule_health)}  {escape_markup(entry.get('configured', 'n/a'))}"
+                )
+                if entry.get("next_run"):
+                    lines.append(f"[{ACCENT_MUTED}]             [/]{escape_markup(entry.get('next_run'))}")
+        else:
+            lines.append(f"[{ACCENT_MUTED}]No backup timers configured yet.[/]")
+    else:
+        lines.append(f"[bold {ACCENT_ROSE}]Schedule state unavailable:[/] {format_error_text(backup_schedule_status.get('error', 'unknown error'))}")
+
     if selected_backup:
         lines.extend(
             [
@@ -1213,18 +1263,14 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
                 f"[{ACCENT_MUTED}]DBs[/]         {escape_markup(', '.join(selected_backup.get('databases', [])) or 'n/a')}",
                 f"[{ACCENT_MUTED}]Created By[/]  {escape_markup(selected_backup.get('created_by', 'n/a'))}",
                 "",
-                f"[{ACCENT_MUTED}]Hotkeys[/]     [bold {ACCENT_GOLD}]b[/] backup  [bold {ACCENT_GOLD}]v[/] verify  [bold {ACCENT_GOLD}]d[/] dry-run",
-                f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]y[/] daily   [bold {ACCENT_GOLD}]w[/] weekly",
+                f"[{ACCENT_MUTED}]Ready for[/]   verify or restore dry-run from this selection.",
             ]
         )
     else:
         lines.extend(
             [
                 "",
-                f"[{ACCENT_MUTED}]Selection[/]   choose a backup row to verify or dry-run restore.",
-                "",
-                f"[{ACCENT_MUTED}]Hotkeys[/]     [bold {ACCENT_GOLD}]b[/] backup  [bold {ACCENT_GOLD}]v[/] verify  [bold {ACCENT_GOLD}]d[/] dry-run",
-                f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]y[/] daily   [bold {ACCENT_GOLD}]w[/] weekly",
+                f"[{ACCENT_MUTED}]Selection[/]   choose a backup row to inspect, verify, or dry-run restore.",
             ]
         )
 
@@ -1234,10 +1280,14 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
 def render_config_panel(snapshot: dict[str, Any]) -> str:
     validate = snapshot["config_validate"]
     summary = snapshot.get("config_summary", {})
-    content = snapshot.get("config_content", "")
     config_path = str(snapshot.get("config_path", "") or "n/a")
-    preview_lines = content.splitlines()[:16]
-    preview = "\n".join(escape_markup(line) for line in preview_lines) if preview_lines else "No config content available."
+    secret_source = str(summary.get("db_secret_source", "unset") or "unset")
+    if secret_source == "password_file":
+        secret_label = "external password file"
+    elif secret_source == "inline":
+        secret_label = "inline value masked"
+    else:
+        secret_label = "not configured"
 
     lines = [f"[bold {ACCENT_GOLD}]Config Overview[/]", ""]
     if validate["ok"]:
@@ -1255,15 +1305,14 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
             f"[{ACCENT_MUTED}]World Service[/] {summary.get('world_service', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]DB Host[/]       {summary.get('db_host', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]DB User[/]       {summary.get('db_user', 'n/a') or 'n/a'}",
+            f"[{ACCENT_MUTED}]DB Secret[/]     {escape_markup(secret_label)}",
             f"[{ACCENT_MUTED}]Backup Dir[/]    {summary.get('backup_dir', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]DB Names[/]      auth={summary.get('auth_db', 'n/a')} world={summary.get('world_db', 'n/a')} chars={summary.get('characters_db', 'n/a')} logs={summary.get('logs_db', 'n/a')}",
             "",
-            f"[bold {ACCENT_SKY}]Config Preview[/]",
-            preview,
-            "",
-            f"[{ACCENT_MUTED}]Action hotkeys:[/]",
-            f"[bold {ACCENT_GOLD}]k[/]  validate config",
-            f"[{ACCENT_MUTED}]Existing-host tip:[/] use [bold {ACCENT_GOLD}]vmangos-manager config detect[/] in the CLI when wiring Manager onto a custom install.",
+            f"[bold {ACCENT_SKY}]Dashboard Role[/]",
+            f"[{ACCENT_MUTED}]Read-only[/]     validate and review wiring here; edit manager.conf and .dbpass in the shell.",
+            f"[{ACCENT_MUTED}]CLI[/]           [bold {ACCENT_GOLD}]config detect[/], [bold {ACCENT_GOLD}]config validate[/], [bold {ACCENT_GOLD}]config show[/]",
+            f"[{ACCENT_MUTED}]Action[/]        [bold {ACCENT_GOLD}]k[/] validate config",
         ]
     )
     return "\n".join(lines)
@@ -1386,15 +1435,12 @@ def render_schedule_details(
             [
                 f"[bold {ACCENT_GOLD}]Job Details[/]",
                 "",
-                f"[{ACCENT_MUTED}]Scheduled[/]     {total_schedules} known",
-                f"[{ACCENT_MUTED}]Snapshot[/]      operations queue ready",
-                "",
                 f"[{ACCENT_MUTED}]Selection[/]     choose a job row to inspect or cancel it.",
                 "",
                 f"[{ACCENT_MUTED}]Ops Result[/]    [bold {tone_color}]{tone_label}[/]",
                 f"[{ACCENT_MUTED}]                {escape_markup(truncate_text(last_action or 'operations ready', 60))}",
                 "",
-                f"[{ACCENT_MUTED}]Hotkeys[/]       [bold {ACCENT_GOLD}]j[/] cancel selected job",
+                f"[{ACCENT_MUTED}]Action[/]        cancel the selected job from here.",
             ]
         )
 
@@ -1414,7 +1460,7 @@ def render_schedule_details(
             f"[{ACCENT_MUTED}]Ops Result[/]    [bold {tone_color}]{tone_label}[/]",
             f"[{ACCENT_MUTED}]                {escape_markup(truncate_text(last_action or 'operations ready', 60))}",
             "",
-            f"[{ACCENT_MUTED}]Hotkeys[/]       [bold {ACCENT_GOLD}]j[/] cancel selected job",
+            f"[{ACCENT_MUTED}]Action[/]        cancel this job if the schedule is no longer desired.",
         ]
     )
 
@@ -1439,7 +1485,7 @@ def create_app(
         from textual.app import App, ComposeResult
         from textual.containers import Container, Horizontal, Vertical
         from textual.screen import ModalScreen
-        from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
+        from textual.widgets import Button, DataTable, Header, Input, Label, Static
     except ImportError as exc:
         raise DashboardRuntimeError(
             f"Textual runtime import failed: {exc}. Run 'vmangos-manager dashboard --bootstrap' first."
@@ -1506,6 +1552,95 @@ def create_app(
                 self.dismiss(None)
             elif event.button.id == "command-submit":
                 self.dismiss(self.collect_values())
+
+    class OnlineRosterScreen(ModalScreen[str | None]):
+        BINDINGS = [
+            ("escape", "close", "Close"),
+            ("q", "close", "Close"),
+            ("enter", "open_accounts", "Open In Accounts"),
+            ("2", "open_accounts", "Accounts"),
+        ]
+
+        def __init__(self, players: list[dict[str, Any]]) -> None:
+            super().__init__()
+            self.players = players
+            self.selected_player_id = ""
+
+        def compose(self) -> ComposeResult:
+            with Container(id="roster-modal"):
+                yield Static("Online Roster", id="roster-modal-title")
+                yield Static("Inspect live online accounts here, then open the selected account in the full Accounts workflow.", id="roster-modal-intro")
+                with Horizontal(id="roster-modal-layout"):
+                    yield DataTable(id="roster-table", classes="detail-table")
+                    yield Static("", id="roster-details", classes="detail-pane")
+                with Horizontal(id="roster-modal-actions"):
+                    yield Button("Close", id="roster-close")
+                    yield Button("Open In Accounts", id="roster-open", variant="primary")
+
+        def on_mount(self) -> None:
+            if getattr(self.app, "theme_name", "dark") == "light":
+                self.add_class("theme-light")
+            table = self.query_one("#roster-table", DataTable)
+            table.cursor_type = "row"
+            table.zebra_stripes = True
+            table.add_columns("ID", "Username", "GM")
+            self.refresh_roster()
+            self.set_focus(table)
+
+        def refresh_roster(self) -> None:
+            table = self.query_one("#roster-table", DataTable)
+            table.clear(columns=False)
+
+            selected_index = 0
+            for index, player in enumerate(self.players):
+                player_id = str(player.get("id", ""))
+                if self.selected_player_id and player_id == self.selected_player_id:
+                    selected_index = index
+                table.add_row(
+                    str(player.get("id", "")),
+                    str(player.get("username", "")),
+                    str(player.get("gm_level", 0)),
+                    key=player_id,
+                )
+
+            selected_player = self.players[selected_index] if self.players else None
+            self.selected_player_id = str(selected_player.get("id", "")) if selected_player else ""
+            if self.players:
+                table.move_cursor(row=selected_index, column=0, animate=False)
+            self.query_one("#roster-details", Static).update(render_player_details(selected_player, len(self.players)))
+
+        def selected_player(self) -> dict[str, Any] | None:
+            return next((player for player in self.players if str(player.get("id", "")) == self.selected_player_id), None)
+
+        def update_selected_player(self, row_key: Any) -> None:
+            key_value = player_key_value(row_key)
+            player = next((candidate for candidate in self.players if str(candidate.get("id", "")) == key_value), None)
+            if player is None and self.players:
+                player = self.players[0]
+            self.selected_player_id = str(player.get("id", "")) if player else ""
+            self.query_one("#roster-details", Static).update(render_player_details(player, len(self.players)))
+
+        def action_close(self) -> None:
+            self.dismiss(None)
+
+        def action_open_accounts(self) -> None:
+            player = self.selected_player()
+            self.dismiss(str(player.get("id", "")) if player else None)
+
+        def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+            if event.data_table.id == "roster-table":
+                self.update_selected_player(event.row_key)
+
+        def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+            if event.data_table.id == "roster-table":
+                self.update_selected_player(event.row_key)
+                self.action_open_accounts()
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "roster-close":
+                self.dismiss(None)
+            elif event.button.id == "roster-open":
+                self.action_open_accounts()
 
     class VMangosDashboard(App[None]):
         CSS = """
@@ -1578,6 +1713,19 @@ def create_app(
 
         #view-stack {
             height: 1fr;
+        }
+
+        #command-rail {
+            height: 5;
+            margin-top: 1;
+            border: heavy #f59e0b;
+            background: #0b1a2a;
+            padding: 0 2;
+        }
+
+        Screen.theme-light #command-rail {
+            border: round #2563eb;
+            background: #eef6ff;
         }
 
         .view {
@@ -1669,8 +1817,8 @@ def create_app(
             margin-top: 1;
         }
 
-        #players-pane,
-        #player-details {
+        #player-pulse-pane,
+        #alerts-pane {
             min-height: 16;
         }
 
@@ -1689,7 +1837,7 @@ def create_app(
         }
 
         #operations-summary {
-            height: 15;
+            height: 13;
             margin-bottom: 1;
         }
 
@@ -1813,6 +1961,65 @@ def create_app(
         #command-submit {
             margin-left: 1;
         }
+
+        #roster-modal {
+            width: 112;
+            max-width: 140;
+            height: 28;
+            border: heavy #f59e0b;
+            background: #0c1b2c;
+            padding: 1 2 2 2;
+        }
+
+        CommandFormScreen.theme-light #roster-modal,
+        OnlineRosterScreen.theme-light #roster-modal {
+            border: round #2563eb;
+            background: #fffdf7;
+        }
+
+        #roster-modal-title {
+            text-style: bold;
+            color: #f59e0b;
+            margin-bottom: 1;
+        }
+
+        OnlineRosterScreen.theme-light #roster-modal-title {
+            color: #1d4ed8;
+        }
+
+        #roster-modal-intro {
+            color: #cbd5e1;
+            margin-bottom: 1;
+        }
+
+        OnlineRosterScreen.theme-light #roster-modal-intro {
+            color: #475569;
+        }
+
+        #roster-modal-layout {
+            height: 1fr;
+        }
+
+        #roster-table {
+            width: 1fr;
+            height: 1fr;
+            margin-right: 1;
+        }
+
+        #roster-details {
+            width: 34;
+            min-width: 32;
+            height: 1fr;
+        }
+
+        #roster-modal-actions {
+            height: auto;
+            margin-top: 1;
+        }
+
+        #roster-open {
+            margin-left: 1;
+        }
         """
 
         BINDINGS = [
@@ -1821,6 +2028,7 @@ def create_app(
             ("s", "start_server", "Start"),
             ("x", "stop_server", "Stop"),
             ("R", "restart_server", "Restart"),
+            ("o", "open_online_roster", "Roster"),
             ("b", "backup_now", "Backup"),
             ("v", "verify_selected_backup", "Verify"),
             ("c", "create_account", "Create"),
@@ -1861,7 +2069,6 @@ def create_app(
             self.action_tone = "info"
             self.snapshot = empty_snapshot("waiting for first refresh")
             self.metric_history: list[dict[str, Any]] = []
-            self.selected_player_id = ""
             self.selected_account_id = ""
             self.selected_backup_file = ""
             self.selected_schedule_id = ""
@@ -1880,10 +2087,8 @@ def create_app(
                             with Container(id="overview-grid"):
                                 yield Static("", id="service-pane", classes="panel hero-panel")
                                 yield Static("", id="metrics-pane", classes="panel accent-panel")
-                                with Vertical(id="players-pane", classes="panel table-panel"):
-                                    yield Static("[b]Online Players[/b]", classes="table-detail-title")
-                                    yield DataTable(id="players-table")
-                                yield Static("", id="player-details", classes="panel hero-panel")
+                                yield Static("", id="player-pulse-pane", classes="panel hero-panel")
+                                yield Static("", id="alerts-pane", classes="panel accent-panel")
                         with Container(id="accounts-view", classes="view hidden"):
                             with Vertical(classes="panel table-panel table-detail", id="accounts-layout"):
                                 yield Static("[b]Accounts[/b]", classes="table-detail-title")
@@ -1906,14 +2111,9 @@ def create_app(
                                     with Horizontal(classes="table-detail-body"):
                                         yield DataTable(id="schedules-table", classes="detail-table")
                                         yield Static("", id="schedule-details", classes="detail-pane")
-            yield Footer()
+                    yield Static("", id="command-rail")
 
         def on_mount(self) -> None:
-            players_table = self.query_one("#players-table", DataTable)
-            players_table.cursor_type = "row"
-            players_table.zebra_stripes = True
-            players_table.add_columns("ID", "Username", "GM")
-
             accounts_table = self.query_one("#accounts-table", DataTable)
             accounts_table.cursor_type = "row"
             accounts_table.zebra_stripes = True
@@ -1949,9 +2149,7 @@ def create_app(
                     widget.add_class("hidden")
 
             self.refresh_chrome()
-            if self.active_view == "overview":
-                self.set_focus(self.query_one("#players-table", DataTable))
-            elif self.active_view == "accounts":
+            if self.active_view == "accounts":
                 self.set_focus(self.query_one("#accounts-table", DataTable))
             elif self.active_view == "backups":
                 self.set_focus(self.query_one("#backups-table", DataTable))
@@ -1971,6 +2169,7 @@ def create_app(
                     self.refresh_interval,
                 )
             )
+            self.query_one("#command-rail", Static).update(render_command_rail(self.active_view))
 
         def request_snapshot_refresh(self) -> None:
             if self.refresh_inflight:
@@ -1996,10 +2195,11 @@ def create_app(
             self.refresh_inflight = False
             self.query_one("#service-pane", Static).update(render_service_panel(snapshot, self.active_view))
             self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot, self.metric_history, self.refresh_interval))
+            self.query_one("#player-pulse-pane", Static).update(render_player_pulse(snapshot, self.metric_history, self.refresh_interval))
+            self.query_one("#alerts-pane", Static).update(render_alerts_panel(snapshot))
             self.query_one("#config-pane", Static).update(render_config_panel(snapshot))
             self.query_one("#logs-pane", Static).update(render_logs_panel(snapshot))
             self.query_one("#update-pane", Static).update(render_update_panel(snapshot, self.update_plan_data))
-            self.refresh_players(snapshot.get("players", []))
             self.refresh_accounts(snapshot.get("all_accounts", []))
             self.refresh_backups(snapshot.get("backups", {}).get("entries", []))
             self.refresh_schedules(snapshot.get("schedules", []))
@@ -2021,31 +2221,6 @@ def create_app(
 
         def selected_schedule(self) -> dict[str, Any] | None:
             return find_selected_schedule(self.snapshot, self.selected_schedule_id)
-
-        def refresh_players(self, players: list[dict[str, Any]]) -> None:
-            table = self.query_one("#players-table", DataTable)
-            table.clear(columns=False)
-
-            selected_index = 0
-            for index, player in enumerate(players):
-                player_id = str(player.get("id", ""))
-                if self.selected_player_id and player_id == self.selected_player_id:
-                    selected_index = index
-                table.add_row(
-                    str(player.get("id", "")),
-                    str(player.get("username", "")),
-                    str(player.get("gm_level", 0)),
-                    key=player_id,
-                )
-
-            if players:
-                current_player = players[selected_index]
-                self.selected_player_id = str(current_player.get("id", ""))
-                table.move_cursor(row=selected_index, column=0, animate=False)
-                self.query_one("#player-details", Static).update(render_player_details(current_player, len(players)))
-            else:
-                self.selected_player_id = ""
-                self.query_one("#player-details", Static).update(render_player_details(None, len(players)))
 
         def refresh_accounts(self, accounts: list[dict[str, Any]]) -> None:
             table = self.query_one("#accounts-table", DataTable)
@@ -2140,15 +2315,6 @@ def create_app(
                 render_schedule_details(selected_schedule, len(schedules), self.last_action, self.action_tone)
             )
 
-        def update_selected_player(self, row_key: Any) -> None:
-            key_value = player_key_value(row_key)
-            players = self.snapshot.get("players", [])
-            player = next((candidate for candidate in players if str(candidate.get("id", "")) == key_value), None)
-            if player is None and players:
-                player = players[0]
-            self.selected_player_id = str(player.get("id", "")) if player else ""
-            self.query_one("#player-details", Static).update(render_player_details(player, len(players)))
-
         def update_selected_account(self, row_key: Any) -> None:
             key_value = player_key_value(row_key)
             accounts = self.snapshot.get("all_accounts", [])
@@ -2225,9 +2391,7 @@ def create_app(
             )
 
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-            if event.data_table.id == "players-table":
-                self.update_selected_player(event.row_key)
-            elif event.data_table.id == "accounts-table":
+            if event.data_table.id == "accounts-table":
                 self.update_selected_account(event.row_key)
             elif event.data_table.id == "backups-table":
                 self.update_selected_backup(event.row_key)
@@ -2235,9 +2399,7 @@ def create_app(
                 self.update_selected_schedule(event.row_key)
 
         def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-            if event.data_table.id == "players-table":
-                self.update_selected_player(event.row_key)
-            elif event.data_table.id == "accounts-table":
+            if event.data_table.id == "accounts-table":
                 self.update_selected_account(event.row_key)
             elif event.data_table.id == "backups-table":
                 self.update_selected_backup(event.row_key)
@@ -2283,6 +2445,21 @@ def create_app(
 
         def action_restart_server(self) -> None:
             self.request_command_action("restart", ["server", "restart", "--timeout", "60"])
+
+        def handle_online_roster_result(self, account_id: str | None) -> None:
+            if not account_id:
+                return
+            self.selected_account_id = account_id
+            self.active_view = "accounts"
+            self.apply_view_state()
+            self.refresh_accounts(self.snapshot.get("all_accounts", []))
+
+        def action_open_online_roster(self) -> None:
+            players = self.snapshot.get("players", [])
+            if not players:
+                self.set_action_result("online roster is empty", tone="warning")
+                return
+            self.push_screen(OnlineRosterScreen(players), self.handle_online_roster_result)
 
         def action_backup_now(self) -> None:
             self.active_view = "backups"

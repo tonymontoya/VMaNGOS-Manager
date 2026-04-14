@@ -53,6 +53,7 @@ COMMANDS:
     schedule [honor|restart|list|cancel|simulate] [OPTIONS]
     config [create|validate|show|detect] [OPTIONS]
     backup [now|list|verify|restore|clean|schedule] [OPTIONS]
+      schedule options: [status] [--daily HH:MM | --weekly "Sun 04:00"] [--format text|json]
 EOF
 }
 
@@ -1117,22 +1118,33 @@ cmd_backup() {
             ;;
             
         schedule)
+            local status=false
             local schedule_type=""
             local schedule_value=""
+            local fmt="$OUTPUT_FORMAT"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
+                    status|--status) status=true; shift ;;
                     --daily) schedule_type="daily"; schedule_value="$2"; shift 2 ;;
                     --weekly) schedule_type="weekly"; schedule_value="$2"; shift 2 ;;
+                    --format) fmt="$2"; shift 2 ;;
                     --) shift; break ;;
                     -*) echo "Unknown option: $1"; exit 2 ;;
-                    *) break ;;
+                    *) echo "Error: backup schedule accepts only 'status' or --daily/--weekly options" >&2; exit 2 ;;
                 esac
             done
-            if [[ -z "$schedule_type" ]]; then
+            if [[ "$status" == true ]]; then
+                if [[ -n "$schedule_type" ]]; then
+                    echo "Error: backup schedule status cannot be combined with --daily or --weekly" >&2
+                    exit 2
+                fi
+                backup_schedule_status "$fmt"
+            elif [[ -z "$schedule_type" ]]; then
                 echo "Error: --daily or --weekly required" >&2
                 exit 2
+            else
+                backup_schedule "$schedule_type" "$schedule_value"
             fi
-            backup_schedule "$schedule_type" "$schedule_value"
             ;;
             
         *)
