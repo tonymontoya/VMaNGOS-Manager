@@ -741,6 +741,7 @@ def empty_snapshot(error_message: str) -> dict[str, Any]:
         "accounts_online": {"ok": False, "data": {}, "error": error_message},
         "accounts": {"ok": False, "data": {}, "error": error_message},
         "backup_list": {"ok": False, "data": [], "error": error_message},
+        "backup_schedule_status": {"ok": False, "data": {}, "error": error_message},
         "config_validate": {"ok": False, "data": {}, "error": error_message},
         "config_show": {"ok": False, "data": {}, "error": error_message},
         "config_summary": {},
@@ -840,6 +841,13 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         parser_mode="json",
         use_global_json=False,
     )
+    backup_schedule_status = run_manager_command(
+        manager_bin,
+        config_path,
+        ["backup", "schedule", "status", "--format", "json"],
+        parser_mode="envelope",
+        use_global_json=False,
+    )
     config_validate = run_manager_command(
         manager_bin,
         config_path,
@@ -865,6 +873,8 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
     all_accounts = accounts["data"].get("accounts", []) if accounts["ok"] else []
     schedule_entries = schedules["data"].get("schedules", []) if schedules["ok"] else []
     backup_dir = config_values.get("backup.backup_dir", "")
+    password_file = str(config_values.get("database.password_file", "") or "")
+    inline_password = str(config_values.get("database.password", "") or "")
     backup_summary = summarize_backups(backup_entries, backup_dir)
 
     config_summary = {
@@ -878,6 +888,7 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         "world_db": config_values.get("database.world_db", ""),
         "logs_db": config_values.get("database.logs_db", ""),
         "backup_dir": backup_dir,
+        "db_secret_source": "password_file" if password_file else ("inline" if inline_password else "unset"),
     }
 
     return {
@@ -891,6 +902,7 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         "accounts_online": online_accounts,
         "accounts": accounts,
         "backup_list": backups,
+        "backup_schedule_status": backup_schedule_status,
         "config_validate": config_validate,
         "config_show": config_show,
         "config_summary": config_summary,
@@ -919,11 +931,11 @@ def render_action_banner(
     view_summary = VIEW_SUMMARIES.get(active_view, "Operate the realm from one console.")
     return "\n".join(
         [
-            f"[bold {tone_color}]{tone_label}[/]  [bold {ACCENT_GOLD}]{view_title}[/] [{ACCENT_MUTED}]command deck[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
-            f"[{ACCENT_MUTED}]snapshot[/] {captured_at}",
+            f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]  [{ACCENT_MUTED}]realm console[/]  [bold {ACCENT_SKY}]{view_title}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
+            f"[{ACCENT_MUTED}]snapshot[/] {captured_at}  [{ACCENT_MUTED}]result[/] [bold {tone_color}]{tone_label}[/]",
             "",
-            f"[bold {ACCENT_SKY}]Focus[/] {escape_markup(view_summary)}",
-            f"[{ACCENT_MUTED}]Last result[/] {message}",
+            f"[bold {ACCENT_SKY}]This View[/] {escape_markup(view_summary)}",
+            f"[{ACCENT_MUTED}]Last action[/] {message}",
         ]
     )
 
@@ -969,12 +981,6 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
             "",
             f"[bold {ACCENT_SKY}]Active Hotkeys[/]",
             *render_context_actions(active_view),
-            "",
-            f"[bold {ACCENT_SKY}]Focus[/]",
-            f"[{ACCENT_MUTED}]{escape_markup(VIEW_SUMMARIES.get(active_view, 'Operate the realm from one console.'))}[/]",
-            "",
-            f"[bold {ACCENT_SKY}]Last Result[/]",
-            f"[{ACCENT_MUTED}]{escape_markup(truncate_text(last_action, 68)) or 'dashboard started'}[/]",
         ]
     )
     return "\n".join(lines)
@@ -985,7 +991,7 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
     if not server["ok"]:
         return "\n".join(
             [
-                f"[bold {ACCENT_GOLD}]Service Overview[/]",
+                f"[bold {ACCENT_GOLD}]Realm Services[/]",
                 "",
                 f"[bold {ACCENT_ROSE}]Server snapshot failed:[/] {format_error_text(server['error'])}",
                 "",
@@ -1002,15 +1008,13 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
 
     return "\n".join(
         [
-            f"[bold {ACCENT_GOLD}]Service Overview[/]",
+            f"[bold {ACCENT_GOLD}]Realm Services[/]",
             "",
             f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
             f"[bold {ACCENT_SKY}]World[/]  {format_state(world.get('health', world.get('state')))}  [{ACCENT_MUTED}]pid[/] {world.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {world.get('uptime_human', 'N/A')}",
             "",
             f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}",
             f"[bold {ACCENT_SKY}]Users[/]  [bold {ACCENT_GOLD}]{players.get('online', 0)}[/] [{ACCENT_MUTED}]online via[/] {players.get('source', 'unavailable')}",
-            "",
-            f"[{ACCENT_MUTED}]Snapshot[/] {iso_to_display(snapshot.get('captured_at'))}",
         ]
     )
 
@@ -1183,6 +1187,9 @@ def render_alerts_panel(snapshot: dict[str, Any]) -> str:
 def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, Any] | None) -> str:
     backups = snapshot.get("backups", {})
     summary = backups.get("summary", {})
+    backup_schedule_status = snapshot.get("backup_schedule_status", {})
+    schedule_data = backup_schedule_status.get("data", {}) if backup_schedule_status.get("ok") else {}
+    schedule_entries = schedule_data.get("schedules", []) if isinstance(schedule_data.get("schedules", []), list) else []
     lines = [
         f"[bold {ACCENT_GOLD}]Backups[/]",
         "",
@@ -1202,6 +1209,23 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
     else:
         lines.append(f"[{ACCENT_MUTED}]Latest[/]      none")
 
+    lines.extend(["", f"[bold {ACCENT_SKY}]Schedule State[/]"])
+    configured_schedules = [entry for entry in schedule_entries if entry.get("present")]
+    if backup_schedule_status.get("ok"):
+        if configured_schedules:
+            for entry in configured_schedules:
+                schedule_name = str(entry.get("id", "backup")).title()
+                schedule_health = "healthy" if entry.get("enabled") and entry.get("active") else "warning"
+                lines.append(
+                    f"[{ACCENT_MUTED}]{schedule_name}[/]       {format_state(schedule_health)}  {escape_markup(entry.get('configured', 'n/a'))}"
+                )
+                if entry.get("next_run"):
+                    lines.append(f"[{ACCENT_MUTED}]             [/]{escape_markup(entry.get('next_run'))}")
+        else:
+            lines.append(f"[{ACCENT_MUTED}]No backup timers configured yet.[/]")
+    else:
+        lines.append(f"[bold {ACCENT_ROSE}]Schedule state unavailable:[/] {format_error_text(backup_schedule_status.get('error', 'unknown error'))}")
+
     if selected_backup:
         lines.extend(
             [
@@ -1215,6 +1239,7 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
                 "",
                 f"[{ACCENT_MUTED}]Hotkeys[/]     [bold {ACCENT_GOLD}]b[/] backup  [bold {ACCENT_GOLD}]v[/] verify  [bold {ACCENT_GOLD}]d[/] dry-run",
                 f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]y[/] daily   [bold {ACCENT_GOLD}]w[/] weekly",
+                f"[{ACCENT_MUTED}]Coverage[/]    schedule create/replace lives here; cleanup and timer removal still use CLI or systemd.",
             ]
         )
     else:
@@ -1225,6 +1250,7 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
                 "",
                 f"[{ACCENT_MUTED}]Hotkeys[/]     [bold {ACCENT_GOLD}]b[/] backup  [bold {ACCENT_GOLD}]v[/] verify  [bold {ACCENT_GOLD}]d[/] dry-run",
                 f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]y[/] daily   [bold {ACCENT_GOLD}]w[/] weekly",
+                f"[{ACCENT_MUTED}]Coverage[/]    schedule create/replace lives here; cleanup and timer removal still use CLI or systemd.",
             ]
         )
 
@@ -1234,10 +1260,14 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
 def render_config_panel(snapshot: dict[str, Any]) -> str:
     validate = snapshot["config_validate"]
     summary = snapshot.get("config_summary", {})
-    content = snapshot.get("config_content", "")
     config_path = str(snapshot.get("config_path", "") or "n/a")
-    preview_lines = content.splitlines()[:16]
-    preview = "\n".join(escape_markup(line) for line in preview_lines) if preview_lines else "No config content available."
+    secret_source = str(summary.get("db_secret_source", "unset") or "unset")
+    if secret_source == "password_file":
+        secret_label = "external password file"
+    elif secret_source == "inline":
+        secret_label = "inline value masked"
+    else:
+        secret_label = "not configured"
 
     lines = [f"[bold {ACCENT_GOLD}]Config Overview[/]", ""]
     if validate["ok"]:
@@ -1255,15 +1285,14 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
             f"[{ACCENT_MUTED}]World Service[/] {summary.get('world_service', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]DB Host[/]       {summary.get('db_host', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]DB User[/]       {summary.get('db_user', 'n/a') or 'n/a'}",
+            f"[{ACCENT_MUTED}]DB Secret[/]     {escape_markup(secret_label)}",
             f"[{ACCENT_MUTED}]Backup Dir[/]    {summary.get('backup_dir', 'n/a') or 'n/a'}",
             f"[{ACCENT_MUTED}]DB Names[/]      auth={summary.get('auth_db', 'n/a')} world={summary.get('world_db', 'n/a')} chars={summary.get('characters_db', 'n/a')} logs={summary.get('logs_db', 'n/a')}",
             "",
-            f"[bold {ACCENT_SKY}]Config Preview[/]",
-            preview,
-            "",
-            f"[{ACCENT_MUTED}]Action hotkeys:[/]",
-            f"[bold {ACCENT_GOLD}]k[/]  validate config",
-            f"[{ACCENT_MUTED}]Existing-host tip:[/] use [bold {ACCENT_GOLD}]vmangos-manager config detect[/] in the CLI when wiring Manager onto a custom install.",
+            f"[bold {ACCENT_SKY}]Dashboard Role[/]",
+            f"[{ACCENT_MUTED}]Read-only[/]     validate and review wiring here; edit manager.conf and .dbpass in the shell.",
+            f"[{ACCENT_MUTED}]CLI[/]           [bold {ACCENT_GOLD}]config detect[/], [bold {ACCENT_GOLD}]config validate[/], [bold {ACCENT_GOLD}]config show[/]",
+            f"[{ACCENT_MUTED}]Action[/]        [bold {ACCENT_GOLD}]k[/] validate config",
         ]
     )
     return "\n".join(lines)

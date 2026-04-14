@@ -253,6 +253,37 @@ def build_snapshot() -> dict[str, object]:
         "accounts_online": {"ok": True, "error": "", "data": {"accounts": players}},
         "accounts": {"ok": True, "error": "", "data": {"accounts": accounts}},
         "backup_list": {"ok": True, "error": "", "data": backup_entries},
+        "backup_schedule_status": {
+            "ok": True,
+            "error": "",
+            "data": {
+                "configured_count": 1,
+                "schedules": [
+                    {
+                        "id": "daily",
+                        "timer": "vmangos-backup-daily.timer",
+                        "present": True,
+                        "enabled": True,
+                        "active": True,
+                        "configured": "daily 05:10",
+                        "description": "Run VMANGOS backup daily at 05:10",
+                        "next_run": "2026-04-15 05:10:00 UTC",
+                        "timer_path": "/etc/systemd/system/vmangos-backup-daily.timer",
+                    },
+                    {
+                        "id": "weekly",
+                        "timer": "vmangos-backup-weekly.timer",
+                        "present": False,
+                        "enabled": False,
+                        "active": False,
+                        "configured": "n/a",
+                        "description": "",
+                        "next_run": "",
+                        "timer_path": "/etc/systemd/system/vmangos-backup-weekly.timer",
+                    },
+                ],
+            },
+        },
         "config_validate": {"ok": True, "error": "", "data": {"valid": True, "issues": []}},
         "config_show": {"ok": True, "error": "", "data": {"content": config_content}},
         "config_summary": {
@@ -266,6 +297,7 @@ def build_snapshot() -> dict[str, object]:
             "world_db": "world",
             "logs_db": "logs",
             "backup_dir": "/opt/mangos/backups",
+            "db_secret_source": "password_file",
         },
         "config_content": config_content,
         "backups": {

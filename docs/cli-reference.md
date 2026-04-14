@@ -114,6 +114,7 @@ vmangos-manager backup list [--format text|json]
 vmangos-manager backup verify <file> [--level 1|2]
 vmangos-manager backup restore <file> [--dry-run]
 vmangos-manager backup clean [--keep-last N]
+vmangos-manager backup schedule status [--format text|json]
 vmangos-manager backup schedule --daily HH:MM
 vmangos-manager backup schedule --weekly "Sun 04:00"
 ```

@@ -1763,6 +1763,13 @@ JSON
     exit 0
 fi
 
+if [[ "$args" == *"backup schedule status --format json"* ]]; then
+    cat <<'JSON'
+{"success":true,"timestamp":"2026-04-13T22:00:00+00:00","data":{"configured_count":1,"schedules":[{"id":"daily","timer":"vmangos-backup-daily.timer","present":true,"enabled":true,"active":true,"configured":"daily 04:00","next_run":"2026-04-14 04:00:00 UTC"},{"id":"weekly","timer":"vmangos-backup-weekly.timer","present":false,"enabled":false,"active":false,"configured":"n/a","next_run":""}]},"error":null}
+JSON
+    exit 0
+fi
+
 if [[ "$args" == *"config validate --format json"* ]]; then
     cat <<'JSON'
 {"success":true,"timestamp":"2026-04-13T22:00:00+00:00","data":{"valid":true},"error":null}
@@ -1796,8 +1803,9 @@ EOF
     assert_true "[[ \$compact_output == *'\"schedules\":[{\"id\":\"20260413220000-1111\"'* ]]" "dashboard snapshot flattens scheduled job list" || all_passed=1
     assert_true "[[ \$compact_output == *'\"backups\":{\"entries\":[{\"timestamp\":\"2026-04-13T21:30:00+00:00\",\"file\":\"backup-20260413-213000.tar.gz\"'* ]]" "dashboard snapshot includes backup entries" || all_passed=1
     assert_true "[[ \$compact_output == *'\"summary\":{\"count\":1,\"backup_dir\":\"/tmp/vmangos-backups\",\"latest_file\":\"backup-20260413-213000.tar.gz\"'* ]]" "dashboard snapshot summarizes backup metadata" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"backup_schedule_status\":{\"ok\":true'* && \$compact_output == *'\"configured_count\":1'* ]]" "dashboard snapshot includes backup schedule state" || all_passed=1
     assert_true "[[ \$compact_output == *'\"config_validate\":{\"ok\":true'* ]]" "dashboard snapshot includes config validation result" || all_passed=1
-    assert_true "[[ \$compact_output == *'\"config_summary\":{\"install_root\":\"/opt/mangos\",\"auth_service\":\"auth\",\"world_service\":\"world\"'* ]]" "dashboard snapshot includes parsed config summary" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"config_summary\":{\"install_root\":\"/opt/mangos\",\"auth_service\":\"auth\",\"world_service\":\"world\"'* && \$compact_output == *'\"db_secret_source\":\"unset\"'* ]]" "dashboard snapshot includes parsed config summary" || all_passed=1
     assert_true "[[ \$compact_output == *'\"captured_at\":\"'* ]]" "dashboard snapshot includes capture timestamp" || all_passed=1
 
     rm -rf "$temp_dir"
@@ -1929,6 +1937,16 @@ snapshot = {
     "captured_at": "2026-04-13T21:45:00+00:00",
     "players": [{"id": 8, "username": "PLAYERONE", "gm_level": 1, "online": True, "banned": False}],
     "backups": {"summary": {"count": 3}},
+    "backup_schedule_status": {
+        "ok": True,
+        "data": {
+            "configured_count": 1,
+            "schedules": [
+                {"id": "daily", "present": True, "enabled": True, "active": True, "configured": "daily 04:00", "next_run": "2026-04-14 04:00:00 UTC"},
+                {"id": "weekly", "present": False, "enabled": False, "active": False, "configured": "n/a", "next_run": ""},
+            ],
+        },
+    },
     "logs": {
         "ok": True,
         "data": {
@@ -1979,6 +1997,21 @@ snapshot = {
             "storage_io": {"available": True, "util_percent": 33.0, "status": "ok", "device": "sda"},
         },
     },
+    "config_validate": {"ok": True, "data": {"valid": True}},
+    "config_summary": {
+        "install_root": "/opt/mangos",
+        "auth_service": "auth",
+        "world_service": "world",
+        "db_host": "127.0.0.1",
+        "db_user": "mangos",
+        "auth_db": "auth",
+        "characters_db": "characters",
+        "world_db": "mangos",
+        "logs_db": "logs",
+        "backup_dir": "/opt/mangos/backups",
+        "db_secret_source": "inline",
+    },
+    "config_path": "/opt/mangos/manager/config/manager.conf",
 }
 
 history = []
@@ -2011,6 +2044,8 @@ payload = {
     "banner": module.render_action_banner("accounts", snapshot, "backup completed", "success", 2),
     "sidebar": module.render_sidebar("operations", "backup completed", snapshot, 2),
     "metrics": module.render_metrics_panel(snapshot, history, 2),
+    "backups": module.render_backups_summary(snapshot, {"file": "backup-20260413-213000.tar.gz", "timestamp": "2026-04-13T21:30:00+00:00", "size_bytes": 52428800, "created_by": "manager", "databases": ["auth", "characters", "mangos", "logs"]}),
+    "config": module.render_config_panel(snapshot),
     "player": module.render_player_details(snapshot["players"][0], len(snapshot["players"])),
     "empty_player": module.render_player_details(None, 0),
     "logs": module.render_logs_panel(snapshot),
@@ -2029,9 +2064,11 @@ PY
 
     compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
 
-    assert_true "[[ \$compact_output == *'READY'* && \$compact_output == *'Accounts'* && \$compact_output == *'commanddeck'* && \$compact_output == *'refresh[/]2s'* ]]" "dashboard action banner exposes tone, view, interval, and command-deck framing" || all_passed=1
+    assert_true "[[ \$compact_output == *'VMaNGOSManager'* && \$compact_output == *'realmconsole'* && \$compact_output == *'Accounts'* && \$compact_output == *'result[/][bold#34d399]READY'* && \$compact_output == *'ThisView[/]Provision,secure,andmoderateaccountswithoutleavingtheconsole.'* ]]" "dashboard action banner exposes app framing, active view, and result state" || all_passed=1
     assert_true "[[ \$compact_output == *'VMaNGOSManager'* && \$compact_output == *'RealmPulse'* && \$compact_output == *'Players[/]1online'* && \$compact_output == *'Backups[/]3known'* && \$compact_output == *'ActiveHotkeys'* && \$compact_output == *'l[/]rotatelogs'* && \$compact_output == *'P[/]updateplan'* ]]" "dashboard sidebar exposes live pulse summary, operator framing, and operations keys" || all_passed=1
     assert_true "[[ \$compact_output == *'HostMetrics'* && \$compact_output == *'Recentwindow[/]4samples/~6s'* && \$compact_output == *'CPU[/]31.5%'* && \$compact_output == *'Players[/]1online'* && \$compact_output == *'Logs[/]'* ]]" "dashboard metrics panel blends current state with monitoring trend context" || all_passed=1
+    assert_true "[[ \$compact_output == *'ScheduleState'* && \$compact_output == *'Daily[/]'* && \$compact_output == *'daily04:00'* && \$compact_output == *'Coverage[/]schedulecreate/replaceliveshere;cleanupandtimerremovalstilluseCLIorsystemd.'* ]]" "dashboard backups panel exposes configured timer state and current coverage boundary" || all_passed=1
+    assert_true "[[ \$compact_output == *'ConfigOverview'* && \$compact_output == *'DBSecret[/]inlinevaluemasked'* && \$compact_output == *'Read-only[/]validateandreviewwiringhere;editmanager.confand.dbpassintheshell.'* && \$compact_output != *'ConfigPreview'* ]]" "dashboard config panel is read-only and masks sensitive configuration handling" || all_passed=1
     assert_true "[[ \$compact_output == *'Selected[/][bold#2dd4bf]PLAYERONE'* && \$compact_output == *'Operatormove[/]switchto[bold#f59e0b]Accounts[/]forpassword,GM,andbanactions.'* ]]" "dashboard player details emphasize the selected player workflow" || all_passed=1
     assert_true "[[ \$compact_output == *'Snapshot[/]noactiveplayerrowselected'* && \$compact_output == *'chooseaplayerrowwhensomeonelogsin.'* ]]" "dashboard empty player state explains next operator step" || all_passed=1
     assert_true "[[ \$compact_output == *'LogsHealth'* && \$compact_output == *'Rotationhygiene,retention,andstoragepressure.'* && \$compact_output == *'Retention[/]max=100Mmin=1M'* ]]" "dashboard logs panel summarizes health and retention" || all_passed=1
@@ -3056,6 +3093,52 @@ test_backup_schedule_parsing() {
     return $all_passed
 }
 
+test_backup_schedule_status_reports_timer_state() {
+    # shellcheck source=../lib/backup.sh
+    source "$LIB_DIR/backup.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0 output compact_output temp_dir
+    temp_dir=$(mktemp -d)
+    BACKUP_SYSTEMD_DIR="$temp_dir/systemd"
+    mkdir -p "$BACKUP_SYSTEMD_DIR"
+
+    cat > "$BACKUP_SYSTEMD_DIR/vmangos-backup-daily.timer" <<'EOF'
+[Unit]
+Description=Run VMANGOS backup daily at 04:00
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+EOF
+
+    backup_systemctl() {
+        case "$1 ${2:-}" in
+            "is-enabled vmangos-backup-daily.timer"|\
+            "is-active vmangos-backup-daily.timer")
+                return 0
+                ;;
+            "show vmangos-backup-daily.timer")
+                printf '%s\n' "2026-04-20 04:00:00 UTC"
+                return 0
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    }
+
+    output=$(backup_schedule_status json)
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+
+    assert_true "[[ \$compact_output == *'\"configured_count\":1'* ]]" "backup schedule status counts configured timers" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"id\":\"daily\",\"timer\":\"vmangos-backup-daily.timer\",\"present\":true,\"enabled\":true,\"active\":true,\"configured\":\"daily04:00\"'* ]]" "backup schedule status reports configured daily timer" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"id\":\"weekly\",\"timer\":\"vmangos-backup-weekly.timer\",\"present\":false'* ]]" "backup schedule status reports missing weekly timer" || all_passed=1
+
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
 test_backup_filename_generation() {
     # shellcheck source=../lib/backup.sh
     source "$LIB_DIR/backup.sh"
@@ -3440,6 +3523,7 @@ main() {
     run_test "Schedule: Conflict warning" test_schedule_warns_on_overlap
     run_test "Backup: Metadata generation" test_backup_metadata_generation
     run_test "Backup: Schedule parsing" test_backup_schedule_parsing
+    run_test "Backup: Schedule status" test_backup_schedule_status_reports_timer_state
     run_test "Backup: Filename generation" test_backup_filename_generation
     run_test "Backup: Service unit generation" test_backup_service_unit_generation
     run_test "Backup: Manager bin resolution" test_backup_resolve_manager_bin_from_config_path

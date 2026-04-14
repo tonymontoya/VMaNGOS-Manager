@@ -144,6 +144,7 @@ Use it to:
 - confirm when the latest backup was taken
 - verify a backup before trusting it
 - dry-run a restore plan
+- review the currently configured backup timers
 - queue daily or weekly backup scheduling
 
 Recommended habit:
@@ -153,6 +154,12 @@ Recommended habit:
 3. Use `d` to review a restore dry-run before a real restore event ever happens.
 
 This is one of the biggest quality-of-life wins in Manager. Backup discipline becomes part of the normal operator experience instead of a separate ritual.
+
+Current boundary:
+
+- the dashboard shows backup directory, inventory, and configured timer state
+- creating or replacing daily and weekly backup timers is available in the dashboard
+- cleanup policy changes, timer removal, and deeper backup surgery still live in the CLI or systemd today
 
 ## Config View
 
@@ -165,13 +172,18 @@ Use it to:
 - validate the current `manager.conf`
 - confirm install root, service names, database host, and DB names
 - sanity-check backup directory wiring
-- preview the effective config without opening files manually
+- confirm how Manager is sourcing DB credentials without exposing them in plaintext
 
 This screen is especially valuable after:
 
 - adopting an existing host
 - changing service names or install paths
 - reinstalling Manager onto a machine with an older realm layout
+
+Release C boundary:
+
+- this view is intentionally read-only
+- edit `manager.conf` and `.dbpass` in the shell, then return here to validate the result
 
 If the Config view looks wrong, fix that before you trust any higher-level workflow.
 
@@ -235,6 +247,18 @@ The dashboard should be your main control surface, but the CLI still matters whe
 - raw JSON output for integration or debugging
 - non-interactive host workflows
 - command-by-command precision for an unusual task
+
+## Dashboard Coverage Today
+
+This is the current dashboard-to-CLI split for Release C:
+
+| Area | In dashboard now | Still outside the dashboard |
+| --- | --- | --- |
+| Server | status, start, stop, restart | text watch mode, raw JSON output |
+| Accounts | create, password reset, GM changes, ban, unban, account visibility | scripted bulk workflows |
+| Backups | inventory, backup now, verify, restore dry-run, timer visibility, daily/weekly timer create | cleanup, timer removal, live restore |
+| Config | validation plus read-only wiring summary | config creation, detect, show, and file editing |
+| Operations | logs rotate/test, honor and restart scheduling, schedule cancel, update planning visibility | update apply and other source-tree workflows |
 
 Use these supporting docs when you need that lower-level surface:
 
