@@ -80,7 +80,7 @@ The dashboard is organized into five views:
 - `Config`
 - `Ops`
 
-The footer shows the most important hotkeys for the active screen, while the sidebar keeps the realm pulse visible at all times.
+The command rail shows the most important actions for the active screen, while the sidebar keeps navigation and realm pulse visible at all times.
 
 ## How To Read The Screen
 
@@ -88,6 +88,7 @@ The dashboard works best when each region has a clear job:
 
 - the top banner tells you the active view, why that view exists, and the result of the last action
 - the sidebar is always-on navigation plus realm pulse
+- the command rail is the single action surface for navigation, refresh, and view-specific work
 - the main panels are where view-specific work happens
 
 The rule to keep in mind is simple:
@@ -115,7 +116,7 @@ What it is best at:
 
 - checking whether `auth` and `world` are healthy
 - seeing CPU, memory, load, disk, player count, and short-term trends
-- spotting whether players are actually online
+- spotting whether players are actually online and whether staff are present
 - jumping quickly into stop, start, restart, backup, verify, and config validation actions
 
 Use this view when:
@@ -127,9 +128,14 @@ Use this view when:
 Panel roles in this view:
 
 - `Realm Services` is the fast service and DB pulse
-- `Host Metrics` is the machine-level pressure panel
-- `Online Players` is the current list view
-- `Player Details` is intentionally scoped to the selected player row, not to global realm counts
+- `Host Metrics` is the machine-level pressure panel only
+- `Player Pulse` is the summary-first player panel: online count, trend, GM presence, and roster signal
+- `Alerts and Events` is the fast-read maintenance and risk panel
+
+The full online roster is still available, but it is now a drill-down instead of taking over summary space:
+
+- press `o` from `Overview` to open the live online roster
+- press `Enter` from that roster to jump straight into the selected account in `Accounts`
 
 ## Accounts View
 
@@ -149,7 +155,7 @@ Recommended flow:
 
 1. Move to `Accounts` with `2`.
 2. Highlight the account you care about.
-3. Use the hotkeys shown in the footer: `c`, `p`, `g`, `n`, `u`.
+3. Use the command rail actions for this view: `c`, `p`, `g`, `n`, `u`.
 4. Let the dashboard feed you back into the updated table state after the action completes.
 
 This is especially useful for GMs and operators who do not want to remember a pile of account-management command forms.
@@ -182,6 +188,7 @@ This is one of the biggest quality-of-life wins in Manager. Backup discipline be
 Current boundary:
 
 - the dashboard shows backup directory, inventory, and configured timer state
+- the left panel is now split between realm backup state and selected backup readiness
 - creating or replacing daily and weekly backup timers is available in the dashboard
 - cleanup policy changes, timer removal, and deeper backup surgery still live in the CLI or systemd today
 
@@ -232,6 +239,8 @@ Recommended flow before a realm update:
 2. Generate or refresh the update plan.
 3. Take and verify a backup.
 4. Only then move into a real update workflow.
+
+The command rail matters here because this screen combines multiple maintenance workflows. If a task is not in the rail, it is probably still a CLI-first path for now.
 
 ## Updates Workflow
 

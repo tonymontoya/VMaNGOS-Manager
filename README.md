@@ -103,7 +103,7 @@ Inside the dashboard you get:
 
 - auth/world service health, PID, uptime, and control actions
 - host CPU, memory, disk, load, disk I/O, and short-term monitoring trends
-- online player visibility and account inspection
+- player pulse summary, GM presence, alert visibility, and online roster drilldown
 - backup visibility plus verify, schedule, and restore dry-run entry points
 - account workflows for create, password reset, GM level changes, and ban or unban actions
 - log rotation and config visibility for safer day-two operations
@@ -115,7 +115,8 @@ It keeps the deployment terminal-first while still giving admins something that 
 The dashboard is organized around a simple split:
 
 - the top banner tells you where you are, what that view is for, and what the last action did
-- the left sidebar keeps realm pulse and active hotkeys visible from every screen
+- the left sidebar keeps navigation and realm pulse visible from every screen
+- the bottom command rail is the canonical action surface for the current view
 - the main panels are view-specific and should stay scoped to the thing they are showing
 
 That last point matters. Summary counts belong in summary panels. Detail panes are meant to stay item-scoped: selected player, selected account, selected backup, selected job.
