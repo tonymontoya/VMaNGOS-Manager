@@ -2101,6 +2101,70 @@ PY
     return $all_passed
 }
 
+test_dashboard_snapshot_fixture_helpers() {
+    local all_passed=0 output compact_output
+
+    output=$(python3 - "$MANAGER_DIR/lib/dashboard.py" <<'PY'
+import importlib.util
+import json
+import os
+import sys
+import tempfile
+
+spec = importlib.util.spec_from_file_location("dashboard_module", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+payload = {
+    "captured_at": "2026-04-14T05:22:18+00:00",
+    "metric_history": [
+        {"captured_at": "2026-04-14T05:22:14+00:00", "cpu": "38.5", "memory": 58, "load": 1.53, "disk": 24, "players": 47, "io": 24.5},
+        {"captured_at": "2026-04-14T05:22:16+00:00", "cpu": 41.0, "memory": 61, "load": 1.68, "disk": 24, "players": 50, "io": 27.5},
+    ],
+    "server": {
+        "ok": True,
+        "data": {
+            "checks": {"disk_space": {"used_percent": 24}},
+            "players": {"online": 50},
+            "host": {
+                "cpu": {"usage_percent": 42.3},
+                "memory": {"used_percent": 62.5},
+                "load": {"load_1": 1.74},
+            },
+            "storage_io": {"available": True, "util_percent": 29.1},
+        },
+    },
+    "players": [{"id": 2001, "username": "RAIDER01", "gm_level": 3, "online": True, "banned": False}],
+}
+
+with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:
+    json.dump(payload, handle)
+    fixture_path = handle.name
+
+try:
+    snapshot = module.load_snapshot_fixture(fixture_path)
+    seeded = module.extract_seed_metric_history(snapshot)
+    history = module.append_monitoring_sample(seeded, snapshot)
+    print(json.dumps({
+        "seeded_len": len(seeded),
+        "history_len": len(history),
+        "window": module.history_window_label(history, 2),
+        "last_players": history[-1]["players"],
+        "first_username": snapshot["players"][0]["username"],
+    }, sort_keys=True))
+finally:
+    os.unlink(fixture_path)
+PY
+)
+
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+
+    assert_true "[[ \$compact_output == *'\"seeded_len\":2'* && \$compact_output == *'\"history_len\":3'* && \$compact_output == *'\"window\":\"3samples/~4s\"'* ]]" "dashboard snapshot fixture helpers seed history from fixture payloads" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"last_players\":50.0'* && \$compact_output == *'\"first_username\":\"RAIDER01\"'* ]]" "dashboard snapshot fixture helpers preserve fixture player state" || all_passed=1
+
+    return $all_passed
+}
+
 test_server_player_count_fallback() {
     # shellcheck source=../lib/server.sh
     source "$LIB_DIR/server.sh"
@@ -3311,6 +3375,7 @@ main() {
     run_test "Dashboard: Action requests" test_dashboard_action_request_builder
     run_test "Dashboard: Render helpers" test_dashboard_render_helpers
     run_test "Dashboard: Monitoring history" test_dashboard_monitoring_history_helpers
+    run_test "Dashboard: Snapshot fixture helpers" test_dashboard_snapshot_fixture_helpers
     run_test "Server: Player count fallback" test_server_player_count_fallback
     run_test "Server: Interval validation" test_server_validate_interval
     run_test "Server: Start fails on DB preflight" test_server_start_fails_when_database_unreachable

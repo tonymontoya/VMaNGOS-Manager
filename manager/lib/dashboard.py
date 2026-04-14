@@ -92,6 +92,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--theme", choices=("dark", "light"), default="dark", help="Dashboard theme")
     parser.add_argument("--screenshot", help="Write an SVG screenshot after the first refresh and exit")
     parser.add_argument(
+        "--snapshot-file",
+        help="Load dashboard data from a snapshot JSON fixture instead of live manager commands",
+    )
+    parser.add_argument(
         "--snapshot-json",
         action="store_true",
         help="Print a single aggregated snapshot as JSON and exit",
@@ -747,6 +751,37 @@ def empty_snapshot(error_message: str) -> dict[str, Any]:
     }
 
 
+def load_snapshot_fixture(snapshot_file: str) -> dict[str, Any]:
+    with open(snapshot_file, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("snapshot fixture must be a JSON object")
+    return payload
+
+
+def extract_seed_metric_history(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_history = snapshot.get("metric_history", [])
+    if not isinstance(raw_history, list):
+        return []
+
+    history: list[dict[str, Any]] = []
+    for entry in raw_history:
+        if not isinstance(entry, dict):
+            continue
+        history.append(
+            {
+                "captured_at": str(entry.get("captured_at", "") or ""),
+                "cpu": parse_optional_float(entry.get("cpu")),
+                "memory": parse_optional_float(entry.get("memory")),
+                "load": parse_optional_float(entry.get("load")),
+                "disk": parse_optional_float(entry.get("disk")),
+                "players": parse_optional_float(entry.get("players")),
+                "io": parse_optional_float(entry.get("io")),
+            }
+        )
+    return history[-TREND_HISTORY_LIMIT:]
+
+
 def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
     server = run_manager_command(
         manager_bin,
@@ -1393,6 +1428,7 @@ def create_app(
     refresh: int,
     theme: str,
     screenshot_path: str | None,
+    snapshot_file: str | None = None,
 ):
     os.environ.setdefault("TEXTUAL_COLOR_SYSTEM", "truecolor")
     if screenshot_path:
@@ -1815,6 +1851,7 @@ def create_app(
             self.refresh_interval = refresh
             self.theme_name = theme
             self.screenshot_path = screenshot_path
+            self.snapshot_file = snapshot_file
             self.screenshot_taken = False
             self.screenshot_pending = False
             self.active_view = "overview"
@@ -1941,13 +1978,18 @@ def create_app(
 
         def refresh_snapshot_worker(self) -> None:
             try:
-                snapshot = build_snapshot(self.manager_bin, self.config_path)
+                if self.snapshot_file:
+                    snapshot = load_snapshot_fixture(self.snapshot_file)
+                else:
+                    snapshot = build_snapshot(self.manager_bin, self.config_path)
             except Exception as exc:
                 snapshot = empty_snapshot(f"snapshot refresh failed: {exc}")
             self.call_from_thread(self.apply_snapshot, snapshot)
 
         def apply_snapshot(self, snapshot: dict[str, Any]) -> None:
             self.snapshot = snapshot
+            if not self.metric_history:
+                self.metric_history = extract_seed_metric_history(snapshot)
             self.metric_history = append_monitoring_sample(self.metric_history, snapshot)
             self.refresh_inflight = False
             self.query_one("#service-pane", Static).update(render_service_panel(snapshot, self.active_view))
@@ -2542,7 +2584,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        app = create_app(args.manager_bin, args.config, args.refresh, args.theme, args.screenshot)
+        app = create_app(args.manager_bin, args.config, args.refresh, args.theme, args.screenshot, args.snapshot_file)
     except DashboardRuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
