@@ -121,7 +121,7 @@ The dashboard is organized around a simple split:
 - the bottom command rail is the canonical action surface for the current view
 - the main panels are view-specific and should stay scoped to the thing they are showing
 
-That last point matters. Summary panels should answer operator decisions first. Inventory tables feed selected-detail panes, and selected-detail panes stay item-scoped: selected player, selected account, selected backup, selected job.
+That last point matters. Summary panels should answer operator decisions first. Inventory tables feed selected-detail panes, and selected-detail panes stay item-scoped: selected player, selected account, selected backup, selected schedule.
 
 ## What The Dashboard Covers Today
 
@@ -133,7 +133,7 @@ The dashboard already covers the work most realm operators do every week. The CL
 | Accounts | account inventory, create, reset password, set GM, ban, unban, visibility | scripted bulk workflows |
 | Backups | backup readiness, inventory, create, verify, restore dry-run, timer visibility, daily/weekly timer create | cleanup, timer removal, real restore |
 | Config | validation plus read-only configuration wiring summary | detect, create, show, file editing |
-| Operations | maintenance queue, run-job/restart scheduling, cancel job, update readiness, log guardrails | update apply and source-tree work |
+| Operations | maintenance queue, maintenance/restart scheduling, cancel schedule, update readiness, log guardrails | update apply and source-tree work |
 
 The user guide tracks these boundaries in more detail and is the best place to see the current product surface with screenshots.
 

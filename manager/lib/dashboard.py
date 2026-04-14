@@ -400,7 +400,7 @@ def iso_to_clock(value: Any) -> str:
 def schedule_job_type_label(job_type: Any) -> str:
     normalized = str(job_type or "").strip().lower()
     if normalized == "honor":
-        return "run job"
+        return "maintenance"
     if not normalized:
         return "n/a"
     return normalized.replace("_", " ")
@@ -491,9 +491,9 @@ def view_command_tokens(active_view: str) -> list[tuple[str, str]]:
         ]
     if active_view == "operations":
         return [
-            ("h", "run job"),
-            ("m", "restart job"),
-            ("j", "cancel job"),
+            ("h", "schedule maintenance"),
+            ("m", "schedule restart"),
+            ("j", "cancel schedule"),
             ("P", "update plan"),
             ("T", "test logs"),
             ("l", "rotate logs"),
@@ -726,7 +726,7 @@ def build_dashboard_action_request(
                 command.extend(["--announce", announce])
 
         cadence = f"{schedule_type} {day} {time_value}".strip()
-        label = f"schedule {'run job' if action_name == 'schedule_honor_create' else 'restart'} {cadence}"
+        label = f"schedule {'maintenance' if action_name == 'schedule_honor_create' else 'restart'} {cadence}"
         return {
             "label": label,
             "command": command,
@@ -741,7 +741,7 @@ def build_dashboard_action_request(
             return {"error": "schedule cancel skipped: no job selected"}
         schedule_id = str(schedule.get("id", "")).strip()
         if not schedule_id:
-            return {"error": "schedule cancel skipped: selected job has no id"}
+            return {"error": "schedule cancel skipped: selected schedule has no id"}
         return {
             "label": f"schedule cancel {schedule_id}",
             "command": ["schedule", "cancel", schedule_id],
@@ -1670,7 +1670,7 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
     lines.extend(
         [
             f"[{ACCENT_MUTED}]Overall[/]       {format_state(readiness)}",
-            f"[{ACCENT_MUTED}]Queue[/]         {queue_count} scheduled job{'s' if queue_count != 1 else ''}",
+            f"[{ACCENT_MUTED}]Queue[/]         {queue_count} scheduled task{'s' if queue_count != 1 else ''}",
             f"[{ACCENT_MUTED}]Logs[/]          {format_state(data.get('status', 'unavailable'))}",
             f"[{ACCENT_MUTED}]Rotation[/]      {format_state(config_state)}  present={config.get('present', False)}  in_sync={config.get('in_sync', False)}",
             f"[{ACCENT_MUTED}]Sensitive[/]     {format_state(sensitive_state)}  perms_ok={log_counts.get('sensitive_permissions_ok', False)}",
@@ -1678,7 +1678,7 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
             f"[{ACCENT_MUTED}]Headroom[/]      {disk.get('used_percent', 0)}% used  free {format_gb_from_kb(disk.get('available_kb', 0))}",
             f"[{ACCENT_MUTED}]Retention[/]     max={policy.get('max_size', 'n/a')}  min={policy.get('min_size', 'n/a')}",
             "",
-            f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] run job  [bold {ACCENT_GOLD}]m[/] restart job",
+            f"[{ACCENT_MUTED}]Schedule Here[/] [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
             f"[{ACCENT_MUTED}]Support[/]       [bold {ACCENT_GOLD}]T[/] test logs  [bold {ACCENT_GOLD}]l[/] rotate logs",
         ]
     )
@@ -1773,9 +1773,9 @@ def render_schedule_intro(schedules: list[dict[str, Any]]) -> str:
     count = len(schedules)
     return "\n".join(
         [
-            f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] run job  [bold {ACCENT_GOLD}]m[/] restart job",
-            f"[{ACCENT_MUTED}]Queue Source[/]  jobs appear here after dashboard scheduling or the matching [bold {ACCENT_GOLD}]schedule[/] CLI commands.",
-            f"[{ACCENT_MUTED}]Now[/]           {count} scheduled job{'s' if count != 1 else ''} in the queue.",
+            f"[{ACCENT_MUTED}]Schedule Here[/] [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
+            f"[{ACCENT_MUTED}]Queue Source[/]  schedules appear here after dashboard scheduling or the matching [bold {ACCENT_GOLD}]schedule[/] CLI commands.",
+            f"[{ACCENT_MUTED}]Now[/]           {count} scheduled task{'s' if count != 1 else ''} in the queue.",
         ]
     )
 
@@ -1784,19 +1784,19 @@ def render_schedule_details(
     schedule: dict[str, Any] | None,
     total_schedules: int,
 ) -> str:
-    queue_label = f"{total_schedules} queued job{'s' if total_schedules != 1 else ''}"
+    queue_label = f"{total_schedules} scheduled task{'s' if total_schedules != 1 else ''}"
     if not schedule:
         return "\n".join(
             [
-                f"[bold {ACCENT_GOLD}]Selected Job[/]",
+                f"[bold {ACCENT_GOLD}]Selected Schedule[/]",
                 f"[{ACCENT_MUTED}]Origin, cadence, and next action for the highlighted schedule.[/]",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]     choose a job row from the queue to inspect or cancel it.",
                 f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
                 "",
-                f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] run job  [bold {ACCENT_GOLD}]m[/] restart job",
+                f"[{ACCENT_MUTED}]Schedule Here[/] [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
                 f"[{ACCENT_MUTED}]CLI Path[/]      [bold {ACCENT_GOLD}]schedule honor[/] or [bold {ACCENT_GOLD}]schedule restart[/]",
-                f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] cancel the selected job once one is highlighted.",
+                f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] cancel the selected schedule once one is highlighted.",
             ]
         )
 
@@ -1804,11 +1804,11 @@ def render_schedule_details(
     announce_message = str(schedule.get("announce_message", "") or "none")
     return "\n".join(
         [
-            f"[bold {ACCENT_GOLD}]Selected Job[/]",
+            f"[bold {ACCENT_GOLD}]Selected Schedule[/]",
             f"[{ACCENT_MUTED}]Origin, cadence, and next action for the highlighted schedule.[/]",
             "",
             f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
-            f"[{ACCENT_MUTED}]Job ID[/]        {escape_markup(schedule.get('id', 'n/a'))}",
+            f"[{ACCENT_MUTED}]Schedule ID[/]   {escape_markup(schedule.get('id', 'n/a'))}",
             f"[{ACCENT_MUTED}]Type[/]          {escape_markup(schedule_job_type_label(schedule.get('job_type', 'n/a')))}",
             f"[{ACCENT_MUTED}]Origin[/]        {escape_markup(schedule_origin_label(schedule))}",
             f"[{ACCENT_MUTED}]Cadence[/]       {escape_markup(schedule.get('schedule_type', 'n/a'))}",
@@ -1817,8 +1817,8 @@ def render_schedule_details(
             f"[{ACCENT_MUTED}]Warnings[/]      {escape_markup(warnings)}",
             f"[{ACCENT_MUTED}]Announce[/]      {escape_markup(announce_message)}",
             "",
-            f"[{ACCENT_MUTED}]Create More[/]   [bold {ACCENT_GOLD}]h[/] run job  [bold {ACCENT_GOLD}]m[/] restart job",
-            f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] remove this job if the schedule is no longer desired.",
+            f"[{ACCENT_MUTED}]Schedule More[/] [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
+            f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] remove this schedule if it is no longer desired.",
         ]
     )
 
@@ -2444,13 +2444,13 @@ def create_app(
             ("u", "unban_account", "Unban"),
             ("l", "rotate_logs", "Rotate Logs"),
             ("T", "test_logs_config", "Test Logs"),
-            ("h", "create_honor_schedule", "Run Job"),
-            ("m", "create_restart_schedule", "Restart Job"),
+            ("h", "create_honor_schedule", "Schedule Maintenance"),
+            ("m", "create_restart_schedule", "Schedule Restart"),
             ("P", "refresh_update_plan", "Update Plan"),
             ("d", "restore_selected_backup_dry_run", "Dry Run"),
             ("y", "schedule_daily_backup", "Daily"),
             ("w", "schedule_weekly_backup", "Weekly"),
-            ("j", "cancel_selected_schedule", "Cancel Job"),
+            ("j", "cancel_selected_schedule", "Cancel Schedule"),
             ("k", "validate_config", "Validate"),
             ("1", "show_overview", "Overview"),
             ("2", "show_monitor", "Monitor"),
@@ -3040,7 +3040,7 @@ def create_app(
             self.apply_view_state()
             self.open_command_form(
                 "schedule_honor_create",
-                "Schedule Run Job",
+                "Schedule Maintenance",
                 "Schedule",
                 [
                     {"name": "schedule_type", "label": "Cadence (daily|weekly)", "value": "daily", "placeholder": "daily"},
@@ -3056,7 +3056,7 @@ def create_app(
             self.apply_view_state()
             self.open_command_form(
                 "schedule_restart_create",
-                "Schedule Restart Job",
+                "Schedule Restart",
                 "Schedule",
                 [
                     {"name": "schedule_type", "label": "Cadence (daily|weekly)", "value": "weekly", "placeholder": "weekly"},
@@ -3079,15 +3079,15 @@ def create_app(
             if schedule is None:
                 self.set_action_result("schedule cancel skipped: no job selected", tone="warning")
                 return
-            schedule_id = str(schedule.get("id", "selected job")).strip()
+            schedule_id = str(schedule.get("id", "selected schedule")).strip()
             self.active_view = "operations"
             self.apply_view_state()
             self.open_command_form(
                 "schedule_cancel",
-                "Cancel Scheduled Job",
-                "Cancel Job",
+                "Cancel Schedule",
+                "Cancel Schedule",
                 [],
-                f"Remove scheduled job {schedule_id} from Manager and systemd.",
+                f"Remove scheduled task {schedule_id} from Manager and systemd.",
             )
 
         def request_update_plan_refresh(self) -> None:

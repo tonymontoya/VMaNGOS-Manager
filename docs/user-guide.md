@@ -259,17 +259,17 @@ Operations is the maintenance scheduling and change-window screen.
 Use it for:
 
 - deciding whether the host is ready for scheduled maintenance
-- creating run or restart jobs from the Ops surface
+- scheduling maintenance tasks or restart windows from the Ops surface
 - seeing what maintenance is already queued
-- inspecting or canceling a selected run or restart job
+- inspecting or canceling a selected schedule
 - reviewing update readiness and DB impact before risky source changes
 
 Read it in this order:
 
 1. Start with `Change Window Readiness` to confirm logs, storage, and queue state look safe enough for maintenance work.
-2. Use the on-screen create paths to schedule a `run job` or `restart job` from the Ops surface.
+2. Use the on-screen schedule paths to create a maintenance task or scheduled restart from the Ops surface.
 3. Review `Scheduled Maintenance` to confirm what is already queued and when it will fire.
-4. Use `Selected Job` to inspect origin, cadence, warnings, and cancellation impact for the highlighted item.
+4. Use `Selected Schedule` to inspect origin, cadence, warnings, and cancellation impact for the highlighted item.
 5. Use `Update Readiness` when the next change involves source pulls or database movement.
 
 Recommended flow before a realm update:
@@ -334,7 +334,7 @@ Use the dashboard for everyday operation, then drop to the CLI for the narrower 
 | Accounts | account inventory, create, password reset, GM changes, ban, unban, account visibility | scripted bulk workflows |
 | Backups | backup readiness, inventory, backup now, verify, restore dry-run, timer visibility, daily/weekly timer create | cleanup, timer removal, live restore |
 | Config | validation plus read-only configuration wiring summary | config creation, detect, show, and file editing |
-| Operations | maintenance queue, run-job and restart scheduling, schedule cancel, logs guardrails, update planning visibility | update apply and other source-tree workflows |
+| Operations | maintenance queue, maintenance/restart scheduling, schedule cancel, logs guardrails, update planning visibility | update apply and other source-tree workflows |
 
 Use these supporting docs when you need that lower-level surface:
 
