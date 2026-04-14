@@ -35,6 +35,15 @@ ACCENT_SKY = "#7dd3fc"
 ACCENT_TEAL = "#2dd4bf"
 ACCENT_ROSE = "#fb7185"
 ACCENT_MUTED = "#cbd5e1"
+ACCENT_GREEN = "#34d399"
+
+ACTION_STYLES = {
+    "info": ("STANDBY", ACCENT_SKY),
+    "running": ("RUNNING", ACCENT_GOLD),
+    "success": ("READY", ACCENT_GREEN),
+    "warning": ("CHECK", ACCENT_GOLD),
+    "error": ("ERROR", ACCENT_ROSE),
+}
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9]{2,32}$")
 GM_LEVEL_PATTERN = re.compile(r"^[0-3]$")
@@ -161,6 +170,19 @@ def format_state(value: Any) -> str:
     text = str(value or "unknown")
     color = STATUS_COLORS.get(text, "white")
     return f"[bold {color}]{text}[/]"
+
+
+def format_flag(
+    value: Any,
+    *,
+    true_text: str = "yes",
+    false_text: str = "no",
+    true_color: str = ACCENT_GREEN,
+    false_color: str = ACCENT_MUTED,
+) -> str:
+    if value:
+        return f"[bold {true_color}]{true_text}[/]"
+    return f"[bold {false_color}]{false_text}[/]"
 
 
 def truncate_text(value: Any, max_length: int = 76) -> str:
@@ -569,13 +591,40 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
     }
 
 
-def render_sidebar(active_view: str, last_action: str) -> str:
+def render_action_banner(
+    active_view: str,
+    snapshot: dict[str, Any],
+    last_action: str,
+    action_tone: str,
+    refresh_interval: int,
+) -> str:
+    tone_label, tone_color = ACTION_STYLES.get(action_tone, ACTION_STYLES["info"])
+    captured_at = iso_to_display(snapshot.get("captured_at"))
+    message = escape_markup(truncate_text(last_action or "dashboard started", 140))
+    return "\n".join(
+        [
+            f"[bold {tone_color}]{tone_label}[/]  [{ACCENT_MUTED}]view[/] [bold {ACCENT_GOLD}]{active_view.title()}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s  [{ACCENT_MUTED}]snapshot[/] {captured_at}",
+            "",
+            message,
+        ]
+    )
+
+
+def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any], refresh_interval: int) -> str:
     sections = [
         ("overview", "1", "Overview"),
         ("accounts", "2", "Accounts"),
         ("backups", "3", "Backups"),
         ("config", "4", "Config"),
     ]
+
+    server = snapshot.get("server", {})
+    server_data = server.get("data", {}) if server.get("ok") else {}
+    services = server_data.get("services", {})
+    auth = services.get("auth", {})
+    world = services.get("world", {})
+    backups = snapshot.get("backups", {}).get("summary", {})
+    players_online = len(snapshot.get("players", []))
 
     lines = [f"[bold {ACCENT_GOLD}]Manager Console[/]", "", f"[bold {ACCENT_SKY}]Views[/]"]
     for name, key, label in sections:
@@ -587,11 +636,18 @@ def render_sidebar(active_view: str, last_action: str) -> str:
     lines.extend(
         [
             "",
-            f"[bold {ACCENT_SKY}]Actions[/]",
+            f"[bold {ACCENT_SKY}]Realm Pulse[/]",
+            f"[{ACCENT_MUTED}]Refresh[/]  {refresh_interval}s",
+            f"[{ACCENT_MUTED}]Players[/]  {players_online} online",
+            f"[{ACCENT_MUTED}]Backups[/]  {backups.get('count', 0)} known",
+            f"[{ACCENT_MUTED}]Auth[/]     {format_state(auth.get('health', auth.get('state', 'unavailable')))}",
+            f"[{ACCENT_MUTED}]World[/]    {format_state(world.get('health', world.get('state', 'unavailable')))}",
+            "",
+            f"[bold {ACCENT_SKY}]Quick Keys[/]",
             *render_context_actions(active_view),
             "",
-            f"[bold {ACCENT_SKY}]Last Action[/]",
-            f"[{ACCENT_MUTED}]{escape_markup(truncate_text(last_action, 80)) or 'dashboard started'}[/]",
+            f"[bold {ACCENT_SKY}]Last Result[/]",
+            f"[{ACCENT_MUTED}]{escape_markup(truncate_text(last_action, 68)) or 'dashboard started'}[/]",
         ]
     )
     return "\n".join(lines)
@@ -684,15 +740,17 @@ def render_metrics_panel(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_player_details(player: dict[str, Any] | None) -> str:
+def render_player_details(player: dict[str, Any] | None, online_count: int) -> str:
     if not player:
         return "\n".join(
             [
                 f"[bold {ACCENT_GOLD}]Player Details[/]",
                 "",
-                f"[{ACCENT_MUTED}]No online players.[/]",
+                f"[{ACCENT_MUTED}]Online now[/]   [bold {ACCENT_GOLD}]{online_count}[/]",
                 "",
-                f"[{ACCENT_MUTED}]See[/] [bold {ACCENT_GOLD}]Accounts[/]",
+                f"[{ACCENT_MUTED}]Selection[/]    choose a player row when someone logs in.",
+                "",
+                f"[{ACCENT_MUTED}]Workflow[/]     use [bold {ACCENT_GOLD}]2[/] [bold {ACCENT_GOLD}]Accounts[/] for account actions.",
             ]
         )
 
@@ -700,13 +758,14 @@ def render_player_details(player: dict[str, Any] | None) -> str:
         [
             f"[bold {ACCENT_GOLD}]Player Details[/]",
             "",
-            f"[{ACCENT_MUTED}]ID[/]         [bold {ACCENT_SKY}]{player.get('id', 0)}[/]",
-            f"[{ACCENT_MUTED}]Username[/]   [bold {ACCENT_TEAL}]{player.get('username', '-')}[/]",
-            f"[{ACCENT_MUTED}]GM Level[/]   {player.get('gm_level', 0)}",
-            f"[{ACCENT_MUTED}]Online[/]     {'yes' if player.get('online') else 'no'}",
-            f"[{ACCENT_MUTED}]Banned[/]     {'yes' if player.get('banned') else 'no'}",
+            f"[{ACCENT_MUTED}]Selected[/]     [bold {ACCENT_TEAL}]{escape_markup(player.get('username', '-'))}[/]",
+            f"[{ACCENT_MUTED}]Account ID[/]   [bold {ACCENT_SKY}]{player.get('id', 0)}[/]",
+            f"[{ACCENT_MUTED}]GM Level[/]     {player.get('gm_level', 0)}",
+            f"[{ACCENT_MUTED}]Online[/]       {format_flag(player.get('online'))}",
+            f"[{ACCENT_MUTED}]Banned[/]       {format_flag(player.get('banned'), true_color=ACCENT_ROSE)}",
+            f"[{ACCENT_MUTED}]Players now[/]  [bold {ACCENT_GOLD}]{online_count}[/]",
             "",
-            f"[{ACCENT_MUTED}]See[/] [bold {ACCENT_GOLD}]Accounts[/]",
+            f"[{ACCENT_MUTED}]Workflow[/]     switch to [bold {ACCENT_GOLD}]Accounts[/] for password, GM, and ban actions.",
         ]
     )
 
@@ -717,12 +776,12 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
             [
                 f"[bold {ACCENT_GOLD}]Account Details[/]",
                 "",
-                f"[{ACCENT_MUTED}]Accounts loaded:[/] {total_accounts}",
+                f"[{ACCENT_MUTED}]Accounts[/]     {total_accounts} loaded",
                 "",
-                f"[{ACCENT_MUTED}]Select an account row to inspect it.[/]",
+                f"[{ACCENT_MUTED}]Selection[/]    choose a row to inspect or act on an account.",
                 "",
-                f"[{ACCENT_MUTED}]Action hotkeys:[/]",
-                f"[bold {ACCENT_GOLD}]c[/]  create account",
+                f"[{ACCENT_MUTED}]Hotkeys[/]      [bold {ACCENT_GOLD}]c[/] create  [bold {ACCENT_GOLD}]p[/] password  [bold {ACCENT_GOLD}]g[/] GM",
+                f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]n[/] ban     [bold {ACCENT_GOLD}]u[/] unban",
             ]
         )
 
@@ -730,20 +789,15 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
         [
             f"[bold {ACCENT_GOLD}]Account Details[/]",
             "",
-            f"[{ACCENT_MUTED}]ID[/]         [bold {ACCENT_SKY}]{account.get('id', 0)}[/]",
-            f"[{ACCENT_MUTED}]Username[/]   [bold {ACCENT_TEAL}]{escape_markup(account.get('username', '-'))}[/]",
-            f"[{ACCENT_MUTED}]GM Level[/]   {account.get('gm_level', 0)}",
-            f"[{ACCENT_MUTED}]Online[/]     {'yes' if account.get('online') else 'no'}",
-            f"[{ACCENT_MUTED}]Banned[/]     {'yes' if account.get('banned') else 'no'}",
+            f"[{ACCENT_MUTED}]Selected[/]     [bold {ACCENT_TEAL}]{escape_markup(account.get('username', '-'))}[/]",
+            f"[{ACCENT_MUTED}]Account ID[/]   [bold {ACCENT_SKY}]{account.get('id', 0)}[/]",
+            f"[{ACCENT_MUTED}]GM Level[/]     {account.get('gm_level', 0)}",
+            f"[{ACCENT_MUTED}]Online[/]       {format_flag(account.get('online'))}",
+            f"[{ACCENT_MUTED}]Banned[/]       {format_flag(account.get('banned'), true_color=ACCENT_ROSE)}",
+            f"[{ACCENT_MUTED}]Accounts[/]     {total_accounts} loaded",
             "",
-            f"[{ACCENT_MUTED}]Accounts loaded:[/] {total_accounts}",
-            "",
-            f"[{ACCENT_MUTED}]Action hotkeys:[/]",
-            f"[bold {ACCENT_GOLD}]c[/]  create account",
-            f"[bold {ACCENT_GOLD}]p[/]  reset password",
-            f"[bold {ACCENT_GOLD}]g[/]  set GM level",
-            f"[bold {ACCENT_GOLD}]n[/]  ban account",
-            f"[bold {ACCENT_GOLD}]u[/]  unban account",
+            f"[{ACCENT_MUTED}]Hotkeys[/]      [bold {ACCENT_GOLD}]c[/] create  [bold {ACCENT_GOLD}]p[/] password  [bold {ACCENT_GOLD}]g[/] GM",
+            f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]n[/] ban     [bold {ACCENT_GOLD}]u[/] unban",
         ]
     )
 
@@ -790,53 +844,45 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
     lines = [
         f"[bold {ACCENT_GOLD}]Backups[/]",
         "",
-        f"[{ACCENT_MUTED}]Count[/]      {summary.get('count', 0)}",
-        f"[{ACCENT_MUTED}]Directory[/]  {summary.get('backup_dir', 'n/a') or 'n/a'}",
+        f"[{ACCENT_MUTED}]Count[/]       {summary.get('count', 0)}",
+        f"[{ACCENT_MUTED}]Directory[/]   {summary.get('backup_dir', 'n/a') or 'n/a'}",
     ]
 
     latest_file = summary.get("latest_file", "")
     if latest_file:
         lines.extend(
             [
-                f"[{ACCENT_MUTED}]Latest[/]     {escape_markup(latest_file)}",
-                f"[{ACCENT_MUTED}]When[/]       {iso_to_display(summary.get('latest_timestamp'))}",
-                f"[{ACCENT_MUTED}]Size[/]       {format_bytes(summary.get('latest_size_bytes', 0))}",
+                f"[{ACCENT_MUTED}]Latest[/]      {escape_markup(latest_file)}",
+                f"[{ACCENT_MUTED}]When[/]        {iso_to_display(summary.get('latest_timestamp'))}",
+                f"[{ACCENT_MUTED}]Size[/]        {format_bytes(summary.get('latest_size_bytes', 0))}",
             ]
         )
     else:
-        lines.append(f"[{ACCENT_MUTED}]Latest[/]     none")
+        lines.append(f"[{ACCENT_MUTED}]Latest[/]      none")
 
     if selected_backup:
         lines.extend(
             [
                 "",
                 f"[bold {ACCENT_SKY}]Selected Backup[/]",
-                f"[{ACCENT_MUTED}]File[/]       {escape_markup(selected_backup.get('file', 'n/a'))}",
-                f"[{ACCENT_MUTED}]When[/]       {iso_to_display(selected_backup.get('timestamp'))}",
-                f"[{ACCENT_MUTED}]Size[/]       {format_bytes(selected_backup.get('size_bytes', 0))}",
-                f"[{ACCENT_MUTED}]DBs[/]        {escape_markup(', '.join(selected_backup.get('databases', [])) or 'n/a')}",
-                f"[{ACCENT_MUTED}]Created By[/] {escape_markup(selected_backup.get('created_by', 'n/a'))}",
+                f"[{ACCENT_MUTED}]File[/]        {escape_markup(selected_backup.get('file', 'n/a'))}",
+                f"[{ACCENT_MUTED}]When[/]        {iso_to_display(selected_backup.get('timestamp'))}",
+                f"[{ACCENT_MUTED}]Size[/]        {format_bytes(selected_backup.get('size_bytes', 0))}",
+                f"[{ACCENT_MUTED}]DBs[/]         {escape_markup(', '.join(selected_backup.get('databases', [])) or 'n/a')}",
+                f"[{ACCENT_MUTED}]Created By[/]  {escape_markup(selected_backup.get('created_by', 'n/a'))}",
                 "",
-                f"[{ACCENT_MUTED}]Action hotkeys:[/]",
-                f"[bold {ACCENT_GOLD}]b[/]  run backup now --verify",
-                f"[bold {ACCENT_GOLD}]v[/]  verify selected backup",
-                f"[bold {ACCENT_GOLD}]d[/]  restore selected backup --dry-run",
-                f"[bold {ACCENT_GOLD}]y[/]  schedule daily backup",
-                f"[bold {ACCENT_GOLD}]w[/]  schedule weekly backup",
+                f"[{ACCENT_MUTED}]Hotkeys[/]     [bold {ACCENT_GOLD}]b[/] backup  [bold {ACCENT_GOLD}]v[/] verify  [bold {ACCENT_GOLD}]d[/] dry-run",
+                f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]y[/] daily   [bold {ACCENT_GOLD}]w[/] weekly",
             ]
         )
     else:
         lines.extend(
             [
                 "",
-                f"[{ACCENT_MUTED}]No backup selected.[/]",
+                f"[{ACCENT_MUTED}]Selection[/]   choose a backup row to verify or dry-run restore.",
                 "",
-                f"[{ACCENT_MUTED}]Action hotkeys:[/]",
-                f"[bold {ACCENT_GOLD}]b[/]  run backup now --verify",
-                f"[bold {ACCENT_GOLD}]v[/]  verify selected backup",
-                f"[bold {ACCENT_GOLD}]d[/]  restore selected backup --dry-run",
-                f"[bold {ACCENT_GOLD}]y[/]  schedule daily backup",
-                f"[bold {ACCENT_GOLD}]w[/]  schedule weekly backup",
+                f"[{ACCENT_MUTED}]Hotkeys[/]     [bold {ACCENT_GOLD}]b[/] backup  [bold {ACCENT_GOLD}]v[/] verify  [bold {ACCENT_GOLD}]d[/] dry-run",
+                f"[{ACCENT_MUTED}]              [bold {ACCENT_GOLD}]y[/] daily   [bold {ACCENT_GOLD}]w[/] weekly",
             ]
         )
 
@@ -1005,11 +1051,11 @@ def create_app(
         }
 
         #sidebar {
-            width: 24;
-            min-width: 24;
+            width: 30;
+            min-width: 30;
             border-right: heavy #f59e0b;
-            background: #0b1726;
-            padding: 1 1;
+            background: #081420;
+            padding: 1 2;
         }
 
         Screen.theme-light #sidebar {
@@ -1019,7 +1065,25 @@ def create_app(
 
         #content {
             width: 1fr;
+            layout: vertical;
             padding: 1 2;
+        }
+
+        #action-banner {
+            height: auto;
+            margin-bottom: 1;
+            border: round #f59e0b;
+            background: #0d1d2d;
+            padding: 1 2;
+        }
+
+        Screen.theme-light #action-banner {
+            border: round #2563eb;
+            background: #fff7e8;
+        }
+
+        #view-stack {
+            height: 1fr;
         }
 
         .view {
@@ -1058,6 +1122,13 @@ def create_app(
 
         .table-detail-title {
             height: auto;
+            color: #f8fafc;
+            text-style: bold;
+            padding-bottom: 1;
+        }
+
+        Screen.theme-light .table-detail-title {
+            color: #111827;
         }
 
         .table-detail-body {
@@ -1071,38 +1142,42 @@ def create_app(
         }
 
         .detail-pane {
-            width: 1fr;
+            width: 38%;
+            min-width: 30;
             height: 1fr;
-            margin-top: 1;
-            border-top: heavy #334155;
-            padding-top: 1;
+            margin-left: 1;
+            border-left: heavy #334155;
+            padding-left: 1;
         }
 
         Screen.theme-light .detail-pane {
-            border-top: heavy #93c5fd;
+            border-left: heavy #93c5fd;
         }
 
         #players-table {
             height: 1fr;
+            margin-top: 1;
         }
 
         #accounts-table {
-            height: 12;
+            height: 1fr;
         }
 
         #accounts-layout,
         #backups-layout {
             height: 1fr;
-            layout: vertical;
         }
 
         #backup-summary {
-            height: auto;
-            margin-bottom: 1;
+            width: 44;
+            min-width: 42;
+            height: 1fr;
+            margin-right: 1;
         }
 
         #backups-table {
             height: 1fr;
+            width: 1fr;
         }
 
         #config-pane {
@@ -1119,12 +1194,12 @@ def create_app(
         }
 
         #command-modal {
-            width: 72;
-            max-width: 96;
+            width: 78;
+            max-width: 100;
             height: auto;
             border: round #f59e0b;
-            background: #0b1726;
-            padding: 1 2;
+            background: #081420;
+            padding: 1 2 2 2;
         }
 
         CommandFormScreen.theme-light #command-modal {
@@ -1154,10 +1229,25 @@ def create_app(
         .command-modal-label {
             margin-top: 1;
             color: #7dd3fc;
+            text-style: bold;
         }
 
         CommandFormScreen.theme-light .command-modal-label {
             color: #1d4ed8;
+        }
+
+        #command-modal Input {
+            margin-top: 0;
+            margin-bottom: 1;
+            border: round #1d4ed8;
+            background: #102033;
+            color: #f8fafc;
+        }
+
+        CommandFormScreen.theme-light #command-modal Input {
+            border: round #93c5fd;
+            background: #ffffff;
+            color: #111827;
         }
 
         #command-modal-error {
@@ -1168,7 +1258,7 @@ def create_app(
 
         #command-modal-actions {
             height: auto;
-            margin-top: 1;
+            margin-top: 2;
         }
 
         #command-submit {
@@ -1211,6 +1301,7 @@ def create_app(
             self.screenshot_pending = False
             self.active_view = "overview"
             self.last_action = "dashboard started"
+            self.action_tone = "info"
             self.snapshot = empty_snapshot("waiting for first refresh")
             self.selected_player_id = ""
             self.selected_account_id = ""
@@ -1223,26 +1314,28 @@ def create_app(
             with Horizontal(id="shell"):
                 yield Static("", id="sidebar")
                 with Container(id="content"):
-                    with Container(id="overview-view", classes="view"):
-                        with Container(id="overview-grid"):
-                            yield Static("", id="service-pane", classes="panel")
-                            yield Static("", id="metrics-pane", classes="panel")
-                            with Vertical(id="players-pane", classes="panel"):
-                                yield Static("[b]Online Players[/b]", classes="table-detail-title")
-                                yield DataTable(id="players-table")
-                            yield Static("", id="player-details", classes="panel")
-                    with Container(id="accounts-view", classes="view hidden"):
-                        with Vertical(classes="panel table-detail", id="accounts-layout"):
-                            yield Static("[b]Accounts[/b]", classes="table-detail-title")
-                            with Horizontal(classes="table-detail-body"):
-                                yield DataTable(id="accounts-table", classes="detail-table")
-                                yield Static("", id="account-details", classes="detail-pane")
-                    with Container(id="backups-view", classes="view hidden"):
-                        with Horizontal(id="backups-layout"):
-                            yield Static("", id="backup-summary", classes="panel")
-                            yield DataTable(id="backups-table", classes="panel")
-                    with Container(id="config-view", classes="view hidden"):
-                        yield Static("", id="config-pane", classes="panel")
+                    yield Static("", id="action-banner")
+                    with Container(id="view-stack"):
+                        with Container(id="overview-view", classes="view"):
+                            with Container(id="overview-grid"):
+                                yield Static("", id="service-pane", classes="panel")
+                                yield Static("", id="metrics-pane", classes="panel")
+                                with Vertical(id="players-pane", classes="panel"):
+                                    yield Static("[b]Online Players[/b]", classes="table-detail-title")
+                                    yield DataTable(id="players-table")
+                                yield Static("", id="player-details", classes="panel")
+                        with Container(id="accounts-view", classes="view hidden"):
+                            with Vertical(classes="panel table-detail", id="accounts-layout"):
+                                yield Static("[b]Accounts[/b]", classes="table-detail-title")
+                                with Horizontal(classes="table-detail-body"):
+                                    yield DataTable(id="accounts-table", classes="detail-table")
+                                    yield Static("", id="account-details", classes="detail-pane")
+                        with Container(id="backups-view", classes="view hidden"):
+                            with Horizontal(id="backups-layout"):
+                                yield Static("", id="backup-summary", classes="panel")
+                                yield DataTable(id="backups-table", classes="panel")
+                        with Container(id="config-view", classes="view hidden"):
+                            yield Static("", id="config-pane", classes="panel")
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1280,13 +1373,27 @@ def create_app(
                 else:
                     widget.add_class("hidden")
 
-            self.query_one("#sidebar", Static).update(render_sidebar(self.active_view, self.last_action))
+            self.refresh_chrome()
             if self.active_view == "overview":
                 self.set_focus(self.query_one("#players-table", DataTable))
             elif self.active_view == "accounts":
                 self.set_focus(self.query_one("#accounts-table", DataTable))
             elif self.active_view == "backups":
                 self.set_focus(self.query_one("#backups-table", DataTable))
+
+        def refresh_chrome(self) -> None:
+            self.query_one("#sidebar", Static).update(
+                render_sidebar(self.active_view, self.last_action, self.snapshot, self.refresh_interval)
+            )
+            self.query_one("#action-banner", Static).update(
+                render_action_banner(
+                    self.active_view,
+                    self.snapshot,
+                    self.last_action,
+                    self.action_tone,
+                    self.refresh_interval,
+                )
+            )
 
         def request_snapshot_refresh(self) -> None:
             if self.refresh_inflight:
@@ -1310,7 +1417,7 @@ def create_app(
             self.refresh_players(snapshot.get("players", []))
             self.refresh_accounts(snapshot.get("all_accounts", []))
             self.refresh_backups(snapshot.get("backups", {}).get("entries", []))
-            self.query_one("#sidebar", Static).update(render_sidebar(self.active_view, self.last_action))
+            self.refresh_chrome()
             if self.screenshot_path and not self.screenshot_taken and not self.screenshot_pending:
                 self.screenshot_pending = True
                 self.set_timer(0.5, self.capture_screenshot_and_exit)
@@ -1346,10 +1453,10 @@ def create_app(
                 current_player = players[selected_index]
                 self.selected_player_id = str(current_player.get("id", ""))
                 table.move_cursor(row=selected_index, column=0, animate=False)
-                self.query_one("#player-details", Static).update(render_player_details(current_player))
+                self.query_one("#player-details", Static).update(render_player_details(current_player, len(players)))
             else:
                 self.selected_player_id = ""
-                self.query_one("#player-details", Static).update(render_player_details(None))
+                self.query_one("#player-details", Static).update(render_player_details(None, len(players)))
 
         def refresh_accounts(self, accounts: list[dict[str, Any]]) -> None:
             table = self.query_one("#accounts-table", DataTable)
@@ -1416,7 +1523,7 @@ def create_app(
             if player is None and players:
                 player = players[0]
             self.selected_player_id = str(player.get("id", "")) if player else ""
-            self.query_one("#player-details", Static).update(render_player_details(player))
+            self.query_one("#player-details", Static).update(render_player_details(player, len(players)))
 
         def update_selected_account(self, row_key: Any) -> None:
             key_value = player_key_value(row_key)
@@ -1466,7 +1573,7 @@ def create_app(
             )
             error = str(request.get("error", ""))
             if error:
-                self.set_action_result(error)
+                self.set_action_result(error, tone="warning")
                 return
 
             target_view = str(request.get("view", "") or "")
@@ -1514,14 +1621,13 @@ def create_app(
             self.apply_view_state()
 
         def action_manual_refresh(self) -> None:
-            self.last_action = f"manual refresh at {datetime.now().strftime('%H:%M:%S')}"
-            self.query_one("#sidebar", Static).update(render_sidebar(self.active_view, self.last_action))
+            self.set_action_result(f"manual refresh requested at {datetime.now().strftime('%H:%M:%S')}", tone="info")
             self.request_snapshot_refresh()
 
         def action_toggle_theme(self) -> None:
             self.theme_name = "light" if self.theme_name == "dark" else "dark"
             self.apply_theme()
-            self.last_action = f"theme set to {self.theme_name}"
+            self.set_action_result(f"theme set to {self.theme_name}", tone="success")
             self.apply_view_state()
             self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view))
 
@@ -1544,8 +1650,7 @@ def create_app(
             summary = backups.get("summary", {})
             backup_dir = str(summary.get("backup_dir", ""))
             if not self.selected_backup_file or not backup_dir:
-                self.last_action = "backup verify skipped: no backup selected"
-                self.query_one("#sidebar", Static).update(render_sidebar(self.active_view, self.last_action))
+                self.set_action_result("backup verify skipped: no backup selected", tone="warning")
                 return
 
             backup_path = f"{backup_dir.rstrip('/')}/{self.selected_backup_file}"
@@ -1680,10 +1785,10 @@ def create_app(
             env: dict[str, str] | None = None,
         ) -> None:
             if self.action_inflight:
-                self.set_action_result("another dashboard action is already running")
+                self.set_action_result("another dashboard action is already running", tone="warning")
                 return
             self.action_inflight = True
-            self.set_action_result(f"{label} running...")
+            self.set_action_result(f"{label} running...", tone="running")
             threading.Thread(
                 target=self.run_command_action,
                 args=(label, command, refresh_after, env or {}),
@@ -1705,17 +1810,18 @@ def create_app(
                 output = (completed.stdout or completed.stderr or "").strip().splitlines()
                 message = output[-1] if output else f"{label} exited with code {completed.returncode}"
                 if completed.returncode == 0:
-                    self.call_from_thread(self.set_action_result, f"{label}: {message}")
+                    self.call_from_thread(self.set_action_result, f"{label}: {message}", "success")
                     if refresh_after:
                         self.call_from_thread(self.request_snapshot_refresh)
                 else:
-                    self.call_from_thread(self.set_action_result, f"{label} failed: {message}")
+                    self.call_from_thread(self.set_action_result, f"{label} failed: {message}", "error")
             finally:
                 self.action_inflight = False
 
-        def set_action_result(self, message: str) -> None:
+        def set_action_result(self, message: str, tone: str = "info") -> None:
             self.last_action = message
-            self.query_one("#sidebar", Static).update(render_sidebar(self.active_view, self.last_action))
+            self.action_tone = tone
+            self.refresh_chrome()
             self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view))
 
     return VMangosDashboard()
