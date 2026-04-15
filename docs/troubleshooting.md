@@ -1,36 +1,40 @@
 # Troubleshooting
 
-If you are still getting oriented, use the [user guide](user-guide.md) first. This page is for diagnosing problems once you are already in the tool.
+If you are still getting oriented, read the [User Guide](user-guide.md) first. This page is for diagnosing problems once Manager is installed.
 
-## Config Problems
+---
+
+## ⚙️ Config
 
 ### `Configuration file not found`
 
-Check the path passed with `-c` or install the default config at:
+Check the path passed with `-c` or create the default config at:
 
 ```text
 /opt/mangos/manager/config/manager.conf
 ```
 
-### Config or password file permissions are wrong
+### File permissions are wrong
 
 Manager expects mode `600` for:
 
 - `manager.conf`
 - `.dbpass`
-- password files passed with `--password-file`
+- Password files passed with `--password-file`
 
-## Dashboard Problems
+---
+
+## 🖥️ Dashboard
 
 ### `Textual runtime import failed`
 
-Bootstrap the dashboard environment first:
+Bootstrap the dashboard environment:
 
 ```bash
 sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
 ```
 
-If the venv cannot be created on Ubuntu, verify the required packages are installed:
+If the venv fails to create, install the required packages:
 
 ```bash
 sudo apt-get install -y python3 python3-pip python3-venv
@@ -38,7 +42,7 @@ sudo apt-get install -y python3 python3-pip python3-venv
 
 ### Dashboard opens but data is missing
 
-Validate the same backend surfaces directly:
+Validate the backend directly:
 
 ```bash
 sudo /opt/mangos/manager/bin/vmangos-manager server status --format json
@@ -46,9 +50,11 @@ sudo /opt/mangos/manager/bin/vmangos-manager logs status --format json
 sudo /opt/mangos/manager/bin/vmangos-manager account list --online --format json
 ```
 
-If `account list --online` fails for a non-root operator, check that `manager.conf` and `.dbpass` are readable by the account running the dashboard.
+If `account list --online` fails for a non-root operator, ensure `manager.conf` and `.dbpass` are readable by the account running the dashboard.
 
-## Update Problems
+---
+
+## 🔄 Updates
 
 ### `Update check requires a VMANGOS-Manager git checkout`
 
@@ -59,7 +65,7 @@ cd ~/source/VMANGOS-Manager
 ./manager/bin/vmangos-manager update check
 ```
 
-Or point the command at a checkout explicitly:
+Or point to a checkout explicitly:
 
 ```bash
 VMANGOS_MANAGER_REPO=~/source/VMANGOS-Manager ./manager/bin/vmangos-manager update check
@@ -67,11 +73,11 @@ VMANGOS_MANAGER_REPO=~/source/VMANGOS-Manager ./manager/bin/vmangos-manager upda
 
 ### `Failed to fetch remote metadata`
 
-Check:
+Checklist:
 
-- network access to GitHub
-- that the checkout has a valid `origin`
-- local git auth if using a private fork
+- Network access to GitHub
+- Valid `origin` in the checkout
+- Git auth if using a private fork
 
 Helpful commands:
 
@@ -81,11 +87,13 @@ git fetch origin
 git status --short --branch
 ```
 
-## Status Problems
+---
+
+## 📊 Status
 
 ### Services show inactive
 
-Validate systemd directly:
+Check systemd directly:
 
 ```bash
 sudo systemctl status auth
@@ -95,41 +103,45 @@ sudo systemctl status mariadb
 
 ### DB connectivity check fails
 
-Check:
+Verify:
 
 - `database.host`
 - `database.user`
 - `database.password_file`
 - MariaDB listener/bind settings
 
-Useful comparison:
+Direct comparison:
 
 ```bash
 sudo cat /opt/mangos/manager/config/.dbpass
 mysql -h 127.0.0.1 -P 3306 -u mangos -p'<password>' -N -B -e "SELECT 1" auth
 ```
 
-## Account Problems
+---
+
+## 👤 Accounts
 
 ### Password file rejected
 
-Accepted password-file ownership is:
+Accepted ownership:
 
 - root
 - the current effective user
 - the invoking sudo user when running through `sudo`
 
-Mode must still be `600`.
+Mode must be `600`.
 
 ### `Failed to create account`
 
 Check:
 
-- auth schema matches the expected VMANGOS baseline
+- Auth schema matches the expected VMANGOS baseline
 - DB credentials in `manager.conf`
 - `auth.account`, `auth.account_access`, `auth.account_banned`, and `auth.realmcharacters` are writable by the manager DB user
 
-## Backup Problems
+---
+
+## 💾 Backups
 
 ### Verify fails because metadata is missing
 
@@ -137,24 +149,26 @@ Backup verify is fail-closed for missing metadata. Recreate the backup or repair
 
 ### Restore requires privileged credentials
 
-Restore intentionally refuses to guess privileged DB credentials. Supply the required credentials explicitly before running a real restore.
+Restore intentionally refuses to guess privileged DB credentials. Supply them explicitly via `MYSQL_RESTORE_DEFAULTS_FILE` or `MYSQL_RESTORE_PASSWORD` before running a real restore.
 
-## Validation Commands
+---
 
-Manager tests:
+## 🧪 Validation Commands
+
+Run the test suite:
 
 ```bash
 cd manager
 make test
 ```
 
-Installed manager config check:
+Validate installed config:
 
 ```bash
 sudo /opt/mangos/manager/bin/vmangos-manager config validate
 ```
 
-Host-side source checkout validation:
+Validate a source checkout:
 
 ```bash
 cd /home/tony/source/VMANGOS-Manager

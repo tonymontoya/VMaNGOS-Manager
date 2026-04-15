@@ -1,77 +1,70 @@
-# VMaNGOS Manager
+# VMANGOS Manager
 
 ![CI](https://github.com/tonymontoya/VMANGOS-Manager/actions/workflows/ci.yml/badge.svg)
 ![Ubuntu 22.04](https://img.shields.io/badge/ubuntu-22.04-E95420)
 ![Status](https://img.shields.io/badge/status-v0.2%20candidate-0f766e)
 ![Interface](https://img.shields.io/badge/interface-Textual%20TUI-0f172a)
 
-Operate a VMaNGOS realm like a product, not a pile of shell scraps, one-off SQL, and tribal knowledge. VMaNGOS Manager turns install automation, day-two operations, backups, account administration, and update planning into one terminal-native admin product built for real realm operators.
+A terminal-native administration suite for VMANGOS private servers. One installer, one CLI, and a live SSH-native dashboard for everything from provisioning to backups.
 
-VMaNGOS already gives you the server core. Manager gives you the operator layer communities usually have to assemble for themselves: a real terminal dashboard, safer recurring workflows, and one consistent control surface for the work that normally gets scattered across shell history, handwritten notes, and ad hoc scripts.
+![VMANGOS Manager Dashboard](docs/assets/dashboard-overview.svg)
 
-![VMANGOS Manager Textual dashboard](docs/assets/dashboard-overview.svg)
+*Real screenshot from the shipped Textual dashboard — not a mockup.*
 
-The screenshot above is generated from the shipped dashboard renderer against a reproducible demo snapshot. It is not a painted mockup.
+---
 
-## Why Operators Reach For It
+## 🏰 Why VMANGOS Manager?
 
-- bring a fresh Ubuntu host online with `VMANGOS only` or `VMANGOS + Manager`
-- adopt an existing realm through config detection instead of a forced rebuild
-- run a real Textual TUI directly on the server over SSH
-- manage accounts, backups, logs, schedules, config checks, and update prep from one surface
-- rely on one operational backend shared by the CLI, dashboard, and automation flows
+- **One-Shot Provisioning** — Go from blank Ubuntu 22.04 to a running realm with a single script
+- **SSH-Native Dashboard** — A real Textual TUI that runs directly on the server over SSH
+- **No More Shell Scraps** — Account admin, backups, logs, scheduling, and updates from one CLI
+- **Adopts Existing Realms** — Detects your current VMANGOS install instead of forcing a rebuild
+- **Built For Operators** — Every dashboard view maps to a real `vmangos-manager` command you can script
 
-The result is less improvisation and more repeatable operations from a surface that feels deliberate.
+---
 
-## Why It Feels Different
+## ✨ What's Included
 
-Most VMaNGOS tooling assumes the operator is willing to live in shell fragments forever. Manager takes the opposite stance: terminal-first does not have to mean rough, fragmented, or forgettable.
+| Component | What It Does | Status |
+|---|---|---|
+| 🖥️ **Dashboard** | 7-view Textual TUI for live server ops | ✅ Shipped |
+| 🚀 **Auto-Installer** | `auto_install.sh` + `vmangos_setup.sh` for Ubuntu 22.04 | ✅ Shipped |
+| 🎮 **Server Control** | Start, stop, restart, and health-check `auth` + `world` | ✅ Shipped |
+| 👤 **Account Admin** | Create, ban/unban, set GM level, password reset | ✅ Shipped |
+| 💾 **Backups** | SQL dumps, verify integrity, dry-run restore, timer scheduling | ✅ Shipped |
+| 📝 **Logs** | Filtered `auth`/`world` log investigation via `journald` | ✅ Shipped |
+| ⏰ **Scheduling** | `systemd` timer generation for restarts and maintenance | ✅ Shipped |
+| 🔄 **Update Planning** | Check, inspect, plan, and apply core + DB updates | ✅ Shipped |
 
-That is why the product matters. It gives realm operators something they are not used to getting: a server admin experience that is still SSH-native, but finally feels like software instead of glue.
+---
 
-## Start The Right Way
+## 🚀 Quick Start
 
-### Fresh Host
+### Prerequisites
 
-For a blank Ubuntu 22.04 machine, the repo ships two installer entry points. Both can provision either:
+- Ubuntu 22.04 LTS (fresh or existing)
+- Root access (`sudo`)
+- WoW 1.12.1 client data (for extraction — optional but recommended)
 
-- `VMANGOS only`
-- `VMANGOS + Manager`
-
-Both paths support:
-
-- `Automated`
-- `Guided`
-
-Automated install:
+### Option A — Fresh Host
 
 ```bash
+# Download the installer scripts
 wget https://raw.githubusercontent.com/tonymontoya/VMANGOS-Manager/main/auto_install.sh
 wget https://raw.githubusercontent.com/tonymontoya/VMANGOS-Manager/main/vmangos_setup.sh
+
+# Run automated provisioning (VMANGOS + Manager, auto-generated credentials)
 sudo bash auto_install.sh
 ```
 
-Guided install:
+Want to pick your own DB names and paths? Use the guided installer instead:
 
 ```bash
 wget https://raw.githubusercontent.com/tonymontoya/VMANGOS-Manager/main/vmangos_setup.sh
 sudo bash vmangos_setup.sh
 ```
 
-The installer handles the heavy lifting that usually gets lost in private notes:
-
-- dependency installation and long-build orchestration
-- database creation and credentials
-- config generation
-- client data staging
-- manager provisioning under `/opt/mangos/manager`
-- dashboard prerequisites when Manager is included
-
-`auto_install.sh` stays non-interactive and defaults to `VMANGOS + Manager` with automated inputs. `vmangos_setup.sh` prompts early for the provisioning target and input mode so the operator knows exactly what path they are taking before the long-running phases start.
-
-### Existing Host
-
-If you already have VMaNGOS running, Manager does not force you into a reinstall story. Install it, detect the local layout, then launch the dashboard:
+### Option B — Existing VMANGOS Host
 
 ```bash
 git clone https://github.com/tonymontoya/VMANGOS-Manager.git
@@ -83,98 +76,124 @@ sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
 sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
 ```
 
-## The Interface That Sells It
+---
 
-The dashboard is the thing most VMaNGOS admins are not used to getting: a terminal UI that actually earns its screen space.
+## 🏗️ Architecture
 
-It is not a detached frontend experiment. It runs on the same Manager commands and JSON surfaces used by the CLI, which keeps the interface honest and useful on a real server.
-
-Bootstrap once:
-
-```bash
-sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Textual Dashboard                       │
+│              (Python / Textual TUI over SSH)                │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    vmangos-manager CLI                      │
+│  (Bash entry point: server / account / backup / logs /      │
+│   schedule / config / update / dashboard)                   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+│  systemd      │    │  MariaDB      │    │  logrotate    │
+│  (auth/world) │    │  (auth/char/  │    │  (realm logs) │
+│               │    │  world/logs)  │    │               │
+└───────────────┘    └───────────────┘    └───────────────┘
 ```
 
-Launch it:
+**Stack:**
+- **CLI:** Bash 4+, `shellcheck`-clean modules
+- **Dashboard:** Python 3, Textual
+- **Databases:** MariaDB / MySQL
+- **Init:** `systemd` services and timers
+- **Target OS:** Ubuntu 22.04 LTS
+
+---
+
+## 🖥️ The Dashboard
+
+Launch the TUI in two commands:
 
 ```bash
-sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap  # one-time
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2  # run
 ```
 
-Inside the dashboard you get:
+### Dashboard Views
 
-- auth/world service health, PID, uptime, and control actions
-- host CPU, memory, disk, load, and disk I/O through concise overview meters plus a deeper monitor deck
-- player pulse summary, GM presence, alert visibility, and online roster drilldown
-- backup visibility plus verify, schedule, and restore dry-run entry points
-- account workflows for create, password reset, GM level changes, and ban or unban actions
-- a dedicated Logs module that leads with investigation facts, then lets you drill into selected auth/world events
-- a dedicated Ops surface for maintenance readiness, scheduled tasks, and change-window planning
+| View | Purpose | Screenshot |
+|---|---|---|
+| **Overview** | Realm pulse: services, host metrics, players, alerts | ![Overview](docs/assets/dashboard-overview.svg) |
+| **Monitor** | Deep diagnostics: trends, disk I/O, process footprint | ![Monitor](docs/assets/dashboard-monitor.svg) |
+| **Accounts** | Create, reset passwords, set GM, ban/unban | ![Accounts](docs/assets/dashboard-accounts.svg) |
+| **Backups** | Inventory, verify, dry-run, schedule timers | ![Backups](docs/assets/dashboard-backups.svg) |
+| **Config** | Read-only wiring validation | ![Config](docs/assets/dashboard-config.svg) |
+| **Logs** | Filtered `auth`/`world` log investigation | ![Logs](docs/assets/dashboard-logs.svg) |
+| **Operations** | Maintenance readiness, scheduled tasks, update planning | ![Operations](docs/assets/dashboard-operations.svg) |
 
-If you are deciding where to start:
+---
 
-- use `Overview` to answer, "is the realm healthy right now?"
-- use `Accounts` for create, password, GM, ban, and unban work
-- use `Backups` for protection checks, verify, and restore dry-run
-- use `Logs` for recent auth/world evidence during an incident
-- use `Ops` for maintenance scheduling, queued task review, and update preflight
-- use `Config` when the host wiring or install layout looks suspicious
+## 🛠️ Everyday CLI
 
-It keeps the deployment terminal-first while still giving admins something that looks credible, legible, and worth keeping open.
+```bash
+# Server control
+sudo vmangos-manager server start --wait
+sudo vmangos-manager server restart
+sudo vmangos-manager server status --watch
 
-## How To Read The Dashboard
+# Account admin
+sudo VMANGOS_PASSWORD='ChangeMe7' vmangos-manager account create TESTUSER --password-env
+sudo vmangos-manager account setgm TESTUSER 3
+sudo vmangos-manager account ban TESTUSER 7d --reason "Exploit abuse"
 
-The dashboard is organized around a simple split:
+# Backup + schedule
+sudo vmangos-manager backup now --verify
+sudo vmangos-manager backup schedule --daily 04:00
 
-- the top banner tells you where you are, what that view is for, and the state, receipt, and next step of the last action
-- the left sidebar keeps navigation and realm pulse visible from every screen
-- the bottom command rail is the canonical action surface for the current view
-- the main panels are view-specific and should stay scoped to the thing they are showing
+# Logs + maintenance
+sudo vmangos-manager logs recent --source world --severity error --limit 25
+sudo vmangos-manager schedule restart --time 04:00 --weekly Sun
+```
 
-That last point matters. Summary panels should answer operator decisions first. Inventory tables feed selected-detail panes, and selected-detail panes stay item-scoped: selected player, selected account, selected backup, selected schedule.
+---
 
-## What The Dashboard Covers Today
+## 📚 Documentation
 
-The dashboard already covers the work most realm operators do every week. The CLI remains available for automation, raw output, and a few advanced or higher-friction paths.
+| Doc | What You'll Find |
+|---|---|
+| [🚀 User Guide](docs/user-guide.md) | End-to-end walkthrough of install, dashboard views, and daily rhythm |
+| [🔧 Install Automation](docs/install-automation.md) | Deep dive into `auto_install.sh` and `vmangos_setup.sh` |
+| [📋 CLI Reference](docs/cli-reference.md) | Complete command reference |
+| [🛡️ Security Notes](docs/security.md) | Password handling, DB model, and update safety |
+| [🔍 Troubleshooting](docs/troubleshooting.md) | Common problems and diagnostic commands |
 
-| Area | In the dashboard now | Best handled in the CLI |
-| --- | --- | --- |
-| Server | status, start, stop, restart | watch mode, raw JSON |
-| Accounts | account inventory, create, reset password, set GM, ban, unban, visibility | scripted bulk workflows |
-| Backups | backup readiness, inventory, create, verify, restore dry-run, timer visibility, daily/weekly timer create | cleanup, timer removal, real restore |
-| Config | validation plus read-only configuration wiring summary | detect, create, show, file editing |
-| Logs | filtered auth/world investigation, selected event detail, live follow via refresh | raw JSON, CLI watch mode, custom shell pipelines |
-| Operations | maintenance readiness, scheduled task creation/review, task removal, change-window planning visibility | update apply and source-tree work |
+---
 
-The user guide tracks these boundaries in more detail and is the best place to see the current product surface with screenshots.
+## 🛡️ Security & Safety
 
-## Start Here
+- **No positional passwords** — Passwords are accepted via interactive prompt, `--password-file`, or `--password-env` only
+- **File permissions enforced** — Password files must be mode `600` and owned by a trusted user
+- **Audit logging** — Every account action is logged with actor and target
+- **Fail-closed updates** — `update apply` rejects dirty source trees and unsupported SQL changes
 
-- [User guide](docs/user-guide.md)
-- [Install automation reference](docs/install-automation.md)
-- [CLI reference](docs/cli-reference.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Security notes](docs/security.md)
+See [Security Notes](docs/security.md) for full details.
 
-Start with the user guide if you want the best end-to-end walkthrough of what Manager can do.
+---
 
-## Why It Is Credible
+## 💬 Community & Resources
 
-- validated on a real Ubuntu VMaNGOS host, not just mocked local shell tests
-- the dashboard screenshot in this README is generated from the shipped Textual app export path using a reproducible demo payload
-- the test suite covers config, status, logs, schedule, backup, update, account, and dashboard seams
+- [VMANGOS Core](https://github.com/vmangos/core)
+- [VMANGOS Database](https://github.com/brotalnia/database)
+- [VMANGOS Wiki](https://github.com/vmangos/wiki/wiki)
+- [GitHub Issues](https://github.com/tonymontoya/VMANGOS-Manager/issues)
 
-## VMaNGOS Context
+---
 
-VMaNGOS is an independent continuation of the Elysium/LightsHope codebases focused on accurate Vanilla WoW content progression across patch eras from 1.2 through 1.12.1.
-
-## Resources
-
-- [VMaNGOS Core](https://github.com/vmangos/core)
-- [VMaNGOS Database](https://github.com/brotalnia/database)
-- [VMaNGOS Wiki](https://github.com/vmangos/wiki/wiki)
-- [Issue Tracker](https://github.com/tonymontoya/VMANGOS-Manager/issues)
-
-## License & Disclaimer
+## ⚖️ License & Disclaimer
 
 This project is for educational purposes. Running a private WoW server may violate Blizzard's Terms of Service. Use at your own risk.
+
+---
+
+**Built for realm operators who want their tools to feel like software, not glue.**

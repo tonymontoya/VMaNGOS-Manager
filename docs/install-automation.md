@@ -1,35 +1,38 @@
 # Install Automation
 
-If you are learning Manager as a product, start with the [user guide](user-guide.md). This page is the installer-focused reference.
+This guide covers the two installer entry points and how to adopt Manager onto an existing VMANGOS host. If you are new to Manager, start with the [User Guide](user-guide.md) for the full product walkthrough.
 
-VMANGOS Manager ships two installer entry points aimed at different operator styles:
+---
 
-- `auto_install.sh` for a mostly hands-off first-time host bootstrap
-- `vmangos_setup.sh` for guided interactive installation and provisioning
+## 🎯 Two Entry Points
 
-Both target Ubuntu 22.04 and are designed around a full VMANGOS host lifecycle rather than just copying binaries into place.
+| Script | Style | Best For |
+|---|---|---|
+| `auto_install.sh` | Non-interactive, zero-touch | Fresh Ubuntu hosts; generated defaults |
+| `vmangos_setup.sh` | Guided, interactive | Custom paths, DB names, or credentials |
 
-Both installer entry points now map onto the same two explicit choices:
+Both target **Ubuntu 22.04 LTS**.
 
-- provisioning target: `VMANGOS only` or `VMANGOS + Manager`
-- input mode: `Automated` or `Guided`
+---
 
-## What The Installer Handles
+## 🛠️ What the Installer Handles
 
-- Ubuntu package prerequisites for building and running VMANGOS
-- source checkout and build orchestration
-- MariaDB database creation and grants
-- runtime path layout under the chosen install root
-- config generation for `realmd` and `mangosd`
-- client data staging and path normalization
-- optional Manager provisioning under `/opt/mangos/manager`
-- dashboard Python/Textual prerequisites when Manager is provisioned
+- Ubuntu package prerequisites (build tools, MariaDB client, Python, etc.)
+- VMANGOS source checkout and compilation
+- MariaDB database creation and user grants
+- Runtime path layout under the chosen install root
+- Config generation for `realmd` and `mangosd`
+- Client data staging and path normalization
+- Optional Manager provisioning under `/opt/mangos/manager`
+- Dashboard Python / Textual prerequisites when Manager is included
 
-## Recommended Paths
+---
+
+## 🚀 Fresh Host Installation
 
 ### Zero-Touch Bootstrap
 
-Use this when you want the installer to generate credentials and carry the host through with minimal prompting:
+This path generates secure passwords, picks sane defaults, and runs end-to-end without prompting.
 
 ```bash
 wget https://raw.githubusercontent.com/tonymontoya/VMANGOS-Manager/main/auto_install.sh
@@ -37,47 +40,38 @@ wget https://raw.githubusercontent.com/tonymontoya/VMANGOS-Manager/main/vmangos_
 sudo bash auto_install.sh
 ```
 
-This flow:
+**What happens:**
+- Provisions `VMANGOS + Manager` by default
+- Generates passwords stored in `/root/.vmangos-secrets/setup.conf`
+- Logs all output to `/var/log/vmangos-install.log`
+- Prints credentials and runtime paths at completion
 
-- generates secure random passwords
-- stores setup secrets under `/root/.vmangos-secrets/setup.conf`
-- defaults to `VMANGOS + Manager` and `Automated`
-- runs the full install non-interactively
-- prints the resulting credentials and runtime paths at the end
-
-If `/opt/mangos` already exists, the wrapper now stays non-interactive as well. Set `REINSTALL_POLICY="replace"` in `/root/.vmangos-secrets/setup.conf` if you want the wrapper to remove an existing install root automatically; otherwise it aborts safely.
+**Reinstall safety:** If `/opt/mangos` already exists, the installer aborts unless you set `REINSTALL_POLICY="replace"` in `/root/.vmangos-secrets/setup.conf`.
 
 ### Guided Interactive Install
 
-Use this when you want to choose paths, database names, or provisioning behavior during install:
+Use this when you want to choose values during install.
 
 ```bash
 wget https://raw.githubusercontent.com/tonymontoya/VMANGOS-Manager/main/vmangos_setup.sh
 sudo bash vmangos_setup.sh
 ```
 
-Expect the installer to prompt early for:
+**Early prompts:**
+- Provisioning target (`VMANGOS only` vs `VMANGOS + Manager`)
+- Input mode (`Automated` vs `Guided`)
 
-- provisioning target
-- input mode
-
-Guided mode then prompts for:
-
-- installation root
-- database names and credentials
+**Guided-only prompts:**
+- Installation root
+- Database names and credentials
 - OS user
-- client data location
+- Client data location
 
-## Existing Host Adoption
+---
+
+## 🏠 Existing Host Adoption
 
 If VMANGOS is already installed and you mainly want the Manager experience:
-
-1. Install Manager under `/opt/mangos/manager`
-2. Run config detection
-3. Review the proposed config
-4. Bootstrap and launch the dashboard
-
-Example:
 
 ```bash
 cd manager
@@ -88,19 +82,22 @@ sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
 sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
 ```
 
-## Installer Characteristics
+The `config detect` command inspects your existing layout and prints a proposed `manager.conf`. It is read-only — nothing is overwritten until you confirm and copy the file into place.
 
-The installer is intentionally pragmatic rather than minimal:
+---
 
-- retry logic around network operations
-- checkpoint/resume support for interrupted installs
-- logging to `/var/log/vmangos-install.log`
-- support for long-running compilation on a real server host
-- explicit file generation instead of hidden runtime autodetection
+## 🔧 Installer Features
 
-## After Install
+- **Retry logic** — Network downloads and git clones retry with backoff
+- **Checkpoint/resume** — Interrupted installs can resume from the last completed phase
+- **Background build support** — Long compilations can run via `VMANGOS_BACKGROUND_BUILD=1` to prevent SSH timeouts
+- **Explicit logging** — Everything is written to `/var/log/vmangos-install.log`
 
-Typical first commands:
+---
+
+## ✅ Post-Install Checklist
+
+Run these commands after installation finishes:
 
 ```bash
 sudo /opt/mangos/manager/bin/vmangos-manager config validate
@@ -108,4 +105,4 @@ sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
 sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
 ```
 
-For lower-level command details, use the [CLI reference](cli-reference.md).
+For the full command reference, see the [CLI Reference](cli-reference.md).

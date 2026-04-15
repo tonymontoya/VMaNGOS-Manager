@@ -1,72 +1,85 @@
 # Security
 
-If you are looking for normal usage guidance, start with the [user guide](user-guide.md). This page focuses on the safety model behind Manager's operational features.
+For normal usage guidance, see the [User Guide](user-guide.md). This page covers the safety model behind Manager's operational features.
 
-## Security Model
+---
+
+## 🛡️ Security Model
 
 VMANGOS Manager is intentionally conservative:
 
-- passwords are not accepted as positional CLI arguments
-- password files must be mode `600`
-- password files must be owned by root, the current user, or the invoking sudo user
-- `VMANGOS_PASSWORD` is unset after use
-- password hashing is performed without forwarding `VMANGOS_PASSWORD` into the hashing subprocess environment
-- account actions emit audit log entries
+- **No positional passwords** — Passwords are never accepted as CLI positional arguments
+- **Strict file permissions** — Password files must be mode `600`
+- **Ownership checks** — Password files must be owned by root, the current user, or the invoking sudo user
+- **Environment scrubbing** — `VMANGOS_PASSWORD` is unset immediately after use
+- **Isolated hashing** — Password hashing does not forward `VMANGOS_PASSWORD` into the hashing subprocess
+- **Audit trail** — Account actions emit structured audit log entries
 
-## Password Handling
+---
 
-Supported password input paths:
+## 🔑 Password Handling
 
-- interactive prompt
-- `--password-file PATH`
-- `--password-env`
+| Method | Supported |
+|---|---|
+| Interactive prompt | ✅ |
+| `--password-file PATH` | ✅ |
+| `--password-env` | ✅ |
+| Positional password arguments | ❌ |
+| Plaintext passwords in command examples | ❌ |
 
-Unsupported by design:
+---
 
-- positional password arguments
-- plaintext password values embedded into normal command examples
+## 🗄️ Database Access
 
-## Database Access
+Manager account management operates directly against the VMANGOS auth schema. This design enables:
 
-Manager account management operates directly against the VMANGOS auth schema. This was chosen because the tool needs:
+- Full account listing
+- GM level and ban state visibility
+- Schema-aware password/verifier updates
+- Deterministic test coverage
 
-- full account listing
-- GM level state
-- ban state
-- schema-aware password/verifier updates
-- deterministic test coverage
-
-Use a least-privileged DB user that can perform the required operations on:
+**Recommendation:** Use a least-privileged DB user with sufficient rights on:
 
 - `auth`
 - `characters`
 - `world`
 - `logs`
 
-## Update Model
+---
 
-Manager's update workflow is intentionally non-atomic. Operators should review incoming changes, take a verified backup, test them, and then reinstall intentionally.
+## 🔄 Update Model
 
-The update surface:
+Manager's update workflow is intentionally non-atomic. The recommended process is:
 
-- fetches remote metadata
-- compares local and remote commits
-- prints or executes explicit steps
-- fails closed when SQL changes fall outside the supported migration shape
+1. Review incoming changes
+2. Take a verified backup
+3. Test in a safe environment
+4. Apply intentionally during a maintenance window
 
-## Operational Guidance
+**Built-in safeguards:**
 
-- keep `/opt/mangos/manager/config/.dbpass` readable only by trusted operators
-- restrict MySQL network exposure to trusted hosts
-- prefer running service-control and dashboard commands with `sudo`
-- review audit output after account changes
-- run `make test` before installing from a source checkout
+- Fetches remote metadata and compares commits explicitly
+- Prints or executes explicit steps
+- Fails closed when SQL changes fall outside the supported migration shape
+- Rejects dirty or divergent source trees
 
-## Reporting
+---
 
-Use the GitHub issue tracker for security-relevant defects in this repository. Include:
+## ✅ Operational Guidance
 
-- the affected command
-- whether the issue was seen from a source checkout or an installed copy
-- a sanitized config snippet if relevant
-- reproduction steps without exposing secrets
+- Keep `/opt/mangos/manager/config/.dbpass` readable only by trusted operators
+- Restrict MySQL network exposure to trusted hosts
+- Prefer `sudo` for service-control and dashboard commands
+- Review audit output after account changes
+- Run `make test` before installing from a source checkout
+
+---
+
+## 🐛 Reporting
+
+Report security-relevant defects via the [GitHub issue tracker](https://github.com/tonymontoya/VMANGOS-Manager/issues). Please include:
+
+- The affected command
+- Whether the issue occurred from a source checkout or installed copy
+- A sanitized config snippet if relevant
+- Reproduction steps without exposing secrets

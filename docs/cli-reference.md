@@ -1,16 +1,20 @@
 # CLI Reference
 
-If you want the best feature walkthrough first, start with the [user guide](user-guide.md). This page is the command reference.
+Complete command reference for `vmangos-manager`. If you are learning the product, start with the [User Guide](user-guide.md).
 
-`vmangos-manager` is the operational backend for the dashboard, installer-provisioned automation, and direct host administration.
+---
 
-Default installed paths:
+## 📍 Default Paths
 
-- binary: `/opt/mangos/manager/bin/vmangos-manager`
-- config: `/opt/mangos/manager/config/manager.conf`
-- DB password file: `/opt/mangos/manager/config/.dbpass`
+| Path | Location |
+|---|---|
+| Binary | `/opt/mangos/manager/bin/vmangos-manager` |
+| Config | `/opt/mangos/manager/config/manager.conf` |
+| DB password file | `/opt/mangos/manager/config/.dbpass` |
 
-## Install The CLI
+---
+
+## 🛠️ Install the CLI
 
 From a source checkout:
 
@@ -20,43 +24,62 @@ make test
 sudo make install PREFIX=/opt/mangos/manager
 ```
 
-Or:
+Or use the install helper:
 
 ```bash
 sudo ./manager/install_manager.sh --run-tests
 ```
 
-To remove installed manager files without deleting `config/`:
+To uninstall (preserves `config/`):
 
 ```bash
 cd manager
 sudo make uninstall PREFIX=/opt/mangos/manager
 ```
 
-## Global Options
+---
+
+## 🌐 Global Options
 
 ```text
--c, --config FILE
--f, --format text|json
--v, --verbose
--h, --help
---version
+-c, --config FILE      Configuration file path
+-f, --format text|json Output format
+-v, --verbose          Enable verbose output
+-h, --help             Show help
+--version              Show version
 ```
 
-## Dashboard
+---
+
+## 📋 Command Overview
+
+| Command | Purpose |
+|---|---|
+| `server` | Start, stop, restart, status of auth/world services |
+| `dashboard` | Launch the Textual TUI |
+| `logs` | Rotation status, recent events, test config |
+| `account` | Create, list, modify GM level, ban, unban, password reset |
+| `backup` | Create, list, verify, restore, clean, schedule |
+| `schedule` | Honor/restart schedules, list, simulate, cancel |
+| `config` | Create, detect, validate, show configuration |
+| `update` | Check, inspect, plan, apply core updates |
+
+---
+
+## 🖥️ Dashboard
 
 ```bash
 vmangos-manager dashboard [--refresh SECONDS] [--theme dark|light]
 vmangos-manager dashboard --bootstrap
 ```
 
-Notes:
+- `--bootstrap` creates the Python venv and installs Textual (one-time).
+- Default refresh interval is `2` seconds.
+- The dashboard consumes the same JSON surfaces used by the CLI.
 
-- `dashboard --bootstrap` creates the dashboard virtual environment and installs Textual
-- `dashboard` reuses Manager's existing JSON status surfaces instead of duplicating status logic
-- default refresh interval is `2` seconds
+---
 
-## Server Commands
+## 🎮 Server
 
 ```bash
 vmangos-manager server start [--wait] [--timeout SECONDS]
@@ -65,14 +88,13 @@ vmangos-manager server restart [--timeout SECONDS]
 vmangos-manager server status [--format text|json] [--watch] [--interval SECONDS]
 ```
 
-Notes:
+- `start --wait` performs bounded post-start health verification.
+- `status --watch` is text-only; default interval is `2`s.
+- Status output includes service state, process details, DB connectivity, disk space, player count, host metrics, alerts, and recent events.
 
-- watch mode is text-only
-- default watch interval is `2` seconds
-- status includes service state, process details, DB connectivity, disk space, player count, host metrics, alerts, and recent events
-- `server start --wait` performs bounded post-start verification
+---
 
-## Logs Commands
+## 📝 Logs
 
 ```bash
 vmangos-manager logs status [--format text|json]
@@ -82,16 +104,14 @@ vmangos-manager logs rotate [--force]
 vmangos-manager logs test-config
 ```
 
-Notes:
+- `logs status` checks log-rotation posture and disk headroom.
+- `logs recent` queries `journald` for realm sources (`auth`, `world`, or `all`).
+- Default recent filters: `source=all`, `window=15m`, `severity=all`, `limit=25`.
+- Watch/follow mode re-runs the current filter set every interval (text-only).
 
-- `logs status` is the log-rotation and disk-headroom posture check used by the Ops screen
-- `logs recent` is the realm-log investigation surface used by the dedicated Logs module
-- `logs recent` is scoped to Manager-supported realm sources only: `auth`, `world`, or `all`
-- default recent filters are `source=all`, `window=15m`, `severity=all`, and `limit=25`
-- watch/follow mode is text-only and re-runs the current filter set every interval
-- default watch interval is `2` seconds
+---
 
-## Schedule Commands
+## ⏰ Schedule
 
 ```bash
 vmangos-manager schedule honor --time 06:00 --daily [--timezone UTC]
@@ -101,14 +121,14 @@ vmangos-manager schedule simulate <job-id>
 vmangos-manager schedule cancel <job-id>
 ```
 
-Notes:
+- Schedules are stored under the Manager state directory and rendered into `systemd` timer/service units.
+- `schedule restart` uses journal-only warnings unless `maintenance.announce_command` is configured.
+- `schedule honor` requires `maintenance.honor_command` in `manager.conf`.
+- Default restart warnings: `30,15,5,1`.
 
-- schedules are stored under the Manager root and rendered into `systemd` timer/service units
-- `schedule restart` uses journal-only warnings unless `maintenance.announce_command` is configured
-- `schedule honor` requires `maintenance.honor_command` in `manager.conf`
-- `restart_warnings` defaults to `30,15,5,1`
+---
 
-## Account Commands
+## 👤 Account
 
 ```bash
 vmangos-manager account create <username> [--password-file PATH|--password-env]
@@ -119,13 +139,13 @@ vmangos-manager account unban <username>
 vmangos-manager account password <username> [--password-file PATH|--password-env]
 ```
 
-Notes:
+- Passwords are **never** accepted as positional arguments.
+- Supported inputs: interactive prompt, `--password-file`, `--password-env`.
+- Usernames are normalized to uppercase to match the VMANGOS auth model.
 
-- passwords are never accepted as positional arguments
-- supported password inputs are interactive prompt, `--password-file`, and `--password-env`
-- usernames are normalized to uppercase to match the VMANGOS auth model
+---
 
-## Backup Commands
+## 💾 Backup
 
 ```bash
 vmangos-manager backup now [--verify]
@@ -138,7 +158,9 @@ vmangos-manager backup schedule --daily HH:MM
 vmangos-manager backup schedule --weekly "Sun 04:00"
 ```
 
-## Config Commands
+---
+
+## ⚙️ Config
 
 ```bash
 vmangos-manager config create [--path FILE]
@@ -147,15 +169,12 @@ vmangos-manager config validate [--format text|json]
 vmangos-manager config show [--format text|json]
 ```
 
-Behavior:
+- `config detect` is **read-only**. It inspects install roots, parses `mangosd.conf` / `realmd.conf`, matches `systemd` service names, and prints a proposed `manager.conf` with confidence scoring.
+- `config create` generates a default config including `[maintenance]` settings.
 
-- `config detect` inspects likely VMANGOS install roots and parses `mangosd.conf` / `realmd.conf` when found
-- `config detect` attempts to match auth/world service names from `systemd`
-- `config detect` prints a proposed `manager.conf` and reports confidence, assumptions, and ambiguity
-- `config detect` is read-only; it does not overwrite `manager.conf`
-- `config create` includes a `[maintenance]` section for scheduler timezone, honor backend, warning backend, and default restart warnings
+---
 
-## Update Commands
+## 🔄 Update
 
 ```bash
 vmangos-manager update check
@@ -168,62 +187,52 @@ vmangos-manager update apply --backup-first
 vmangos-manager update apply --backup-first --include-db
 ```
 
-Behavior:
+- `update check` prefers the VMANGOS core source tree under `<install_root>/source`; falls back to the current `VMANGOS-Manager` checkout.
+- `update inspect` performs a read-only DB assessment against `auth`, `world`, and `logs`.
+- `update plan --include-db` adds migration assessment and fails closed when manual SQL review is needed.
+- `update apply` is **non-atomic** and does not promise rollback.
+- `update apply` requires `--backup-first` or explicit confirmation of a verified backup.
+- `update apply` rejects dirty/divergent source trees.
+- `update apply --include-db` only applies supported timestamped files under `sql/migrations`.
 
-- `update check` prefers the configured VMANGOS core source tree under `<install_root>/source`
-- if no installed source tree is available, `update check` falls back to the current `VMANGOS-Manager` checkout
-- `update inspect` performs a read-only DB assessment against the configured `auth`, `world`, and `logs` databases
-- `update plan` prints the non-atomic update steps for the configured VMANGOS core tree
-- `update plan --include-db` adds DB migration assessment and fails closed when SQL changes need manual review
-- `update apply` performs the non-atomic core update workflow in place
-- `update apply --include-db` applies only supported timestamped files under `sql/migrations`
+---
 
-Important:
+## 🔥 Common Workflows
 
-- `update apply` is non-atomic and does not promise rollback
-- `update apply` requires either `--backup-first` or explicit confirmation that a verified backup already exists
-- `update apply` rejects dirty or divergent VMANGOS source trees
-- `update apply --include-db` refuses to mutate the DB if upstream SQL changes fall outside `sql/migrations/<timestamp>_{world|logon|logs}.sql`
-- modified, deleted, or renamed SQL files require manual review before running a DB-aware update
-- `update apply` does not support JSON output
-- if no installed source tree is available, run Manager checkout comparisons from a source checkout or set `VMANGOS_MANAGER_REPO=/path/to/VMANGOS-Manager`
-
-## Common Workflows
-
-Dashboard:
+**Dashboard:**
 
 ```bash
 sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
 sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
 ```
 
-Status:
+**Status:**
 
 ```bash
 sudo /opt/mangos/manager/bin/vmangos-manager server status
 sudo /opt/mangos/manager/bin/vmangos-manager server status --watch --interval 2
 ```
 
-Account creation:
+**Account creation:**
 
 ```bash
 sudo VMANGOS_PASSWORD='ChangeMe7' /opt/mangos/manager/bin/vmangos-manager account create TESTUSER --password-env
 ```
 
-Backup with verification:
+**Backup with verification:**
 
 ```bash
 sudo /opt/mangos/manager/bin/vmangos-manager backup now --verify
 ```
 
-Recent realm logs:
+**Recent realm logs:**
 
 ```bash
 sudo /opt/mangos/manager/bin/vmangos-manager logs recent --source all --window 15m --severity warning --limit 25
 sudo /opt/mangos/manager/bin/vmangos-manager logs recent --source world --severity error --watch --interval 2
 ```
 
-Update check from a checkout:
+**Update check from a checkout:**
 
 ```bash
 cd ~/source/VMANGOS-Manager
