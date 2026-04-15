@@ -69,7 +69,7 @@ VIEW_SUMMARIES = {
     "backups": "Check protection posture, then act on the selected archive with confidence.",
     "config": "Confirm Manager's wiring view before you trust higher-level automation.",
     "logs": "Inspect recent realm events by source, severity, and time window without leaving Manager.",
-    "operations": "Review the maintenance queue, host housekeeping posture, and update preflight facts.",
+    "operations": "Work the maintenance and change-window flow: readiness, scheduled tasks, and update planning.",
 }
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9]{2,32}$")
@@ -610,12 +610,12 @@ def view_command_tokens(active_view: str) -> list[tuple[str, str]]:
         ]
     if active_view == "operations":
         return [
-            ("h", "schedule maintenance"),
-            ("m", "schedule restart"),
-            ("j", "cancel schedule"),
-            ("P", "update plan"),
-            ("T", "test logs"),
-            ("l", "rotate logs"),
+            ("h", "maintenance"),
+            ("m", "restart"),
+            ("j", "remove task"),
+            ("P", "plan"),
+            ("T", "test config"),
+            ("l", "rotate"),
         ]
     if active_view == "config":
         return [("k", "validate config")]
@@ -681,6 +681,11 @@ def build_dashboard_action_request(
             "env": {"VMANGOS_PASSWORD": password},
             "refresh_after": True,
             "view": "accounts",
+            "feedback": {
+                "success_receipt": f"Created account {username}.",
+                "success_next": "Stay in Accounts to set GM access, reset the password again, or ban the account if needed.",
+                "failure_next": "Check username policy and auth DB connectivity, then retry from Accounts.",
+            },
         }
 
     if action_name == "config_validate":
@@ -690,6 +695,11 @@ def build_dashboard_action_request(
             "env": {},
             "refresh_after": True,
             "view": "config",
+            "feedback": {
+                "success_receipt": "Revalidated Manager's configuration wiring against the current host.",
+                "success_next": "If validation still looks wrong, fix manager.conf or .dbpass in the shell and re-run validation here.",
+                "failure_next": "Review manager.conf and .dbpass in the shell, then validate again from Config.",
+            },
         }
 
     if action_name == "logs_rotate":
@@ -699,6 +709,11 @@ def build_dashboard_action_request(
             "env": {},
             "refresh_after": True,
             "view": "operations",
+            "feedback": {
+                "success_receipt": "Requested a log rotation cycle for the realm host.",
+                "success_next": "Review Maintenance Readiness after refresh to confirm rotation posture and disk headroom.",
+                "failure_next": "Check logrotate wiring and permissions, then retry from Operations.",
+            },
         }
 
     if action_name == "logs_test_config":
@@ -708,6 +723,11 @@ def build_dashboard_action_request(
             "env": {},
             "refresh_after": False,
             "view": "operations",
+            "feedback": {
+                "success_receipt": "Validated the current log rotation configuration.",
+                "success_next": "If readiness still looks risky here, inspect log config in the shell before the next maintenance window.",
+                "failure_next": "Fix log rotation config in the shell, then rerun the test from Operations.",
+            },
         }
 
     account = find_selected_account(snapshot, selected_account_id)
@@ -731,6 +751,11 @@ def build_dashboard_action_request(
                 "env": {"VMANGOS_PASSWORD": password},
                 "refresh_after": True,
                 "view": "accounts",
+                "feedback": {
+                    "success_receipt": f"Reset the password for {username}.",
+                    "success_next": "Deliver the new credential out-of-band, then use the selected account row to confirm other access state if needed.",
+                    "failure_next": f"Retry the password reset for {username} from Accounts after correcting the input or auth DB issue.",
+                },
             }
 
         if action_name == "account_setgm":
@@ -743,6 +768,11 @@ def build_dashboard_action_request(
                 "env": {},
                 "refresh_after": True,
                 "view": "accounts",
+                "feedback": {
+                    "success_receipt": f"Set GM level {gm_level} for {username}.",
+                    "success_next": "Let the Accounts table refresh, then confirm the new GM level in the selected row.",
+                    "failure_next": f"Review the selected account and GM level input for {username}, then retry from Accounts.",
+                },
             }
 
         if action_name == "account_ban":
@@ -758,6 +788,11 @@ def build_dashboard_action_request(
                 "env": {},
                 "refresh_after": True,
                 "view": "accounts",
+                "feedback": {
+                    "success_receipt": f"Banned {username} for {duration}.",
+                    "success_next": "Let Accounts refresh, then confirm the banned state before moving on to other moderation work.",
+                    "failure_next": f"Review the duration and reason for {username}, then retry the ban from Accounts.",
+                },
             }
 
         if action_name == "account_unban":
@@ -767,6 +802,11 @@ def build_dashboard_action_request(
                 "env": {},
                 "refresh_after": True,
                 "view": "accounts",
+                "feedback": {
+                    "success_receipt": f"Removed active bans for {username}.",
+                    "success_next": "Let Accounts refresh, then confirm the banned flag is cleared for the selected account.",
+                    "failure_next": f"Retry the unban for {username} from Accounts after checking auth DB connectivity.",
+                },
             }
 
     if action_name.startswith("backup_"):
@@ -787,6 +827,11 @@ def build_dashboard_action_request(
                 "env": {},
                 "refresh_after": False,
                 "view": "backups",
+                "feedback": {
+                    "success_receipt": f"Completed a restore dry-run for {backup_file}.",
+                    "success_next": "Review the selected backup here; live restore stays in the CLI and should only be run during an approved recovery window.",
+                    "failure_next": "Inspect the archive path and backup health, then retry the dry-run from Backups.",
+                },
             }
 
         if action_name == "backup_schedule_daily":
@@ -799,6 +844,11 @@ def build_dashboard_action_request(
                 "env": {},
                 "refresh_after": True,
                 "view": "backups",
+                "feedback": {
+                    "success_receipt": f"Updated the daily backup schedule for {daily_time}.",
+                    "success_next": "Review Timer State after refresh to confirm the next run and overall protection posture.",
+                    "failure_next": "Check the requested time and timer permissions, then retry from Backups.",
+                },
             }
 
         if action_name == "backup_schedule_weekly":
@@ -811,6 +861,11 @@ def build_dashboard_action_request(
                 "env": {},
                 "refresh_after": True,
                 "view": "backups",
+                "feedback": {
+                    "success_receipt": f"Updated the weekly backup schedule for {weekly_schedule}.",
+                    "success_next": "Review Timer State after refresh to confirm the next weekly run and protection posture.",
+                    "failure_next": "Check the requested weekly schedule format and retry from Backups.",
+                },
             }
 
     if action_name in ("schedule_honor_create", "schedule_restart_create"):
@@ -855,21 +910,33 @@ def build_dashboard_action_request(
             "env": {},
             "refresh_after": True,
             "view": "operations",
+            "feedback": {
+                "success_receipt": (
+                    f"Scheduled a {'maintenance task' if action_name == 'schedule_honor_create' else 'restart window'} for {cadence} {timezone_value}".strip()
+                ),
+                "success_next": "Review Scheduled Tasks after refresh so you can confirm the queue entry, next run, and warnings.",
+                "failure_next": "Check the cadence, time, timezone, and warning inputs, then retry from Operations.",
+            },
         }
 
     if action_name == "schedule_cancel":
         schedule = find_selected_schedule(snapshot, selected_schedule_id)
         if schedule is None:
-            return {"error": "schedule cancel skipped: no job selected"}
+            return {"error": "task removal skipped: no task selected"}
         schedule_id = str(schedule.get("id", "")).strip()
         if not schedule_id:
-            return {"error": "schedule cancel skipped: selected schedule has no id"}
+            return {"error": "task removal skipped: selected task has no id"}
         return {
-            "label": f"schedule cancel {schedule_id}",
+            "label": f"remove task {schedule_id}",
             "command": ["schedule", "cancel", schedule_id],
             "env": {},
             "refresh_after": True,
             "view": "operations",
+            "feedback": {
+                "success_receipt": f"Removed scheduled task {schedule_id}.",
+                "success_next": "Review the queue after refresh before you create or approve more maintenance work.",
+                "failure_next": f"Retry removing {schedule_id} from Operations after checking the selected task.",
+            },
         }
 
     return {"error": f"unsupported dashboard action: {action_name}"}
@@ -1123,21 +1190,30 @@ def render_action_banner(
     last_action: str,
     action_tone: str,
     refresh_interval: int,
+    action_receipt: str = "",
+    action_next_step: str = "",
+    action_view_context: str | None = None,
 ) -> str:
     tone_label, tone_color = ACTION_STYLES.get(action_tone, ACTION_STYLES["info"])
     captured_at = iso_to_display(snapshot.get("captured_at"))
     message = escape_markup(truncate_text(last_action or "dashboard started", 140))
+    receipt = escape_markup(truncate_text(action_receipt or "", 140))
+    next_step = escape_markup(truncate_text(action_next_step or "", 140))
     view_title = VIEW_TITLES.get(active_view, active_view.title())
     view_summary = VIEW_SUMMARIES.get(active_view, "Operate the realm from one console.")
-    return "\n".join(
-        [
-            f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]  [{ACCENT_MUTED}]realm console[/]  [bold {ACCENT_SKY}]{view_title}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
-            f"[{ACCENT_MUTED}]last refresh[/] {captured_at}  [{ACCENT_MUTED}]action state[/] [bold {tone_color}]{tone_label}[/]",
-            "",
-            f"[bold {ACCENT_SKY}]This View[/] {escape_markup(view_summary)}",
-            f"[{ACCENT_MUTED}]Last action[/] {message}",
-        ]
-    )
+    show_follow_up = not action_view_context or active_view == action_view_context
+    lines = [
+        f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]  [{ACCENT_MUTED}]realm console[/]  [bold {ACCENT_SKY}]{view_title}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
+        f"[{ACCENT_MUTED}]last refresh[/] {captured_at}  [{ACCENT_MUTED}]action state[/] [bold {tone_color}]{tone_label}[/]",
+        "",
+        f"[bold {ACCENT_SKY}]This View[/] {escape_markup(view_summary)}",
+        f"[{ACCENT_MUTED}]Last action[/] {message}",
+    ]
+    if show_follow_up and receipt:
+        lines.append(f"[{ACCENT_MUTED}]Receipt[/] {receipt}")
+    if show_follow_up and next_step:
+        lines.append(f"[{ACCENT_MUTED}]Next[/] {next_step}")
+    return "\n".join(lines)
 
 
 def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any], refresh_interval: int) -> str:
@@ -1719,6 +1795,7 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
                 f"[{ACCENT_MUTED}]Created By[/]  {escape_markup(selected_backup.get('created_by', 'n/a'))}",
                 "",
                 f"[{ACCENT_MUTED}]Ready for[/]   verify or restore dry-run from this selection.",
+                f"[{ACCENT_MUTED}]Boundary[/]    dry-run restore here first; live restore stays in the CLI on purpose.",
             ]
         )
     else:
@@ -1726,6 +1803,7 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
             [
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]   choose a backup row to inspect, verify, or dry-run restore.",
+                f"[{ACCENT_MUTED}]Boundary[/]    verify and dry-run here; live restore stays in the CLI.",
             ]
         )
 
@@ -1768,8 +1846,8 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
             f"[{ACCENT_MUTED}]DB Secret[/]     {escape_markup(secret_label)}",
             f"[{ACCENT_MUTED}]DB Names[/]      auth={summary.get('auth_db', 'n/a')} world={summary.get('world_db', 'n/a')} chars={summary.get('characters_db', 'n/a')} logs={summary.get('logs_db', 'n/a')}",
             "",
-            f"[bold {ACCENT_SKY}]Dashboard Role[/]",
-            f"[{ACCENT_MUTED}]Read-only[/]     validate and review wiring here; edit manager.conf and .dbpass in the shell.",
+            f"[bold {ACCENT_SKY}]Boundary[/]",
+            f"[{ACCENT_MUTED}]Read-only[/]     inspect and validate wiring here; edit manager.conf and .dbpass in the shell.",
             f"[{ACCENT_MUTED}]CLI[/]           [bold {ACCENT_GOLD}]config detect[/], [bold {ACCENT_GOLD}]config validate[/], [bold {ACCENT_GOLD}]config show[/]",
             f"[{ACCENT_MUTED}]Action[/]        [bold {ACCENT_GOLD}]k[/] validate config",
         ]
@@ -1882,7 +1960,8 @@ def render_realm_logs_summary(snapshot: dict[str, Any]) -> str:
             f"[{ACCENT_MUTED}]Coverage[/]     backing={escape_markup(str(summary.get('backing', 'unavailable')))}  sources={summary.get('sources_available', 0)}/{summary.get('sources_requested', 0)}  available={escape_markup(available_sources)}",
             f"[{ACCENT_MUTED}]Follow[/]       refresh={str(capabilities.get('follow_via_refresh', False)).lower()}  severity_filter={str(capabilities.get('severity_filter_supported', False)).lower()}  window_filter={str(capabilities.get('time_window_supported', False)).lower()}",
             "",
-            f"[{ACCENT_MUTED}]Adjust[/]       [bold {ACCENT_GOLD}]f[/] filters  [{ACCENT_MUTED}]Follow[/] automatic on refresh  [{ACCENT_MUTED}]Ops[/] [bold {ACCENT_GOLD}]7[/] queue/readiness",
+            f"[{ACCENT_MUTED}]Adjust[/]       [bold {ACCENT_GOLD}]f[/] filters  [{ACCENT_MUTED}]Follow[/] automatic on refresh",
+            f"[{ACCENT_MUTED}]Escalate[/]     stay here for evidence  [bold {ACCENT_GOLD}]7[/] Ops when this becomes maintenance or change-window work",
         ]
     )
     return "\n".join(lines)
@@ -1927,9 +2006,9 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
     logs = snapshot.get("logs", {})
     queue_count = len(snapshot.get("schedules", []))
     lines = [
-        f"[bold {ACCENT_GOLD}]Host Housekeeping Posture[/]",
+        f"[bold {ACCENT_GOLD}]Maintenance Readiness[/]",
         "",
-        f"[{ACCENT_MUTED}]Log rotation, file hygiene, and disk headroom that can affect maintenance confidence.[/]",
+        f"[{ACCENT_MUTED}]Log rotation, file hygiene, and disk headroom that can make or break a clean maintenance window.[/]",
         "",
     ]
 
@@ -1950,15 +2029,16 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
         [
             f"[{ACCENT_MUTED}]Overall[/]       {format_state(readiness)}",
             f"[{ACCENT_MUTED}]Queue[/]         {queue_count} scheduled task{'s' if queue_count != 1 else ''}",
-            f"[{ACCENT_MUTED}]Logs[/]          {format_state(data.get('status', 'unavailable'))}",
+            f"[{ACCENT_MUTED}]Log Health[/]    {format_state(data.get('status', 'unavailable'))}",
             f"[{ACCENT_MUTED}]Rotation[/]      {format_state(config_state)}  present={config.get('present', False)}  in_sync={config.get('in_sync', False)}",
             f"[{ACCENT_MUTED}]Sensitive[/]     {format_state(sensitive_state)}  perms_ok={log_counts.get('sensitive_permissions_ok', False)}",
             f"[{ACCENT_MUTED}]Files[/]         active={log_counts.get('active_files', 0)}  rotated={log_counts.get('rotated_files', 0)}",
             f"[{ACCENT_MUTED}]Headroom[/]      {disk.get('used_percent', 0)}% used  free {format_gb_from_kb(disk.get('available_kb', 0))}",
             f"[{ACCENT_MUTED}]Retention[/]     max={policy.get('max_size', 'n/a')}  min={policy.get('min_size', 'n/a')}",
             "",
-            f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
-            f"[{ACCENT_MUTED}]Support[/]       [bold {ACCENT_GOLD}]T[/] test logs  [bold {ACCENT_GOLD}]l[/] rotate logs",
+            f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
+            f"[{ACCENT_MUTED}]Support[/]       [bold {ACCENT_GOLD}]T[/] test log config  [bold {ACCENT_GOLD}]l[/] rotate logs",
+            f"[{ACCENT_MUTED}]Boundary[/]      inspect realm events in Logs; use this panel for readiness before scheduled work.",
         ]
     )
     return "\n".join(lines)
@@ -1968,9 +2048,9 @@ def render_update_panel(snapshot: dict[str, Any], update_plan_data: dict[str, An
     check = snapshot.get("update_check", {})
     inspect = snapshot.get("update_inspect", {})
     lines = [
-        f"[bold {ACCENT_GOLD}]Update Readiness[/]",
+        f"[bold {ACCENT_GOLD}]Change Window Readiness[/]",
         "",
-        f"[{ACCENT_MUTED}]Repository drift and database impact before risky code changes.[/]",
+        f"[{ACCENT_MUTED}]Repository drift, DB impact, and next-step planning before risky code changes.[/]",
         "",
     ]
 
@@ -2025,6 +2105,15 @@ def render_update_panel(snapshot: dict[str, Any], update_plan_data: dict[str, An
             ]
         )
 
+    lines.extend(
+        [
+            "",
+            f"[bold {ACCENT_SKY}]Boundary[/]",
+            f"[{ACCENT_MUTED}]Dashboard[/]     inspect readiness and build the plan here.",
+            f"[{ACCENT_MUTED}]CLI[/]           run update apply or source-tree work from the shell after backup and maintenance prep.",
+        ]
+    )
+
     return "\n".join(lines)
 
 
@@ -2042,19 +2131,19 @@ def schedule_label(schedule: dict[str, Any]) -> str:
 def schedule_origin_label(schedule: dict[str, Any]) -> str:
     job_type = str(schedule.get("job_type", "") or "").strip().lower()
     if job_type == "honor":
-        return "maintenance job via Manager scheduler"
+        return "maintenance task scheduled by Manager"
     if job_type == "restart":
-        return "restart window via Manager scheduler"
-    return "manager scheduler backend"
+        return "restart window scheduled by Manager"
+    return "scheduled by Manager"
 
 
 def render_schedule_intro(schedules: list[dict[str, Any]]) -> str:
     count = len(schedules)
     return "\n".join(
         [
-            f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
-            f"[{ACCENT_MUTED}]Queue Source[/]  jobs appear here after dashboard creation or the matching [bold {ACCENT_GOLD}]schedule[/] CLI commands.",
-            f"[{ACCENT_MUTED}]Now[/]           {count} scheduled task{'s' if count != 1 else ''} in the queue.",
+            f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
+            f"[{ACCENT_MUTED}]Source[/]        tasks appear here after you create them in Operations or with the matching schedule CLI commands.",
+            f"[{ACCENT_MUTED}]Queue[/]         {count} scheduled task{'s' if count != 1 else ''} ready for review.",
         ]
     )
 
@@ -2067,15 +2156,15 @@ def render_schedule_details(
     if not schedule:
         return "\n".join(
             [
-                f"[bold {ACCENT_GOLD}]Selected Schedule[/]",
-                f"[{ACCENT_MUTED}]Origin, cadence, and next action for the highlighted schedule.[/]",
+                f"[bold {ACCENT_GOLD}]Selected Task[/]",
+                f"[{ACCENT_MUTED}]Origin, cadence, and next action for the highlighted scheduled task.[/]",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]     choose a job row from the queue to inspect or cancel it.",
                 f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
                 "",
-                f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
-                f"[{ACCENT_MUTED}]CLI Path[/]      [bold {ACCENT_GOLD}]schedule honor[/] or [bold {ACCENT_GOLD}]schedule restart[/]",
-                f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] cancel the selected schedule once one is highlighted.",
+                f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
+                f"[{ACCENT_MUTED}]Boundary[/]      queue entries can be created here or from the CLI; inspect and cancel them here either way.",
+                f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] cancel the selected task once one is highlighted.",
             ]
         )
 
@@ -2083,11 +2172,11 @@ def render_schedule_details(
     announce_message = str(schedule.get("announce_message", "") or "none")
     return "\n".join(
         [
-            f"[bold {ACCENT_GOLD}]Selected Schedule[/]",
-            f"[{ACCENT_MUTED}]Origin, cadence, and next action for the highlighted schedule.[/]",
+            f"[bold {ACCENT_GOLD}]Selected Task[/]",
+            f"[{ACCENT_MUTED}]Origin, cadence, and next action for the highlighted scheduled task.[/]",
             "",
             f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
-            f"[{ACCENT_MUTED}]Schedule ID[/]   {escape_markup(schedule.get('id', 'n/a'))}",
+            f"[{ACCENT_MUTED}]Task ID[/]       {escape_markup(schedule.get('id', 'n/a'))}",
             f"[{ACCENT_MUTED}]Type[/]          {escape_markup(schedule_job_type_label(schedule.get('job_type', 'n/a')))}",
             f"[{ACCENT_MUTED}]Origin[/]        {escape_markup(schedule_origin_label(schedule))}",
             f"[{ACCENT_MUTED}]Cadence[/]       {escape_markup(schedule.get('schedule_type', 'n/a'))}",
@@ -2096,8 +2185,8 @@ def render_schedule_details(
             f"[{ACCENT_MUTED}]Warnings[/]      {escape_markup(warnings)}",
             f"[{ACCENT_MUTED}]Announce[/]      {escape_markup(announce_message)}",
             "",
-            f"[{ACCENT_MUTED}]Create More[/]   [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
-            f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] remove this schedule if it is no longer desired.",
+            f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
+            f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] remove this task if it is no longer desired.",
         ]
     )
 
@@ -2753,14 +2842,14 @@ def create_app(
             ("n", "ban_account", "Ban"),
             ("u", "unban_account", "Unban"),
             ("l", "rotate_logs", "Rotate Logs"),
-            ("T", "test_logs_config", "Test Logs"),
+            ("T", "test_logs_config", "Test Config"),
             ("h", "create_honor_schedule", "Schedule Maintenance"),
             ("m", "create_restart_schedule", "Schedule Restart"),
             ("P", "refresh_update_plan", "Update Plan"),
             ("d", "restore_selected_backup_dry_run", "Dry Run"),
             ("y", "schedule_daily_backup", "Daily"),
             ("w", "schedule_weekly_backup", "Weekly"),
-            ("j", "cancel_selected_schedule", "Cancel Schedule"),
+            ("j", "cancel_selected_schedule", "Remove Task"),
             ("k", "validate_config", "Validate"),
             ("f", "filter_logs", "Filters"),
             ("1", "show_overview", "Overview"),
@@ -2785,6 +2874,9 @@ def create_app(
             self.screenshot_pending = False
             self.active_view = initial_view if initial_view in VIEW_TITLES else "overview"
             self.last_action = "loading dashboard data..."
+            self.last_action_receipt = ""
+            self.last_action_next_step = ""
+            self.last_action_view = self.active_view
             self.action_tone = "info"
             self.snapshot = empty_snapshot("waiting for first refresh")
             self.metric_history: list[dict[str, Any]] = []
@@ -2844,7 +2936,7 @@ def create_app(
                                     yield Static("", id="logs-pane", classes="panel accent-panel")
                                     yield Static("", id="update-pane", classes="panel hero-panel")
                                 with Vertical(classes="panel table-panel table-detail", id="schedules-layout"):
-                                    yield Static("[b]Scheduled Maintenance[/b]", classes="table-detail-title")
+                                    yield Static("[b]Scheduled Tasks[/b]", classes="table-detail-title")
                                     yield Static("", id="schedule-intro")
                                     with Horizontal(classes="table-detail-body"):
                                         yield DataTable(id="schedules-table", classes="detail-table")
@@ -2912,6 +3004,9 @@ def create_app(
                     self.last_action,
                     self.action_tone,
                     self.refresh_interval,
+                    self.last_action_receipt,
+                    self.last_action_next_step,
+                    self.last_action_view,
                 )
             )
             self.query_one("#command-rail", Static).update(render_command_rail(self.active_view))
@@ -3186,6 +3281,7 @@ def create_app(
                 list(request["command"]),
                 refresh_after=bool(request.get("refresh_after", True)),
                 env=dict(request.get("env", {})),
+                feedback=dict(request.get("feedback", {})),
             )
 
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -3237,24 +3333,56 @@ def create_app(
             self.apply_view_state()
 
         def action_manual_refresh(self) -> None:
-            self.set_action_result(f"manual refresh requested at {datetime.now().strftime('%H:%M:%S')}", tone="info")
+            self.set_action_result(
+                f"manual refresh requested at {datetime.now().strftime('%H:%M:%S')}",
+                tone="info",
+                receipt="Requested a fresh dashboard snapshot from Manager.",
+            )
             self.request_snapshot_refresh()
 
         def action_toggle_theme(self) -> None:
             self.theme_name = "light" if self.theme_name == "dark" else "dark"
             self.apply_theme()
-            self.set_action_result(f"theme set to {self.theme_name}", tone="success")
+            self.set_action_result(
+                f"theme set to {self.theme_name}",
+                tone="success",
+                receipt=f"Switched the dashboard theme to {self.theme_name}.",
+            )
             self.apply_view_state()
             self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view))
 
         def action_start_server(self) -> None:
-            self.request_command_action("start", ["server", "start", "--wait", "--timeout", "60"])
+            self.request_command_action(
+                "start",
+                ["server", "start", "--wait", "--timeout", "60"],
+                feedback={
+                    "success_receipt": "Requested a realm start.",
+                    "success_next": "Stay in Overview or Logs until auth and world both settle healthy.",
+                    "failure_next": "Inspect service health and recent logs, then retry the start when the host is ready.",
+                },
+            )
 
         def action_stop_server(self) -> None:
-            self.request_command_action("stop", ["server", "stop", "--timeout", "60"])
+            self.request_command_action(
+                "stop",
+                ["server", "stop", "--timeout", "60"],
+                feedback={
+                    "success_receipt": "Requested a realm stop.",
+                    "success_next": "Confirm auth and world settle inactive before backups, updates, or maintenance work.",
+                    "failure_next": "Inspect service health and logs, then retry the stop when the host is ready.",
+                },
+            )
 
         def action_restart_server(self) -> None:
-            self.request_command_action("restart", ["server", "restart", "--timeout", "60"])
+            self.request_command_action(
+                "restart",
+                ["server", "restart", "--timeout", "60"],
+                feedback={
+                    "success_receipt": "Requested a realm restart.",
+                    "success_next": "Use Overview and Logs to confirm the realm settles cleanly after the restart.",
+                    "failure_next": "Inspect service health and recent logs, then retry the restart when the host is ready.",
+                },
+            )
 
         def handle_online_roster_result(self, account_id: str | None) -> None:
             if not account_id:
@@ -3274,7 +3402,15 @@ def create_app(
         def action_backup_now(self) -> None:
             self.active_view = "backups"
             self.apply_view_state()
-            self.request_command_action("backup", ["backup", "now", "--verify"])
+            self.request_command_action(
+                "backup",
+                ["backup", "now", "--verify"],
+                feedback={
+                    "success_receipt": "Started a fresh backup with verification enabled.",
+                    "success_next": "Stay in Backups after refresh to review the new archive and protection posture.",
+                    "failure_next": "Review backup directory access and DB connectivity, then retry from Backups.",
+                },
+            )
 
         def action_verify_selected_backup(self) -> None:
             backups = self.snapshot.get("backups", {})
@@ -3285,7 +3421,16 @@ def create_app(
                 return
 
             backup_path = f"{backup_dir.rstrip('/')}/{self.selected_backup_file}"
-            self.request_command_action("verify", ["backup", "verify", backup_path, "--level", "1"], refresh_after=False)
+            self.request_command_action(
+                "verify",
+                ["backup", "verify", backup_path, "--level", "1"],
+                refresh_after=False,
+                feedback={
+                    "success_receipt": f"Verified backup {self.selected_backup_file}.",
+                    "success_next": "If you need recovery planning, use restore dry-run here; live restore stays in the CLI.",
+                    "failure_next": "Inspect the selected archive and retry verification from Backups.",
+                },
+            )
 
         def action_create_account(self) -> None:
             self.active_view = "accounts"
@@ -3299,7 +3444,7 @@ def create_app(
                     {"name": "password", "label": "Password", "password": True},
                     {"name": "confirm_password", "label": "Confirm Password", "password": True},
                 ],
-                "Create a VMaNGOS account using the existing Manager CLI backend.",
+                "Create a new VMaNGOS account from the dashboard account workflow.",
             )
 
         def action_reset_account_password(self) -> None:
@@ -3360,7 +3505,7 @@ def create_app(
                     {"name": "duration", "label": "Duration", "placeholder": "7d"},
                     {"name": "reason", "label": "Reason", "placeholder": "Abuse"},
                 ],
-                f"Ban {username} with the existing account CLI workflow.",
+                f"Ban {username} from the dashboard moderation workflow.",
             )
 
         def action_unban_account(self) -> None:
@@ -3432,6 +3577,8 @@ def create_app(
             self.set_action_result(
                 f"logs filters set: {query['source']} {query['window']} {query['severity']} limit {query['limit']}",
                 tone="info",
+                receipt=f"Focused the realm event feed on source={query['source']}, window={query['window']}, severity={query['severity']}, limit={query['limit']}.",
+                next_step="Inspect Selected Event here, then move to Operations only if the incident becomes maintenance or change-window work.",
             )
             self.request_snapshot_refresh()
 
@@ -3476,7 +3623,7 @@ def create_app(
                     {"name": "time", "label": "Time (HH:MM)", "value": "06:00", "placeholder": "06:00"},
                     {"name": "timezone", "label": "Timezone", "value": "UTC", "placeholder": "UTC"},
                 ],
-                "Schedule the configured maintenance job backend. This uses maintenance.honor_command under the hood.",
+                "Create a scheduled maintenance task using Manager's configured maintenance command.",
             )
 
         def action_create_restart_schedule(self) -> None:
@@ -3494,7 +3641,7 @@ def create_app(
                     {"name": "warnings", "label": "Warnings", "value": "30,15,5,1", "placeholder": "30,15,5,1"},
                     {"name": "announce", "label": "Announcement", "value": "Weekly maintenance", "placeholder": "Weekly maintenance"},
                 ],
-                "Create a scheduled restart with warning timers via the existing Manager scheduler backend.",
+                "Create a scheduled restart window with warning timers.",
             )
 
         def action_refresh_update_plan(self) -> None:
@@ -3505,15 +3652,15 @@ def create_app(
         def action_cancel_selected_schedule(self) -> None:
             schedule = self.selected_schedule()
             if schedule is None:
-                self.set_action_result("schedule cancel skipped: no job selected", tone="warning")
+                self.set_action_result("task removal skipped: no task selected", tone="warning")
                 return
             schedule_id = str(schedule.get("id", "selected schedule")).strip()
             self.active_view = "operations"
             self.apply_view_state()
             self.open_command_form(
                 "schedule_cancel",
-                "Cancel Schedule",
-                "Cancel Schedule",
+                "Remove Scheduled Task",
+                "Remove Task",
                 [],
                 f"Remove scheduled task {schedule_id} from Manager and systemd.",
             )
@@ -3523,36 +3670,54 @@ def create_app(
                 self.set_action_result("another dashboard action is already running", tone="warning")
                 return
             self.action_inflight = True
-            self.set_action_result("update plan running...", tone="running")
-            threading.Thread(target=self.run_update_plan_action, daemon=True).start()
+            view_context = self.active_view
+            self.set_action_result(
+                "update plan running...",
+                tone="running",
+                receipt="Checking repo drift and DB impact for the next change window.",
+                view_context=view_context,
+            )
+            threading.Thread(target=self.run_update_plan_action, args=(view_context,), daemon=True).start()
 
-        def run_update_plan_action(self) -> None:
+        def run_update_plan_action(self, view_context: str) -> None:
             try:
                 full_command = [self.manager_bin, "-c", self.config_path, "-f", "json", "update", "plan", "--include-db"]
                 completed = subprocess.run(full_command, capture_output=True, text=True, check=False)
                 if completed.returncode != 0:
                     output = (completed.stderr or completed.stdout or "").strip().splitlines()
                     message = output[-1] if output else f"update plan exited with code {completed.returncode}"
-                    self.call_from_thread(self.set_action_result, f"update plan failed: {message}", "error")
+                    self.call_from_thread(self.set_action_result, f"update plan failed: {message}", "error", "", "", view_context)
                     return
 
                 try:
                     data = parse_manager_json(completed.stdout)
                 except (json.JSONDecodeError, RuntimeError) as exc:
-                    self.call_from_thread(self.set_action_result, f"update plan failed: {exc}", "error")
+                    self.call_from_thread(self.set_action_result, f"update plan failed: {exc}", "error", "", "", view_context)
                     return
 
-                self.call_from_thread(self.apply_update_plan_data, data)
+                self.call_from_thread(self.apply_update_plan_data, data, view_context)
             finally:
                 self.action_inflight = False
 
-        def apply_update_plan_data(self, data: dict[str, Any]) -> None:
+        def apply_update_plan_data(self, data: dict[str, Any], view_context: str | None = None) -> None:
             self.update_plan_data = data
             warning_text = str(data.get("warning", "") or "")
             if warning_text:
-                self.set_action_result(f"update plan refreshed: {warning_text}", tone="warning")
+                self.set_action_result(
+                    f"update plan refreshed: {warning_text}",
+                    tone="warning",
+                    receipt="Generated a change-window plan and flagged follow-up work before code changes.",
+                    next_step="Review Change Window Readiness, then confirm backups and maintenance timing before any CLI update apply step.",
+                    view_context=view_context,
+                )
             else:
-                self.set_action_result("update plan refreshed", tone="success")
+                self.set_action_result(
+                    "update plan refreshed",
+                    tone="success",
+                    receipt="Generated a fresh change-window plan with current repo and DB impact.",
+                    next_step="Review the plan snapshot here, then continue the actual update workflow from the CLI after backup and maintenance prep.",
+                    view_context=view_context,
+                )
             self.query_one("#update-pane", Static).update(render_update_panel(self.snapshot, self.update_plan_data))
 
         def request_command_action(
@@ -3562,15 +3727,20 @@ def create_app(
             *,
             refresh_after: bool = True,
             env: dict[str, str] | None = None,
+            feedback: dict[str, str] | None = None,
         ) -> None:
             if self.action_inflight:
                 self.set_action_result("another dashboard action is already running", tone="warning")
                 return
             self.action_inflight = True
-            self.set_action_result(f"{label} running...", tone="running")
+            view_context = self.active_view
+            running_receipt = ""
+            if feedback:
+                running_receipt = feedback.get("running_receipt", feedback.get("success_receipt", ""))
+            self.set_action_result(f"{label} running...", tone="running", receipt=running_receipt, view_context=view_context)
             threading.Thread(
                 target=self.run_command_action,
-                args=(label, command, refresh_after, env or {}),
+                args=(label, command, refresh_after, env or {}, feedback or {}, view_context),
                 daemon=True,
             ).start()
 
@@ -3580,6 +3750,8 @@ def create_app(
             command: list[str],
             refresh_after: bool,
             env: dict[str, str],
+            feedback: dict[str, str],
+            view_context: str,
         ) -> None:
             try:
                 full_command = [self.manager_bin, "-c", self.config_path, *command]
@@ -3589,16 +3761,44 @@ def create_app(
                 output = (completed.stdout or completed.stderr or "").strip().splitlines()
                 message = output[-1] if output else f"{label} exited with code {completed.returncode}"
                 if completed.returncode == 0:
-                    self.call_from_thread(self.set_action_result, f"{label}: {message}", "success")
+                    receipt = feedback.get("success_receipt", "")
+                    next_step = feedback.get("success_next", "")
+                    self.call_from_thread(
+                        self.set_action_result,
+                        f"{label}: {message}",
+                        "success",
+                        receipt,
+                        next_step,
+                        view_context,
+                    )
                     if refresh_after:
                         self.call_from_thread(self.request_snapshot_refresh)
                 else:
-                    self.call_from_thread(self.set_action_result, f"{label} failed: {message}", "error")
+                    receipt = feedback.get("failure_receipt", "")
+                    next_step = feedback.get("failure_next", "")
+                    self.call_from_thread(
+                        self.set_action_result,
+                        f"{label} failed: {message}",
+                        "error",
+                        receipt,
+                        next_step,
+                        view_context,
+                    )
             finally:
                 self.action_inflight = False
 
-        def set_action_result(self, message: str, tone: str = "info") -> None:
+        def set_action_result(
+            self,
+            message: str,
+            tone: str = "info",
+            receipt: str = "",
+            next_step: str = "",
+            view_context: str | None = None,
+        ) -> None:
             self.last_action = message
+            self.last_action_receipt = receipt
+            self.last_action_next_step = next_step
+            self.last_action_view = view_context or self.active_view
             self.action_tone = tone
             self.refresh_chrome()
             self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view))
