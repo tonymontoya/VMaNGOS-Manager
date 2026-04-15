@@ -1083,6 +1083,7 @@ test_update_check_text_output() {
         CONFIG_SERVER_INSTALL_ROOT="/srv/mangos"
         return 0
     }
+    config_resolve_manager_root() { printf '/srv/mangos/manager\n'; }
     update_find_repo_root() { printf '/tmp/vmangos-manager\n'; }
     update_git() {
         local args="$*"
@@ -1126,6 +1127,7 @@ test_update_check_json_output() {
         CONFIG_SERVER_INSTALL_ROOT="/opt/mangos"
         return 0
     }
+    config_resolve_manager_root() { printf '/opt/mangos/manager\n'; }
     update_find_repo_root() { printf '/repo/root\n'; }
     update_git() {
         local args="$*"
