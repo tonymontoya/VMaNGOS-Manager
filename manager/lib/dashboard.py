@@ -45,11 +45,11 @@ ACCENT_GREEN = "#34d399"
 ACCENT_BLUE = "#3b82f6"
 
 ACTION_STYLES = {
-    "info": ("LIVE", ACCENT_SKY),
-    "running": ("WORKING", ACCENT_GOLD),
-    "success": ("READY", ACCENT_GREEN),
-    "warning": ("CHECK", ACCENT_GOLD),
-    "error": ("ERROR", ACCENT_ROSE),
+    "info": ("Action", ACCENT_SKY),
+    "running": ("Running", ACCENT_GOLD),
+    "success": ("Complete", ACCENT_GREEN),
+    "warning": ("Attention", ACCENT_GOLD),
+    "error": ("Failed", ACCENT_ROSE),
 }
 
 VIEW_TITLES = {
@@ -69,7 +69,7 @@ VIEW_SUMMARIES = {
     "backups": "Check protection posture, then act on the selected archive with confidence.",
     "config": "Confirm Manager's wiring view before you trust higher-level automation.",
     "logs": "Inspect recent realm events by source, severity, and time window without leaving Manager.",
-    "operations": "Review the maintenance queue and preflight risky change windows.",
+    "operations": "Review the maintenance queue, host housekeeping posture, and update preflight facts.",
 }
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9]{2,32}$")
@@ -496,6 +496,39 @@ def normalize_logs_query(values: dict[str, Any] | None = None) -> dict[str, str]
         "window": (normalized.get("window") or "15m").lower(),
         "severity": (normalized.get("severity") or "all").lower(),
         "limit": normalized.get("limit") or "25",
+    }
+
+
+def player_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
+    server = snapshot.get("server", {})
+    server_data = server.get("data", {}) if server.get("ok") else {}
+    player_state = server_data.get("players", {})
+    roster = snapshot.get("players", [])
+    online_count = clamp_int(player_state.get("online", len(roster)))
+    gm_players = [player for player in roster if clamp_int(player.get("gm_level", 0)) > 0]
+    gm_names = [str(player.get("username", "")).strip() for player in gm_players if str(player.get("username", "")).strip()]
+    gm_summary = ", ".join(gm_names[:3]) if gm_names else "none"
+    if len(gm_names) > 3:
+        gm_summary = f"{gm_summary} +{len(gm_names) - 3}"
+    staff_count = len(gm_players)
+    player_count = max(online_count - staff_count, 0)
+
+    if roster:
+        roster_source = "online roster"
+    elif online_count > 0:
+        roster_source = "count-only"
+    else:
+        roster_source = "empty roster"
+
+    return {
+        "online_count": online_count,
+        "count_source": str(player_state.get("source", "unavailable") or "unavailable"),
+        "roster_count": len(roster),
+        "roster_source": roster_source,
+        "gm_names": gm_names,
+        "gm_summary": gm_summary,
+        "staff_count": staff_count,
+        "player_count": player_count,
     }
 
 
@@ -1099,7 +1132,7 @@ def render_action_banner(
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]  [{ACCENT_MUTED}]realm console[/]  [bold {ACCENT_SKY}]{view_title}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
-            f"[{ACCENT_MUTED}]last refresh[/] {captured_at}  [{ACCENT_MUTED}]status[/] [bold {tone_color}]{tone_label}[/]",
+            f"[{ACCENT_MUTED}]last refresh[/] {captured_at}  [{ACCENT_MUTED}]action state[/] [bold {tone_color}]{tone_label}[/]",
             "",
             f"[bold {ACCENT_SKY}]This View[/] {escape_markup(view_summary)}",
             f"[{ACCENT_MUTED}]Last action[/] {message}",
@@ -1124,7 +1157,7 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
     auth = services.get("auth", {})
     world = services.get("world", {})
     backups = snapshot.get("backups", {}).get("summary", {})
-    players_online = len(snapshot.get("players", []))
+    players = player_summary(snapshot)
 
     lines = [
         f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]",
@@ -1144,7 +1177,7 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
             f"[bold {ACCENT_SKY}]Realm Pulse[/]",
             f"[{ACCENT_MUTED}]Updated[/]  {iso_to_clock(snapshot.get('captured_at'))}",
             f"[{ACCENT_MUTED}]Refresh[/]  {refresh_interval}s",
-            f"[{ACCENT_MUTED}]Players[/]  {players_online} online",
+            f"[{ACCENT_MUTED}]Players[/]  {players.get('online_count', 0)} online",
             f"[{ACCENT_MUTED}]Backups[/]  {backups.get('count', 0)} known",
             f"[{ACCENT_MUTED}]Auth[/]     {format_state(auth.get('health', auth.get('state', 'unavailable')))}",
             f"[{ACCENT_MUTED}]World[/]    {format_state(world.get('health', world.get('state', 'unavailable')))}",
@@ -1533,20 +1566,13 @@ def render_player_pulse(
     refresh_interval: int = 2,
 ) -> str:
     metric_history = metric_history or []
-    server = snapshot.get("server", {})
-    server_data = server.get("data", {}) if server.get("ok") else {}
-    player_state = server_data.get("players", {})
     players = snapshot.get("players", [])
-    online_now = clamp_int(player_state.get("online", len(players)))
+    summary = player_summary(snapshot)
+    online_now = int(summary.get("online_count", 0))
     player_history = history_values(metric_history, "players")
     peak_window = int(max(player_history)) if player_history else online_now
-    gm_players = [player for player in players if clamp_int(player.get("gm_level", 0)) > 0]
-    gm_names = [str(player.get("username", "")).strip() for player in gm_players if str(player.get("username", "")).strip()]
-    gm_summary = ", ".join(gm_names[:3]) if gm_names else "none"
-    if len(gm_names) > 3:
-        gm_summary = f"{gm_summary} +{len(gm_names) - 3}"
-    staff_count = len(gm_players)
-    player_count = max(online_now - staff_count, 0)
+    staff_count = int(summary.get("staff_count", 0))
+    player_count = int(summary.get("player_count", 0))
     if staff_count > 0:
         coverage = max(int(round(online_now / staff_count)), 1)
         coverage_text = f"1 GM / {coverage} online"
@@ -1560,10 +1586,11 @@ def render_player_pulse(
             "",
             f"[{ACCENT_MUTED}]Online Now[/]   [bold {ACCENT_GOLD}]{online_now}[/]  [{ACCENT_MUTED}]trend[/] {describe_trend(player_history, 'players')}",
             f"[{ACCENT_MUTED}]Peak Window[/] {peak_window}  [{ACCENT_MUTED}]window[/] {history_window_label(metric_history, refresh_interval)}",
-            f"[{ACCENT_MUTED}]Count Source[/] {escape_markup(player_state.get('source', 'unavailable'))}",
+            f"[{ACCENT_MUTED}]Count Source[/] {escape_markup(str(summary.get('count_source', 'unavailable')))}",
             f"[{ACCENT_MUTED}]Mix[/]          players={player_count}  staff={staff_count}",
             f"[{ACCENT_MUTED}]GM Coverage[/]  {escape_markup(coverage_text)}",
-            f"[{ACCENT_MUTED}]GMs Online[/]   {staff_count}  [{ACCENT_MUTED}]names[/] {escape_markup(truncate_text(gm_summary, 36))}",
+            f"[{ACCENT_MUTED}]GMs Online[/]   {staff_count}  [{ACCENT_MUTED}]names[/] {escape_markup(truncate_text(summary.get('gm_summary', 'none'), 36))}",
+            f"[{ACCENT_MUTED}]Roster[/]       {summary.get('roster_count', len(players))} visible  [{ACCENT_MUTED}]mode[/] {escape_markup(str(summary.get('roster_source', 'unknown')))}",
             "",
             f"[{ACCENT_MUTED}]Drilldown[/]   [bold {ACCENT_GOLD}]o[/] online roster  [bold {ACCENT_GOLD}]2[/] accounts",
         ]
@@ -1603,7 +1630,7 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
 
 def render_alerts_panel(snapshot: dict[str, Any]) -> str:
     server = snapshot["server"]
-    lines = [f"[bold {ACCENT_GOLD}]Alerts and Events[/]", f"[{ACCENT_MUTED}]Recent risk signals and maintenance events.[/]", ""]
+    lines = [f"[bold {ACCENT_GOLD}]Alerts and Events[/]", f"[{ACCENT_MUTED}]Active risk signals plus recent realm-side events worth noticing.[/]", ""]
 
     if not server["ok"]:
         lines.append(f"[bold {ACCENT_ROSE}]Alerts unavailable:[/] {server['error']}")
@@ -1832,15 +1859,28 @@ def render_realm_logs_summary(snapshot: dict[str, Any]) -> str:
         ["critical", "error", "warning", "notice", "info", "debug"],
     )
     available_sources = ", ".join(summary.get("available_sources", [])) or "none"
+    events_returned = clamp_int(summary.get("events_returned", 0))
+    top_severity = summarize_named_counts(summary.get("severity_counts", {}), ["critical", "error", "warning"])
+    if top_severity == "none":
+        top_severity = "none"
+    latest_event = snapshot.get("log_events", [None])[0]
+    latest_summary = "none in current window"
+    if latest_event:
+        latest_summary = (
+            f"{iso_to_clock(latest_event.get('timestamp'))} "
+            f"{latest_event.get('source', 'unknown')}: "
+            f"{truncate_text(latest_event.get('message', ''), 40)}"
+        )
 
     lines.extend(
         [
             f"[{ACCENT_MUTED}]Filters[/]      source={filters.get('source', 'all')}  window={filters.get('window', '15m')}  severity={filters.get('severity', 'all')}  limit={filters.get('limit', 25)}",
-            f"[{ACCENT_MUTED}]Backing[/]      {escape_markup(str(summary.get('backing', 'unavailable')))}  [{ACCENT_MUTED}]sources[/] {summary.get('sources_available', 0)}/{summary.get('sources_requested', 0)}  [{ACCENT_MUTED}]events[/] {summary.get('events_returned', 0)}",
-            f"[{ACCENT_MUTED}]Available[/]    {escape_markup(available_sources)}",
-            f"[{ACCENT_MUTED}]Capabilities[/] severity={str(capabilities.get('severity_filter_supported', False)).lower()}  window={str(capabilities.get('time_window_supported', False)).lower()}  follow={str(capabilities.get('follow_via_refresh', False)).lower()}",
+            f"[{ACCENT_MUTED}]Events[/]       {events_returned} visible  [{ACCENT_MUTED}]latest[/] {escape_markup(latest_summary)}",
+            f"[{ACCENT_MUTED}]Hot Path[/]     {escape_markup(top_severity)}",
             f"[{ACCENT_MUTED}]Source Mix[/]   {escape_markup(source_counts)}",
             f"[{ACCENT_MUTED}]Severity Mix[/] {escape_markup(severity_counts)}",
+            f"[{ACCENT_MUTED}]Coverage[/]     backing={escape_markup(str(summary.get('backing', 'unavailable')))}  sources={summary.get('sources_available', 0)}/{summary.get('sources_requested', 0)}  available={escape_markup(available_sources)}",
+            f"[{ACCENT_MUTED}]Follow[/]       refresh={str(capabilities.get('follow_via_refresh', False)).lower()}  severity_filter={str(capabilities.get('severity_filter_supported', False)).lower()}  window_filter={str(capabilities.get('time_window_supported', False)).lower()}",
             "",
             f"[{ACCENT_MUTED}]Adjust[/]       [bold {ACCENT_GOLD}]f[/] filters  [{ACCENT_MUTED}]Follow[/] automatic on refresh  [{ACCENT_MUTED}]Ops[/] [bold {ACCENT_GOLD}]7[/] queue/readiness",
         ]
@@ -1887,9 +1927,9 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
     logs = snapshot.get("logs", {})
     queue_count = len(snapshot.get("schedules", []))
     lines = [
-        f"[bold {ACCENT_GOLD}]Change Window Readiness[/]",
+        f"[bold {ACCENT_GOLD}]Host Housekeeping Posture[/]",
         "",
-        f"[{ACCENT_MUTED}]Can this host safely absorb scheduled maintenance right now?[/]",
+        f"[{ACCENT_MUTED}]Log rotation, file hygiene, and disk headroom that can affect maintenance confidence.[/]",
         "",
     ]
 
@@ -1917,7 +1957,7 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
             f"[{ACCENT_MUTED}]Headroom[/]      {disk.get('used_percent', 0)}% used  free {format_gb_from_kb(disk.get('available_kb', 0))}",
             f"[{ACCENT_MUTED}]Retention[/]     max={policy.get('max_size', 'n/a')}  min={policy.get('min_size', 'n/a')}",
             "",
-            f"[{ACCENT_MUTED}]Schedule Here[/] [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
+            f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
             f"[{ACCENT_MUTED}]Support[/]       [bold {ACCENT_GOLD}]T[/] test logs  [bold {ACCENT_GOLD}]l[/] rotate logs",
         ]
     )
@@ -2002,9 +2042,9 @@ def schedule_label(schedule: dict[str, Any]) -> str:
 def schedule_origin_label(schedule: dict[str, Any]) -> str:
     job_type = str(schedule.get("job_type", "") or "").strip().lower()
     if job_type == "honor":
-        return "schedule honor -> maintenance.honor_command"
+        return "maintenance job via Manager scheduler"
     if job_type == "restart":
-        return "schedule restart -> server restart workflow"
+        return "restart window via Manager scheduler"
     return "manager scheduler backend"
 
 
@@ -2012,8 +2052,8 @@ def render_schedule_intro(schedules: list[dict[str, Any]]) -> str:
     count = len(schedules)
     return "\n".join(
         [
-            f"[{ACCENT_MUTED}]Schedule Here[/] [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
-            f"[{ACCENT_MUTED}]Queue Source[/]  schedules appear here after dashboard scheduling or the matching [bold {ACCENT_GOLD}]schedule[/] CLI commands.",
+            f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
+            f"[{ACCENT_MUTED}]Queue Source[/]  jobs appear here after dashboard creation or the matching [bold {ACCENT_GOLD}]schedule[/] CLI commands.",
             f"[{ACCENT_MUTED}]Now[/]           {count} scheduled task{'s' if count != 1 else ''} in the queue.",
         ]
     )
@@ -2033,7 +2073,7 @@ def render_schedule_details(
                 f"[{ACCENT_MUTED}]Selection[/]     choose a job row from the queue to inspect or cancel it.",
                 f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
                 "",
-                f"[{ACCENT_MUTED}]Schedule Here[/] [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
+                f"[{ACCENT_MUTED}]Create Here[/]   [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
                 f"[{ACCENT_MUTED}]CLI Path[/]      [bold {ACCENT_GOLD}]schedule honor[/] or [bold {ACCENT_GOLD}]schedule restart[/]",
                 f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] cancel the selected schedule once one is highlighted.",
             ]
@@ -2056,7 +2096,7 @@ def render_schedule_details(
             f"[{ACCENT_MUTED}]Warnings[/]      {escape_markup(warnings)}",
             f"[{ACCENT_MUTED}]Announce[/]      {escape_markup(announce_message)}",
             "",
-            f"[{ACCENT_MUTED}]Schedule More[/] [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
+            f"[{ACCENT_MUTED}]Create More[/]   [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
             f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] remove this schedule if it is no longer desired.",
         ]
     )

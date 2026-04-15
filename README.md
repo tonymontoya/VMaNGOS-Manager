@@ -108,8 +108,8 @@ Inside the dashboard you get:
 - player pulse summary, GM presence, alert visibility, and online roster drilldown
 - backup visibility plus verify, schedule, and restore dry-run entry points
 - account workflows for create, password reset, GM level changes, and ban or unban actions
-- a dedicated Logs module for filtered auth/world troubleshooting with selected-event detail and live follow via refresh
-- a dedicated Ops surface for maintenance queue visibility, change-window readiness, and update planning
+- a dedicated Logs module that leads with investigation facts, then lets you drill into selected auth/world events
+- a dedicated Ops surface for maintenance queue visibility, host housekeeping posture, and update planning
 
 It keeps the deployment terminal-first while still giving admins something that looks credible, legible, and worth keeping open.
 
@@ -117,7 +117,7 @@ It keeps the deployment terminal-first while still giving admins something that 
 
 The dashboard is organized around a simple split:
 
-- the top banner tells you where you are, what that view is for, and what the last action did
+- the top banner tells you where you are, what that view is for, and the state of the last action
 - the left sidebar keeps navigation and realm pulse visible from every screen
 - the bottom command rail is the canonical action surface for the current view
 - the main panels are view-specific and should stay scoped to the thing they are showing
@@ -135,7 +135,7 @@ The dashboard already covers the work most realm operators do every week. The CL
 | Backups | backup readiness, inventory, create, verify, restore dry-run, timer visibility, daily/weekly timer create | cleanup, timer removal, real restore |
 | Config | validation plus read-only configuration wiring summary | detect, create, show, file editing |
 | Logs | filtered auth/world investigation, selected event detail, live follow via refresh | raw JSON, CLI watch mode, custom shell pipelines |
-| Operations | maintenance queue, maintenance/restart scheduling, cancel schedule, change-window readiness, update planning visibility | update apply and source-tree work |
+| Operations | maintenance queue, maintenance/restart scheduling, cancel schedule, host housekeeping posture, update planning visibility | update apply and source-tree work |
 
 The user guide tracks these boundaries in more detail and is the best place to see the current product surface with screenshots.
 

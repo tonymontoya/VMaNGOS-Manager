@@ -88,7 +88,7 @@ The command rail shows the most important actions for the active screen, while t
 
 The dashboard works best when each region has a clear job:
 
-- the top banner tells you the active view, why that view exists, and the result of the last action
+- the top banner tells you the active view, why that view exists, and the state of the last action
 - the sidebar is always-on navigation plus realm pulse
 - the command rail is the single action surface for navigation, refresh, and view-specific work
 - the main panels are where view-specific work happens
@@ -134,8 +134,8 @@ Panel roles in this view:
 
 - `Realm Services` is the fast service and DB pulse plus per-service footprint
 - `Host Metrics` is the machine-level headline pressure panel only, using compact numeric summaries plus small capacity meters
-- `Player Pulse` is the summary-first population panel: online count, trend, player/staff mix, and GM coverage
-- `Alerts and Events` is the fast-read maintenance and risk panel
+- `Player Pulse` is the summary-first population panel: online count, trend, player/staff mix, GM coverage, and roster visibility context
+- `Alerts and Events` is the fast-read risk and recent-realm-events panel
 
 If `Overview` tells you something is off but not why, switch to `Monitor`. That split is intentional: `Overview` stays summary-first, while `Monitor` carries the denser diagnostic surface.
 
@@ -270,6 +270,12 @@ Use it to:
 - keep following the filtered feed as the dashboard refreshes
 - inspect a selected event in detail before you drop to shell tools
 
+Read the summary panel in this order:
+
+1. `Events` tells you how much evidence is currently on screen and what happened most recently.
+2. `Hot Path` and the source/severity mix tell you whether the problem is concentrated in `auth`, `world`, warnings, or hard failures.
+3. `Coverage` and follow/filter support tell you how trustworthy the current feed is before you widen the investigation.
+
 Recommended flow:
 
 1. Move to `Logs` with `6`.
@@ -280,7 +286,7 @@ Recommended flow:
 The important scope rule is simple:
 
 - `Logs` is for realm-relevant troubleshooting evidence
-- `Ops` is for maintenance queue, change-window readiness, and update planning
+- `Ops` is for maintenance queue, host housekeeping posture, and update planning
 
 That separation keeps the troubleshooting surface honest and stops the maintenance screen from carrying too many unrelated jobs.
 
@@ -288,11 +294,11 @@ That separation keeps the troubleshooting surface honest and stops the maintenan
 
 ![Operations view](assets/dashboard-operations.svg)
 
-Operations is the maintenance scheduling and change-window screen.
+Operations is the maintenance scheduling and update-preflight screen.
 
 Use it for:
 
-- deciding whether the host is ready for scheduled maintenance
+- deciding whether log rotation, file hygiene, and disk headroom are in a good state before maintenance
 - scheduling maintenance tasks or restart windows from the Ops surface
 - seeing what maintenance is already queued
 - inspecting or canceling a selected schedule
@@ -300,22 +306,22 @@ Use it for:
 
 Read it in this order:
 
-1. Start with `Change Window Readiness` to confirm storage, queue state, and log-rotation posture look safe enough for maintenance work.
-2. Use the on-screen schedule paths to create a maintenance task or scheduled restart from the Ops surface.
+1. Start with `Host Housekeeping Posture` to confirm storage headroom, queue state, and log-rotation posture are not warning about avoidable maintenance friction.
+2. Use the on-screen create actions to add a maintenance task or scheduled restart from the Ops surface.
 3. Review `Scheduled Maintenance` to confirm what is already queued and when it will fire.
 4. Use `Selected Schedule` to inspect origin, cadence, warnings, and cancellation impact for the highlighted item.
 5. Use `Update Readiness` when the next change involves source pulls or database movement.
 
 Recommended flow before a realm update:
 
-1. Review `Change Window Readiness` so you know whether the host and log posture are healthy enough for the window.
+1. Review `Host Housekeeping Posture` so you know whether log rotation, permissions, and storage headroom look healthy enough for the window.
 2. Review `Scheduled Maintenance` so you know whether any restart work is already timed near the window.
 3. Review `Update Readiness` and the DB-impact summary.
 4. Generate or refresh the update plan.
 5. Take and verify a backup.
 6. Only then move into a real update workflow.
 
-Jobs shown in `Scheduled Maintenance` come from the Ops scheduling actions in the dashboard or the matching `schedule` CLI commands. The command rail still mirrors those paths, but the screen now calls out where maintenance gets created so the queue does not feel detached from the workflow.
+Jobs shown in `Scheduled Maintenance` come from the Ops create actions in the dashboard or the matching `schedule` CLI commands. The screen now makes that origin explicit so the queue does not feel detached from the workflow.
 
 ## Updates Workflow
 
@@ -370,7 +376,7 @@ Use the dashboard for everyday operation, then drop to the CLI for the narrower 
 | Backups | backup readiness, inventory, backup now, verify, restore dry-run, timer visibility, daily/weekly timer create | cleanup, timer removal, live restore |
 | Config | validation plus read-only configuration wiring summary | config creation, detect, show, and file editing |
 | Logs | filtered realm-log investigation, selected event detail, and live follow via dashboard refresh | raw JSON output, CLI watch mode, and custom shell pipelines |
-| Operations | maintenance queue, maintenance/restart scheduling, schedule cancel, change-window readiness, update planning visibility | update apply and other source-tree workflows |
+| Operations | maintenance queue, maintenance/restart scheduling, schedule cancel, host housekeeping posture, update planning visibility | update apply and other source-tree workflows |
 
 Use these supporting docs when you need that lower-level surface:
 
