@@ -47,7 +47,8 @@ COMMANDS:
       restart options: [--timeout SECONDS]
       status options: [--format text|json] [--watch] [--interval SECONDS]
     dashboard [--refresh SECONDS] [--theme dark|light] [--bootstrap]
-    logs [status|rotate|test-config] [OPTIONS]
+    logs [status|rotate|test-config|recent] [OPTIONS]
+      recent options: [--source all|auth|world] [--window 15m|1h|1d] [--severity all|debug|info|notice|warning|error|critical|alert] [--limit N] [--watch|--follow] [--interval SECONDS] [--format text|json]
     account [create|list|setgm|ban|unban|password] [OPTIONS]
     update [check|inspect|plan|apply] [OPTIONS]
     schedule [honor|restart|list|cancel|simulate] [OPTIONS]
@@ -308,6 +309,102 @@ cmd_logs() {
             fi
             ;;
 
+        recent)
+            local fmt="$OUTPUT_FORMAT"
+            local source="all"
+            local window="15m"
+            local severity="all"
+            local limit=25
+            local watch=false
+            local interval=2
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --format)
+                        if [[ -n "${2:-}" ]]; then
+                            fmt="$2"
+                            shift 2
+                        else
+                            echo "Error: --format requires an argument" >&2
+                            exit 2
+                        fi
+                        ;;
+                    --source)
+                        if [[ -n "${2:-}" ]]; then
+                            source="$2"
+                            shift 2
+                        else
+                            echo "Error: --source requires an argument" >&2
+                            exit 2
+                        fi
+                        ;;
+                    --window)
+                        if [[ -n "${2:-}" ]]; then
+                            window="$2"
+                            shift 2
+                        else
+                            echo "Error: --window requires an argument" >&2
+                            exit 2
+                        fi
+                        ;;
+                    --severity)
+                        if [[ -n "${2:-}" ]]; then
+                            severity="$2"
+                            shift 2
+                        else
+                            echo "Error: --severity requires an argument" >&2
+                            exit 2
+                        fi
+                        ;;
+                    --limit)
+                        if [[ -n "${2:-}" ]]; then
+                            limit="$2"
+                            shift 2
+                        else
+                            echo "Error: --limit requires an argument" >&2
+                            exit 2
+                        fi
+                        ;;
+                    --watch|--follow)
+                        watch=true
+                        shift
+                        ;;
+                    --interval)
+                        if [[ -n "${2:-}" ]]; then
+                            interval="$2"
+                            shift 2
+                        else
+                            echo "Error: --interval requires an argument" >&2
+                            exit 2
+                        fi
+                        ;;
+                    --)
+                        shift
+                        break
+                        ;;
+                    -*)
+                        echo "Unknown option: $1" >&2
+                        exit 2
+                        ;;
+                    *)
+                        echo "Error: logs recent does not accept positional arguments" >&2
+                        exit 2
+                        ;;
+                esac
+            done
+
+            if [[ "$watch" == "true" ]]; then
+                if [[ "$fmt" == "json" ]]; then
+                    echo "Error: watch mode only supports text output" >&2
+                    exit 2
+                fi
+                logs_recent_watch "$source" "$window" "$severity" "$limit" "$interval"
+            elif [[ "$fmt" == "json" ]]; then
+                logs_recent_json "$source" "$window" "$severity" "$limit"
+            else
+                logs_recent_text "$source" "$window" "$severity" "$limit"
+            fi
+            ;;
+
         rotate)
             local force=false
             while [[ $# -gt 0 ]]; do
@@ -355,7 +452,7 @@ cmd_logs() {
 
         *)
             echo "Error: Unknown logs subcommand: $subcmd" >&2
-            echo "Valid subcommands: status, rotate, test-config" >&2
+            echo "Valid subcommands: status, recent, rotate, test-config" >&2
             exit 2
             ;;
     esac

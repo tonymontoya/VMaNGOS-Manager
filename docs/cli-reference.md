@@ -72,6 +72,25 @@ Notes:
 - status includes service state, process details, DB connectivity, disk space, player count, host metrics, alerts, and recent events
 - `server start --wait` performs bounded post-start verification
 
+## Logs Commands
+
+```bash
+vmangos-manager logs status [--format text|json]
+vmangos-manager logs recent [--source all|auth|world] [--window 15m|1h|1d] [--severity all|debug|info|notice|warning|error|critical|alert] [--limit N] [--format text|json]
+vmangos-manager logs recent [--source ...] [--window ...] [--severity ...] [--limit N] [--watch|--follow] [--interval SECONDS]
+vmangos-manager logs rotate [--force]
+vmangos-manager logs test-config
+```
+
+Notes:
+
+- `logs status` is the log-rotation and disk-headroom posture check used by the Ops screen
+- `logs recent` is the realm-log investigation surface used by the dedicated Logs module
+- `logs recent` is scoped to Manager-supported realm sources only: `auth`, `world`, or `all`
+- default recent filters are `source=all`, `window=15m`, `severity=all`, and `limit=25`
+- watch/follow mode is text-only and re-runs the current filter set every interval
+- default watch interval is `2` seconds
+
 ## Schedule Commands
 
 ```bash
@@ -195,6 +214,13 @@ Backup with verification:
 
 ```bash
 sudo /opt/mangos/manager/bin/vmangos-manager backup now --verify
+```
+
+Recent realm logs:
+
+```bash
+sudo /opt/mangos/manager/bin/vmangos-manager logs recent --source all --window 15m --severity warning --limit 25
+sudo /opt/mangos/manager/bin/vmangos-manager logs recent --source world --severity error --watch --interval 2
 ```
 
 Update check from a checkout:

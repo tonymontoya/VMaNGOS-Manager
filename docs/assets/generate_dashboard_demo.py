@@ -85,12 +85,41 @@ def build_backup_entries() -> list[dict[str, object]]:
     return entries
 
 
+def build_realm_log_events(captured_at: datetime) -> list[dict[str, object]]:
+    events = [
+        ("world", "world", "world.service", "mangosd", "error", 3, "World crashed while loading map 530; instance restarted cleanly"),
+        ("auth", "auth", "auth.service", "realmd", "warning", 4, "Auth rejected 17 invalid logins from 203.0.113.44"),
+        ("world", "world", "world.service", "mangosd", "warning", 4, "Auction house queue latency crossed 240 ms"),
+        ("world", "world", "world.service", "mangosd", "error", 3, "Pathfinding cache rebuild ran long on Eastern Kingdoms"),
+        ("auth", "auth", "auth.service", "realmd", "warning", 4, "SOAP admin session dropped during account review"),
+        ("world", "world", "world.service", "mangosd", "warning", 4, "Player save backlog peaked at 52 entries"),
+    ]
+
+    rendered: list[dict[str, object]] = []
+    for offset_minutes, (source, service, unit, identifier, severity, priority, message) in enumerate(events, start=1):
+        rendered.append(
+            {
+                "timestamp": (captured_at - timedelta(minutes=offset_minutes)).isoformat(),
+                "source": source,
+                "service": service,
+                "unit": unit,
+                "identifier": identifier,
+                "severity": severity,
+                "priority": priority,
+                "message": message,
+                "raw": message,
+            }
+        )
+    return rendered
+
+
 def build_snapshot() -> dict[str, object]:
     captured_at = datetime(2026, 4, 14, 5, 22, 18, tzinfo=timezone.utc)
     players = build_players()
     accounts = build_accounts()
     metric_history = build_metric_history(captured_at)
     backup_entries = build_backup_entries()
+    realm_log_events = build_realm_log_events(captured_at)
     config_content = (
         "[server]\n"
         "install_root=/opt/mangos\n"
@@ -226,6 +255,33 @@ def build_snapshot() -> dict[str, object]:
                 "policy": {"max_size": "100M", "min_size": "1M"},
             },
         },
+        "realm_logs": {
+            "ok": True,
+            "error": "",
+            "data": {
+                "scope": "realm",
+                "filters": {"source": "all", "window": "15m", "severity": "warning", "limit": 12},
+                "summary": {
+                    "backing": "journald",
+                    "events_returned": len(realm_log_events),
+                    "sources_requested": 2,
+                    "sources_available": 2,
+                    "available_sources": ["auth", "world"],
+                    "source_counts": {"auth": 2, "world": 4},
+                    "severity_counts": {"warning": 4, "error": 2},
+                },
+                "capabilities": {
+                    "severity_filter_supported": True,
+                    "time_window_supported": True,
+                    "follow_via_refresh": True,
+                },
+                "sources": [
+                    {"source": "auth", "service": "auth", "backing": "journald", "available": True},
+                    {"source": "world", "service": "world", "backing": "journald", "available": True},
+                ],
+                "events": realm_log_events,
+            },
+        },
         "schedule_list": {"ok": True, "error": "", "data": {"schedules": schedules}},
         "update_check": {
             "ok": True,
@@ -314,6 +370,7 @@ def build_snapshot() -> dict[str, object]:
         },
         "players": players,
         "all_accounts": accounts,
+        "log_events": realm_log_events,
         "schedules": schedules,
     }
 

@@ -19,7 +19,7 @@ mkdir -p "$OUTPUT_DIR"
 SNAPSHOT_FILE="$OUTPUT_DIR/dashboard-demo-snapshot.json"
 python3 "$SCRIPT_DIR/generate_dashboard_demo.py" --output "$SNAPSHOT_FILE"
 
-for view_name in overview monitor accounts backups config operations; do
+for view_name in overview monitor accounts backups config logs operations; do
     COLUMNS="$SCREEN_COLUMNS" LINES="$SCREEN_LINES" \
     "$DASHBOARD_PYTHON" "$DASHBOARD_APP" \
         --manager-bin "$MANAGER_BIN" \

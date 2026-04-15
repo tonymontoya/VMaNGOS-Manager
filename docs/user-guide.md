@@ -72,13 +72,14 @@ Then launch the operator console:
 sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
 ```
 
-The dashboard is organized into six views:
+The dashboard is organized into seven views:
 
 - `Overview`
 - `Monitor`
 - `Accounts`
 - `Backups`
 - `Config`
+- `Logs`
 - `Ops`
 
 The command rail shows the most important actions for the active screen, while the sidebar keeps navigation and realm pulse visible at all times.
@@ -106,7 +107,8 @@ If you are new to Manager, the best first pass is simple:
 3. Visit `Config` and verify Manager is reading the right install root, service names, and databases.
 4. Visit `Backups` and confirm the protection story before you trust any update or maintenance workflow.
 5. Visit `Accounts` so you know where user actions live before you need them under pressure.
-6. Finish in `Ops` and review the maintenance queue plus change-window readiness.
+6. Visit `Logs` when you need recent auth/world evidence without leaving Manager.
+7. Finish in `Ops` and review the maintenance queue plus change-window readiness.
 
 ## Overview View
 
@@ -255,6 +257,33 @@ The panel is grouped into `Realm Wiring`, `Database Wiring`, and `Dashboard Role
 
 If the configuration wiring view looks wrong, fix that before you trust any higher-level workflow.
 
+## Logs View
+
+![Logs view](assets/dashboard-logs.svg)
+
+Logs is the realm troubleshooting screen. It exists so you can inspect recent `auth` and `world` activity without turning Manager into a generic OS log browser.
+
+Use it to:
+
+- inspect recent realm events and failures by source
+- narrow the feed by source, time window, severity, and result count
+- keep following the filtered feed as the dashboard refreshes
+- inspect a selected event in detail before you drop to shell tools
+
+Recommended flow:
+
+1. Move to `Logs` with `6`.
+2. Press `f` and set the source, window, severity, and limit that match the investigation.
+3. Let the screen auto-refresh while you keep the selected event highlighted in the detail pane.
+4. Jump to `Ops` only when the issue turns into maintenance or update work instead of log investigation.
+
+The important scope rule is simple:
+
+- `Logs` is for realm-relevant troubleshooting evidence
+- `Ops` is for maintenance queue, change-window readiness, and update planning
+
+That separation keeps the troubleshooting surface honest and stops the maintenance screen from carrying too many unrelated jobs.
+
 ## Operations View
 
 ![Operations view](assets/dashboard-operations.svg)
@@ -271,7 +300,7 @@ Use it for:
 
 Read it in this order:
 
-1. Start with `Change Window Readiness` to confirm logs, storage, and queue state look safe enough for maintenance work.
+1. Start with `Change Window Readiness` to confirm storage, queue state, and log-rotation posture look safe enough for maintenance work.
 2. Use the on-screen schedule paths to create a maintenance task or scheduled restart from the Ops surface.
 3. Review `Scheduled Maintenance` to confirm what is already queued and when it will fire.
 4. Use `Selected Schedule` to inspect origin, cadence, warnings, and cancellation impact for the highlighted item.
@@ -315,9 +344,10 @@ If you want a stable realm without living in the CLI all day, this is a good def
 1. Open `Overview` and confirm services, players, and host pressure look sane.
 2. Use `Monitor` when `Overview` shows pressure and you need the deeper host or process explanation.
 3. Check `Backups` and make sure recent protection exists before risky work.
-4. Visit `Operations` when you need to understand queued maintenance or preflight a risky change window.
-5. Use `Accounts` for user-facing admin changes instead of one-off SQL.
-6. Use `Config` whenever the host wiring changes or Manager behavior looks suspicious.
+4. Visit `Logs` when a player issue or service wobble needs recent auth/world evidence.
+5. Visit `Operations` when you need to understand queued maintenance or preflight a risky change window.
+6. Use `Accounts` for user-facing admin changes instead of one-off SQL.
+7. Use `Config` whenever the host wiring changes or Manager behavior looks suspicious.
 
 ## When To Drop To The CLI
 
@@ -339,7 +369,8 @@ Use the dashboard for everyday operation, then drop to the CLI for the narrower 
 | Accounts | account inventory, create, password reset, GM changes, ban, unban, account visibility | scripted bulk workflows |
 | Backups | backup readiness, inventory, backup now, verify, restore dry-run, timer visibility, daily/weekly timer create | cleanup, timer removal, live restore |
 | Config | validation plus read-only configuration wiring summary | config creation, detect, show, and file editing |
-| Operations | maintenance queue, maintenance/restart scheduling, schedule cancel, logs guardrails, update planning visibility | update apply and other source-tree workflows |
+| Logs | filtered realm-log investigation, selected event detail, and live follow via dashboard refresh | raw JSON output, CLI watch mode, and custom shell pipelines |
+| Operations | maintenance queue, maintenance/restart scheduling, schedule cancel, change-window readiness, update planning visibility | update apply and other source-tree workflows |
 
 Use these supporting docs when you need that lower-level surface:
 

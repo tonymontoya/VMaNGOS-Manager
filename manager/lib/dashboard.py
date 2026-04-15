@@ -21,9 +21,15 @@ STATUS_COLORS = {
     "warning": "#f59e0b",
     "degraded": "#fbbf24",
     "missing": "#f59e0b",
+    "notice": "#7dd3fc",
+    "info": "#7dd3fc",
+    "debug": "#94a3b8",
     "stopped": "#f59e0b",
     "inactive": "#f59e0b",
     "critical": "#f87171",
+    "error": "#ef4444",
+    "alert": "#ef4444",
+    "emergency": "#ef4444",
     "failed": "#ef4444",
     "crash-loop": "#fb7185",
     "unreachable": "#fb7185",
@@ -52,6 +58,7 @@ VIEW_TITLES = {
     "accounts": "Accounts",
     "backups": "Backups",
     "config": "Config",
+    "logs": "Logs",
     "operations": "Operations",
 }
 
@@ -61,6 +68,7 @@ VIEW_SUMMARIES = {
     "accounts": "Work the selected-account admin flow for provisioning, access, and moderation.",
     "backups": "Check protection posture, then act on the selected archive with confidence.",
     "config": "Confirm Manager's wiring view before you trust higher-level automation.",
+    "logs": "Inspect recent realm events by source, severity, and time window without leaving Manager.",
     "operations": "Review the maintenance queue and preflight risky change windows.",
 }
 
@@ -73,6 +81,10 @@ WEEKLY_SCHEDULE_PATTERN = re.compile(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([0-1][0-9
 SCHEDULE_TYPE_PATTERN = re.compile(r"^(daily|weekly)$", re.IGNORECASE)
 DAY_NAME_PATTERN = re.compile(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)$")
 WARNINGS_PATTERN = re.compile(r"^[1-9][0-9]*(,[1-9][0-9]*)*$")
+LOG_WINDOW_PATTERN = re.compile(r"^[1-9][0-9]*[mhd]$")
+LOG_SEVERITY_PATTERN = re.compile(r"^(all|debug|info|notice|warning|error|critical|alert)$", re.IGNORECASE)
+LOG_SOURCE_PATTERN = re.compile(r"^(all|auth|world)$", re.IGNORECASE)
+LOG_LIMIT_PATTERN = re.compile(r"^[1-9][0-9]{0,2}$")
 
 TREND_HISTORY_LIMIT = 24
 SPARKLINE_BARS = "▁▂▃▄▅▆▇█"
@@ -477,6 +489,16 @@ def normalize_form_values(values: dict[str, Any] | None) -> dict[str, str]:
     return normalized
 
 
+def normalize_logs_query(values: dict[str, Any] | None = None) -> dict[str, str]:
+    normalized = normalize_form_values(values)
+    return {
+        "source": (normalized.get("source") or "all").lower(),
+        "window": (normalized.get("window") or "15m").lower(),
+        "severity": (normalized.get("severity") or "all").lower(),
+        "limit": normalized.get("limit") or "25",
+    }
+
+
 def find_selected_account(snapshot: dict[str, Any], selected_account_id: str) -> dict[str, Any] | None:
     accounts = snapshot.get("all_accounts", [])
     if selected_account_id:
@@ -500,6 +522,25 @@ def find_selected_schedule(snapshot: dict[str, Any], selected_schedule_id: str) 
     if selected_schedule_id:
         for entry in entries:
             if str(entry.get("id", "")) == selected_schedule_id:
+                return entry
+    return entries[0] if entries else None
+
+
+def log_entry_key(entry: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(entry.get("timestamp", "") or ""),
+            str(entry.get("source", "") or ""),
+            str(entry.get("message", "") or ""),
+        ]
+    )
+
+
+def find_selected_log_entry(snapshot: dict[str, Any], selected_log_key: str) -> dict[str, Any] | None:
+    entries = snapshot.get("log_events", [])
+    if selected_log_key:
+        for entry in entries:
+            if log_entry_key(entry) == selected_log_key:
                 return entry
     return entries[0] if entries else None
 
@@ -545,6 +586,8 @@ def view_command_tokens(active_view: str) -> list[tuple[str, str]]:
         ]
     if active_view == "config":
         return [("k", "validate config")]
+    if active_view == "logs":
+        return [("f", "filters")]
     return [
         ("o", "roster"),
         ("s", "start"),
@@ -564,7 +607,8 @@ def render_command_rail(active_view: str) -> str:
             ("3", "accounts"),
             ("4", "backups"),
             ("5", "config"),
-            ("6", "ops"),
+            ("6", "logs"),
+            ("7", "ops"),
         ]
     )
     global_actions = format_command_tokens([("r", "refresh"), ("t", "theme"), ("q", "quit")])
@@ -834,6 +878,7 @@ def empty_snapshot(error_message: str) -> dict[str, Any]:
         "config_path": "",
         "server": {"ok": False, "data": {}, "error": error_message},
         "logs": {"ok": False, "data": {}, "error": error_message},
+        "realm_logs": {"ok": False, "data": {}, "error": error_message},
         "schedule_list": {"ok": False, "data": {}, "error": error_message},
         "update_check": {"ok": False, "data": {}, "error": error_message},
         "update_inspect": {"ok": False, "data": {}, "error": error_message},
@@ -848,6 +893,7 @@ def empty_snapshot(error_message: str) -> dict[str, Any]:
         "backups": {"entries": [], "summary": {}},
         "players": [],
         "all_accounts": [],
+        "log_events": [],
         "schedules": [],
     }
 
@@ -883,7 +929,8 @@ def extract_seed_metric_history(snapshot: dict[str, Any]) -> list[dict[str, Any]
     return history[-TREND_HISTORY_LIMIT:]
 
 
-def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
+def build_snapshot(manager_bin: str, config_path: str, logs_query: dict[str, Any] | None = None) -> dict[str, Any]:
+    query = normalize_logs_query(logs_query)
     server = run_manager_command(
         manager_bin,
         config_path,
@@ -895,6 +942,24 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         manager_bin,
         config_path,
         ["logs", "status"],
+        parser_mode="envelope",
+        use_global_json=True,
+    )
+    realm_logs = run_manager_command(
+        manager_bin,
+        config_path,
+        [
+            "logs",
+            "recent",
+            "--source",
+            query["source"],
+            "--window",
+            query["window"],
+            "--severity",
+            query["severity"],
+            "--limit",
+            query["limit"],
+        ],
         parser_mode="envelope",
         use_global_json=True,
     )
@@ -970,6 +1035,7 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
     backup_entries = backups["data"] if backups["ok"] and isinstance(backups["data"], list) else []
     players = online_accounts["data"].get("accounts", []) if online_accounts["ok"] else []
     all_accounts = accounts["data"].get("accounts", []) if accounts["ok"] else []
+    log_events = realm_logs["data"].get("events", []) if realm_logs["ok"] else []
     schedule_entries = schedules["data"].get("schedules", []) if schedules["ok"] else []
     backup_dir = config_values.get("backup.backup_dir", "")
     password_file = str(config_values.get("database.password_file", "") or "")
@@ -995,6 +1061,7 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         "config_path": config_path,
         "server": server,
         "logs": logs,
+        "realm_logs": realm_logs,
         "schedule_list": schedules,
         "update_check": update_check,
         "update_inspect": update_inspect,
@@ -1012,6 +1079,7 @@ def build_snapshot(manager_bin: str, config_path: str) -> dict[str, Any]:
         },
         "players": players,
         "all_accounts": all_accounts,
+        "log_events": log_events,
         "schedules": schedule_entries,
     }
 
@@ -1046,7 +1114,8 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
         ("accounts", "3", "Accounts"),
         ("backups", "4", "Backups"),
         ("config", "5", "Config"),
-        ("operations", "6", "Ops"),
+        ("logs", "6", "Logs"),
+        ("operations", "7", "Ops"),
     ]
 
     server = snapshot.get("server", {})
@@ -1698,6 +1767,25 @@ def format_update_assessment(value: Any) -> str:
     return f"[bold {ACCENT_MUTED}]{label}[/]"
 
 
+def summarize_named_counts(counts: dict[str, Any], preferred_order: list[str] | None = None) -> str:
+    if not isinstance(counts, dict) or not counts:
+        return "none"
+
+    ordered_keys: list[str] = []
+    preferred = preferred_order or []
+    for key in preferred:
+        if key in counts:
+            ordered_keys.append(key)
+    for key in sorted(counts.keys()):
+        if key not in ordered_keys:
+            ordered_keys.append(key)
+
+    parts: list[str] = []
+    for key in ordered_keys:
+        parts.append(f"{key}={counts.get(key, 0)}")
+    return "  ".join(parts)
+
+
 def maintenance_window_state(logs_data: dict[str, Any]) -> str:
     config = logs_data.get("config", {})
     log_counts = logs_data.get("logs", {})
@@ -1712,6 +1800,87 @@ def maintenance_window_state(logs_data: dict[str, Any]) -> str:
     if clamp_int(disk.get("used_percent", 0)) >= 85:
         return "warning"
     return "healthy"
+
+
+def render_realm_logs_summary(snapshot: dict[str, Any]) -> str:
+    realm_logs = snapshot.get("realm_logs", {})
+    lines = [
+        f"[bold {ACCENT_GOLD}]Realm Logs[/]",
+        "",
+        f"[{ACCENT_MUTED}]Recent auth/world activity for live troubleshooting. This view follows the current filters on each refresh.[/]",
+        "",
+    ]
+
+    if not realm_logs.get("ok"):
+        lines.extend(
+            [
+                f"[bold {ACCENT_ROSE}]Log view unavailable:[/] {format_error_text(realm_logs.get('error', 'unknown error'))}",
+                "",
+                f"[{ACCENT_MUTED}]Next[/] verify logs recent works from the CLI, then retry [bold {ACCENT_GOLD}]r[/] refresh.",
+                f"[{ACCENT_MUTED}]Filters[/] [bold {ACCENT_GOLD}]f[/] adjust source, window, severity, and limit",
+            ]
+        )
+        return "\n".join(lines)
+
+    data = realm_logs.get("data", {})
+    filters = data.get("filters", {})
+    summary = data.get("summary", {})
+    capabilities = data.get("capabilities", {})
+    source_counts = summarize_named_counts(summary.get("source_counts", {}), ["auth", "world"])
+    severity_counts = summarize_named_counts(
+        summary.get("severity_counts", {}),
+        ["critical", "error", "warning", "notice", "info", "debug"],
+    )
+    available_sources = ", ".join(summary.get("available_sources", [])) or "none"
+
+    lines.extend(
+        [
+            f"[{ACCENT_MUTED}]Filters[/]      source={filters.get('source', 'all')}  window={filters.get('window', '15m')}  severity={filters.get('severity', 'all')}  limit={filters.get('limit', 25)}",
+            f"[{ACCENT_MUTED}]Backing[/]      {escape_markup(str(summary.get('backing', 'unavailable')))}  [{ACCENT_MUTED}]sources[/] {summary.get('sources_available', 0)}/{summary.get('sources_requested', 0)}  [{ACCENT_MUTED}]events[/] {summary.get('events_returned', 0)}",
+            f"[{ACCENT_MUTED}]Available[/]    {escape_markup(available_sources)}",
+            f"[{ACCENT_MUTED}]Capabilities[/] severity={str(capabilities.get('severity_filter_supported', False)).lower()}  window={str(capabilities.get('time_window_supported', False)).lower()}  follow={str(capabilities.get('follow_via_refresh', False)).lower()}",
+            f"[{ACCENT_MUTED}]Source Mix[/]   {escape_markup(source_counts)}",
+            f"[{ACCENT_MUTED}]Severity Mix[/] {escape_markup(severity_counts)}",
+            "",
+            f"[{ACCENT_MUTED}]Adjust[/]       [bold {ACCENT_GOLD}]f[/] filters  [{ACCENT_MUTED}]Follow[/] automatic on refresh  [{ACCENT_MUTED}]Ops[/] [bold {ACCENT_GOLD}]7[/] queue/readiness",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_log_event_details(entry: dict[str, Any] | None, total_count: int) -> str:
+    lines = [
+        f"[bold {ACCENT_GOLD}]Selected Event[/]",
+        "",
+        f"[{ACCENT_MUTED}]Inspect the highlighted log entry here before dropping to shell tools.[/]",
+        "",
+        f"[{ACCENT_MUTED}]Window[/] {total_count} visible event{'s' if total_count != 1 else ''}",
+    ]
+
+    if entry is None:
+        lines.extend(
+            [
+                "",
+                f"[{ACCENT_MUTED}]No event selected. Use [bold {ACCENT_GOLD}]f[/] to widen the filter or wait for the next refresh.[/]",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "",
+            f"[{ACCENT_MUTED}]Time[/]       {iso_to_display(entry.get('timestamp'))}",
+            f"[{ACCENT_MUTED}]Source[/]     {escape_markup(str(entry.get('source', 'unknown')))}",
+            f"[{ACCENT_MUTED}]Severity[/]   {format_state(entry.get('severity', 'info'))}",
+            f"[{ACCENT_MUTED}]Service[/]    {escape_markup(str(entry.get('service', 'n/a')))}",
+            f"[{ACCENT_MUTED}]Unit[/]       {escape_markup(str(entry.get('unit', 'n/a')))}",
+            f"[{ACCENT_MUTED}]Identifier[/] {escape_markup(str(entry.get('identifier', 'n/a')))}",
+            "",
+            f"[bold {ACCENT_SKY}]Message[/]",
+            f"{escape_markup(str(entry.get('message', '')))}",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def render_logs_panel(snapshot: dict[str, Any]) -> str:
@@ -2357,6 +2526,37 @@ def create_app(
             height: 1fr;
         }
 
+        #realm-logs-layout {
+            height: 1fr;
+            layout: vertical;
+        }
+
+        #realm-logs-summary {
+            height: 12;
+            margin-bottom: 1;
+        }
+
+        #realm-logs-body {
+            height: 1fr;
+        }
+
+        #realm-logs-table-layout {
+            width: 1fr;
+            height: 1fr;
+            margin-right: 1;
+        }
+
+        #realm-logs-table {
+            height: 1fr;
+            margin-top: 1;
+        }
+
+        #realm-log-details {
+            width: 42;
+            min-width: 36;
+            height: 1fr;
+        }
+
         CommandFormScreen {
             align: center middle;
             background: rgba(6, 17, 29, 0.78);
@@ -2522,12 +2722,14 @@ def create_app(
             ("w", "schedule_weekly_backup", "Weekly"),
             ("j", "cancel_selected_schedule", "Cancel Schedule"),
             ("k", "validate_config", "Validate"),
+            ("f", "filter_logs", "Filters"),
             ("1", "show_overview", "Overview"),
             ("2", "show_monitor", "Monitor"),
             ("3", "show_accounts", "Accounts"),
             ("4", "show_backups", "Backups"),
             ("5", "show_config", "Config"),
-            ("6", "show_operations", "Ops"),
+            ("6", "show_logs", "Logs"),
+            ("7", "show_operations", "Ops"),
             ("t", "toggle_theme", "Theme"),
         ]
 
@@ -2548,7 +2750,9 @@ def create_app(
             self.metric_history: list[dict[str, Any]] = []
             self.selected_account_id = ""
             self.selected_backup_file = ""
+            self.selected_log_key = ""
             self.selected_schedule_id = ""
+            self.logs_query = normalize_logs_query()
             self.update_plan_data: dict[str, Any] | None = None
             self.refresh_inflight = False
             self.action_inflight = False
@@ -2586,6 +2790,14 @@ def create_app(
                                     yield DataTable(id="backups-table", classes="detail-table")
                         with Container(id="config-view", classes="view hidden"):
                             yield Static("", id="config-pane", classes="panel hero-panel")
+                        with Container(id="logs-view", classes="view hidden"):
+                            with Vertical(id="realm-logs-layout"):
+                                yield Static("", id="realm-logs-summary", classes="panel hero-panel")
+                                with Horizontal(id="realm-logs-body"):
+                                    with Vertical(classes="panel table-panel", id="realm-logs-table-layout"):
+                                        yield Static("[b]Recent Events[/b]", classes="table-detail-title")
+                                        yield DataTable(id="realm-logs-table", classes="detail-table")
+                                    yield Static("", id="realm-log-details", classes="panel accent-panel")
                         with Container(id="operations-view", classes="view hidden"):
                             with Vertical(id="operations-layout"):
                                 with Horizontal(id="operations-summary"):
@@ -2610,6 +2822,11 @@ def create_app(
             backups_table.zebra_stripes = True
             backups_table.add_columns("Timestamp", "Size", "File", "Created By")
 
+            realm_logs_table = self.query_one("#realm-logs-table", DataTable)
+            realm_logs_table.cursor_type = "row"
+            realm_logs_table.zebra_stripes = True
+            realm_logs_table.add_columns("Time", "Source", "Severity", "Message")
+
             schedules_table = self.query_one("#schedules-table", DataTable)
             schedules_table.cursor_type = "row"
             schedules_table.zebra_stripes = True
@@ -2627,7 +2844,7 @@ def create_app(
             self.add_class(f"theme-{self.theme_name}")
 
         def apply_view_state(self) -> None:
-            for view_name in ("overview", "monitor", "accounts", "backups", "config", "operations"):
+            for view_name in ("overview", "monitor", "accounts", "backups", "config", "logs", "operations"):
                 widget = self.query_one(f"#{view_name}-view", Container)
                 if view_name == self.active_view:
                     widget.remove_class("hidden")
@@ -2639,6 +2856,8 @@ def create_app(
                 self.set_focus(self.query_one("#accounts-table", DataTable))
             elif self.active_view == "backups":
                 self.set_focus(self.query_one("#backups-table", DataTable))
+            elif self.active_view == "logs":
+                self.set_focus(self.query_one("#realm-logs-table", DataTable))
             elif self.active_view == "operations":
                 self.set_focus(self.query_one("#schedules-table", DataTable))
 
@@ -2668,7 +2887,7 @@ def create_app(
                 if self.snapshot_file:
                     snapshot = load_snapshot_fixture(self.snapshot_file)
                 else:
-                    snapshot = build_snapshot(self.manager_bin, self.config_path)
+                    snapshot = build_snapshot(self.manager_bin, self.config_path, self.logs_query)
             except Exception as exc:
                 snapshot = empty_snapshot(f"snapshot refresh failed: {exc}")
             self.call_from_thread(self.apply_snapshot, snapshot)
@@ -2691,10 +2910,12 @@ def create_app(
             self.query_one("#monitor-trends-pane", Static).update(render_monitor_trends(snapshot, self.metric_history, self.refresh_interval))
             self.query_one("#monitor-storage-pane", Static).update(render_monitor_storage(snapshot))
             self.query_one("#config-pane", Static).update(render_config_panel(snapshot))
+            self.query_one("#realm-logs-summary", Static).update(render_realm_logs_summary(snapshot))
             self.query_one("#logs-pane", Static).update(render_logs_panel(snapshot))
             self.query_one("#update-pane", Static).update(render_update_panel(snapshot, self.update_plan_data))
             self.refresh_accounts(snapshot.get("all_accounts", []))
             self.refresh_backups(snapshot.get("backups", {}).get("entries", []))
+            self.refresh_logs(snapshot.get("log_events", []))
             self.refresh_schedules(snapshot.get("schedules", []))
             self.refresh_chrome()
             if self.screenshot_path and not self.screenshot_taken and not self.screenshot_pending:
@@ -2711,6 +2932,9 @@ def create_app(
 
         def selected_backup(self) -> dict[str, Any] | None:
             return find_selected_backup(self.snapshot, self.selected_backup_file)
+
+        def selected_log_entry(self) -> dict[str, Any] | None:
+            return find_selected_log_entry(self.snapshot, self.selected_log_key)
 
         def selected_schedule(self) -> dict[str, Any] | None:
             return find_selected_schedule(self.snapshot, self.selected_schedule_id)
@@ -2773,6 +2997,37 @@ def create_app(
                 render_backups_summary(snapshot=self.snapshot, selected_backup=selected_entry)
             )
 
+        def refresh_logs(self, entries: list[dict[str, Any]]) -> None:
+            table = self.query_one("#realm-logs-table", DataTable)
+            table.clear(columns=False)
+
+            selected_entry: dict[str, Any] | None = None
+            selected_index = 0
+            for index, entry in enumerate(entries):
+                entry_key = log_entry_key(entry)
+                if self.selected_log_key and entry_key == self.selected_log_key:
+                    selected_index = index
+                    selected_entry = entry
+                table.add_row(
+                    iso_to_display(entry.get("timestamp")),
+                    str(entry.get("source", "")),
+                    str(entry.get("severity", "")),
+                    truncate_text(entry.get("message", ""), 84),
+                    key=entry_key,
+                )
+
+            if entries:
+                if selected_entry is None:
+                    selected_entry = entries[selected_index]
+                self.selected_log_key = log_entry_key(selected_entry)
+                table.move_cursor(row=selected_index, column=0, animate=False)
+            else:
+                self.selected_log_key = ""
+
+            self.query_one("#realm-log-details", Static).update(
+                render_log_event_details(selected_entry, len(entries))
+            )
+
         def refresh_schedules(self, schedules: list[dict[str, Any]]) -> None:
             table = self.query_one("#schedules-table", DataTable)
             table.clear(columns=False)
@@ -2828,6 +3083,15 @@ def create_app(
             self.query_one("#backup-summary", Static).update(
                 render_backups_summary(snapshot=self.snapshot, selected_backup=entry)
             )
+
+        def update_selected_log(self, row_key: Any) -> None:
+            key_value = player_key_value(row_key)
+            entries = self.snapshot.get("log_events", [])
+            entry = next((candidate for candidate in entries if log_entry_key(candidate) == key_value), None)
+            if entry is None and entries:
+                entry = entries[0]
+            self.selected_log_key = log_entry_key(entry) if entry else ""
+            self.query_one("#realm-log-details", Static).update(render_log_event_details(entry, len(entries)))
 
         def update_selected_schedule(self, row_key: Any) -> None:
             key_value = player_key_value(row_key)
@@ -2889,6 +3153,8 @@ def create_app(
                 self.update_selected_account(event.row_key)
             elif event.data_table.id == "backups-table":
                 self.update_selected_backup(event.row_key)
+            elif event.data_table.id == "realm-logs-table":
+                self.update_selected_log(event.row_key)
             elif event.data_table.id == "schedules-table":
                 self.update_selected_schedule(event.row_key)
 
@@ -2897,6 +3163,8 @@ def create_app(
                 self.update_selected_account(event.row_key)
             elif event.data_table.id == "backups-table":
                 self.update_selected_backup(event.row_key)
+            elif event.data_table.id == "realm-logs-table":
+                self.update_selected_log(event.row_key)
             elif event.data_table.id == "schedules-table":
                 self.update_selected_schedule(event.row_key)
 
@@ -2918,6 +3186,10 @@ def create_app(
 
         def action_show_config(self) -> None:
             self.active_view = "config"
+            self.apply_view_state()
+
+        def action_show_logs(self) -> None:
+            self.active_view = "logs"
             self.apply_view_state()
 
         def action_show_operations(self) -> None:
@@ -3094,6 +3366,52 @@ def create_app(
 
         def action_validate_config(self) -> None:
             self.dispatch_dashboard_action("config_validate")
+
+        def handle_logs_filter_result(self, result: dict[str, str] | None) -> None:
+            if result is None:
+                return
+
+            query = normalize_logs_query(result)
+            if not LOG_SOURCE_PATTERN.fullmatch(query["source"]):
+                self.set_action_result("logs filter skipped: source must be all, auth, or world", tone="warning")
+                return
+            if not LOG_WINDOW_PATTERN.fullmatch(query["window"]):
+                self.set_action_result("logs filter skipped: window must look like 15m, 1h, or 1d", tone="warning")
+                return
+            if not LOG_SEVERITY_PATTERN.fullmatch(query["severity"]):
+                self.set_action_result("logs filter skipped: severity must be all, debug, info, notice, warning, error, critical, or alert", tone="warning")
+                return
+            if not LOG_LIMIT_PATTERN.fullmatch(query["limit"]) or int(query["limit"]) > 200:
+                self.set_action_result("logs filter skipped: limit must be between 1 and 200", tone="warning")
+                return
+
+            self.logs_query = query
+            self.selected_log_key = ""
+            self.active_view = "logs"
+            self.apply_view_state()
+            self.set_action_result(
+                f"logs filters set: {query['source']} {query['window']} {query['severity']} limit {query['limit']}",
+                tone="info",
+            )
+            self.request_snapshot_refresh()
+
+        def action_filter_logs(self) -> None:
+            self.active_view = "logs"
+            self.apply_view_state()
+            self.push_screen(
+                CommandFormScreen(
+                    title="Log Filters",
+                    submit_label="Apply",
+                    fields=[
+                        {"name": "source", "label": "Source (all|auth|world)", "value": self.logs_query["source"], "placeholder": "all"},
+                        {"name": "window", "label": "Window (15m|1h|1d)", "value": self.logs_query["window"], "placeholder": "15m"},
+                        {"name": "severity", "label": "Severity", "value": self.logs_query["severity"], "placeholder": "all"},
+                        {"name": "limit", "label": "Limit", "value": self.logs_query["limit"], "placeholder": "25"},
+                    ],
+                    intro="Tune the realm log feed shown in this module. The dashboard will keep following the current filters on each refresh.",
+                ),
+                self.handle_logs_filter_result,
+            )
 
         def action_rotate_logs(self) -> None:
             self.active_view = "operations"
