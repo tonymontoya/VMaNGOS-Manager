@@ -180,6 +180,68 @@ json_escape() {
     printf '%s' "$str"
 }
 
+# ============================================================================
+# JSON BUILDERS — the only way bash code assembles JSON payloads.
+# Build bottom-up: json_string/json_bool for scalars, json_object/json_array
+# for containers, then hand the finished payload to json_output.
+# ============================================================================
+
+json_string() {
+    printf '"%s"' "$(json_escape "$1")"
+}
+
+json_bool() {
+    case "$1" in
+        true|1|yes) printf 'true' ;;
+        *) printf 'false' ;;
+    esac
+}
+
+# json_object '"key":value' '"key2":value2' ...  (members pre-encoded)
+json_object() {
+    local member joined=""
+    for member in "$@"; do
+        joined+="$member,"
+    done
+    printf '{%s}' "${joined%,}"
+}
+
+# json_array '"a"' '"b"' ...  (elements pre-encoded)
+json_array() {
+    if [[ $# -eq 0 ]]; then
+        printf '[]'
+        return 0
+    fi
+    local element joined=""
+    for element in "$@"; do
+        joined+="$element,"
+    done
+    printf '[%s]' "${joined%,}"
+}
+
+# json_string_array 'raw string' 'raw string' ...  (strings escaped here)
+json_string_array() {
+    local items=()
+    local item
+    for item in "$@"; do
+        items+=("$(json_string "$item")")
+    done
+    json_array ${items[@]+"${items[@]}"}
+}
+
+# json_kv_raw <key> <pre-encoded value>  ->  '"key":value'
+# "raw" = the value must already be valid JSON (from json_string/json_bool/
+# json_object/json_array, or a pre-validated number). For plain strings use
+# json_kvs, which escapes.
+json_kv_raw() {
+    printf '"%s":%s' "$(json_escape "$1")" "$2"
+}
+
+# json_kvs <key> <raw string value>  ->  '"key":"value"' (value escaped)
+json_kvs() {
+    json_kv_raw "$1" "$(json_string "$2")"
+}
+
 json_output() {
     local success="$1"
     local data="${2:-null}"

@@ -132,21 +132,6 @@ config_join_by() {
     printf '%s' "$joined"
 }
 
-config_json_array() {
-    if [[ $# -eq 0 ]]; then
-        printf '[]'
-        return 0
-    fi
-
-    local item escaped joined=""
-    for item in "$@"; do
-        escaped=$(json_escape "$item")
-        joined+="\"$escaped\","
-    done
-
-    printf '[%s]' "${joined%,}"
-}
-
 # ============================================================================
 # CONFIG LOADING
 # ============================================================================
@@ -725,67 +710,49 @@ config_detect_emit_json() {
     local selected_root="$1"
     local ambiguous="$2"
     local multiple_candidates=false
-    local candidates_json=""
-    local proposed_config escaped_root proposed_config_escaped
-    local signals_json assumptions_json issues_json
 
     if [[ ${#CONFIG_DETECT_ROOTS[@]} -gt 1 ]]; then
         multiple_candidates=true
     fi
 
-    local root
+    local root candidate_rows=() selected_root_json="null"
     for root in "${CONFIG_DETECT_ROOTS[@]}"; do
         config_detect_analyze_candidate "$root"
-        proposed_config=$(config_detect_proposed_config)
-        proposed_config_escaped=$(json_escape "$proposed_config")
-        escaped_root=$(json_escape "$CONFIG_DETECT_CURRENT_ROOT")
-        if [[ ${#CONFIG_DETECT_CURRENT_SIGNALS[@]} -gt 0 ]]; then
-            signals_json=$(config_json_array "${CONFIG_DETECT_CURRENT_SIGNALS[@]}")
-        else
-            signals_json='[]'
-        fi
-        if [[ ${#CONFIG_DETECT_CURRENT_ASSUMPTIONS[@]} -gt 0 ]]; then
-            assumptions_json=$(config_json_array "${CONFIG_DETECT_CURRENT_ASSUMPTIONS[@]}")
-        else
-            assumptions_json='[]'
-        fi
-        if [[ ${#CONFIG_DETECT_CURRENT_ISSUES[@]} -gt 0 ]]; then
-            issues_json=$(config_json_array "${CONFIG_DETECT_CURRENT_ISSUES[@]}")
-        else
-            issues_json='[]'
-        fi
-
-        candidates_json+=$(cat << EOF
-{
-"install_root":"$escaped_root",
-"confidence":{"level":"$CONFIG_DETECT_CURRENT_LEVEL","score":$CONFIG_DETECT_CURRENT_SCORE},
-"services":{"auth":"$(json_escape "$CONFIG_DETECT_CURRENT_AUTH_SERVICE")","world":"$(json_escape "$CONFIG_DETECT_CURRENT_WORLD_SERVICE")"},
-"database":{"host":"$(json_escape "$CONFIG_DETECT_CURRENT_DB_HOST")","port":"$(json_escape "$CONFIG_DETECT_CURRENT_DB_PORT")","user":"$(json_escape "$CONFIG_DETECT_CURRENT_DB_USER")","auth_db":"$(json_escape "$CONFIG_DETECT_CURRENT_AUTH_DB")","characters_db":"$(json_escape "$CONFIG_DETECT_CURRENT_CHARACTERS_DB")","world_db":"$(json_escape "$CONFIG_DETECT_CURRENT_WORLD_DB")","logs_db":"$(json_escape "$CONFIG_DETECT_CURRENT_LOGS_DB")"},
-"proposed_config_path":"$(json_escape "$CONFIG_DETECT_CURRENT_CONFIG_PATH")",
-"password_file":"$(json_escape "$CONFIG_DETECT_CURRENT_PASSWORD_FILE")",
-"backup_dir":"$(json_escape "$CONFIG_DETECT_CURRENT_BACKUP_DIR")",
-"signals":$signals_json,
-"assumptions":$assumptions_json,
-"issues":$issues_json,
-"proposed_config":"$proposed_config_escaped"
-},
-EOF
-)
+        candidate_rows+=("$(json_object \
+            "$(json_kvs install_root "$CONFIG_DETECT_CURRENT_ROOT")" \
+            "$(json_kv_raw confidence "$(json_object \
+                "$(json_kvs level "$CONFIG_DETECT_CURRENT_LEVEL")" \
+                "$(json_kv_raw score "$CONFIG_DETECT_CURRENT_SCORE")")")" \
+            "$(json_kv_raw services "$(json_object \
+                "$(json_kvs auth "$CONFIG_DETECT_CURRENT_AUTH_SERVICE")" \
+                "$(json_kvs world "$CONFIG_DETECT_CURRENT_WORLD_SERVICE")")")" \
+            "$(json_kv_raw database "$(json_object \
+                "$(json_kvs host "$CONFIG_DETECT_CURRENT_DB_HOST")" \
+                "$(json_kvs port "$CONFIG_DETECT_CURRENT_DB_PORT")" \
+                "$(json_kvs user "$CONFIG_DETECT_CURRENT_DB_USER")" \
+                "$(json_kvs auth_db "$CONFIG_DETECT_CURRENT_AUTH_DB")" \
+                "$(json_kvs characters_db "$CONFIG_DETECT_CURRENT_CHARACTERS_DB")" \
+                "$(json_kvs world_db "$CONFIG_DETECT_CURRENT_WORLD_DB")" \
+                "$(json_kvs logs_db "$CONFIG_DETECT_CURRENT_LOGS_DB")")")" \
+            "$(json_kvs proposed_config_path "$CONFIG_DETECT_CURRENT_CONFIG_PATH")" \
+            "$(json_kvs password_file "$CONFIG_DETECT_CURRENT_PASSWORD_FILE")" \
+            "$(json_kvs backup_dir "$CONFIG_DETECT_CURRENT_BACKUP_DIR")" \
+            "$(json_kv_raw signals "$(json_string_array ${CONFIG_DETECT_CURRENT_SIGNALS[@]+"${CONFIG_DETECT_CURRENT_SIGNALS[@]}"})")" \
+            "$(json_kv_raw assumptions "$(json_string_array ${CONFIG_DETECT_CURRENT_ASSUMPTIONS[@]+"${CONFIG_DETECT_CURRENT_ASSUMPTIONS[@]}"})")" \
+            "$(json_kv_raw issues "$(json_string_array ${CONFIG_DETECT_CURRENT_ISSUES[@]+"${CONFIG_DETECT_CURRENT_ISSUES[@]}"})")" \
+            "$(json_kvs proposed_config "$(config_detect_proposed_config)")")")
     done
 
     if [[ -n "$selected_root" ]]; then
-        selected_root="\"$(json_escape "$selected_root")\""
-    else
-        selected_root="null"
+        selected_root_json=$(json_string "$selected_root")
     fi
 
-    json_output true "{
-\"candidate_count\":${#CONFIG_DETECT_ROOTS[@]},
-\"multiple_candidates\":$multiple_candidates,
-\"ambiguous\":$ambiguous,
-\"selected_install_root\":$selected_root,
-\"candidates\":[${candidates_json%,}]
-}"
+    json_output true "$(json_object \
+        "$(json_kv_raw candidate_count "${#CONFIG_DETECT_ROOTS[@]}")" \
+        "$(json_kv_raw multiple_candidates "$(json_bool "$multiple_candidates")")" \
+        "$(json_kv_raw ambiguous "$(json_bool "$ambiguous")")" \
+        "$(json_kv_raw selected_install_root "$selected_root_json")" \
+        "$(json_kv_raw candidates "$(json_array ${candidate_rows[@]+"${candidate_rows[@]}"})")")"
 }
 
 config_detect() {
@@ -964,8 +931,13 @@ config_validate() {
             valid=true
         fi
         local data
-        data=$(printf '{"valid": %s, "errors": [], "warnings": []}' "$valid")
-        json_output "$valid" "$data"
+        data=$(json_object \
+            "$(json_kv_raw valid "$(json_bool "$valid")")" \
+            "$(json_kv_raw errors "$(json_string_array ${errors[@]+"${errors[@]}"})")" \
+            "$(json_kv_raw warnings "$(json_string_array ${warnings[@]+"${warnings[@]}"})")")
+        # The command itself succeeded; the verdict travels in data.valid so
+        # machine consumers always receive the collected findings.
+        json_output true "$data"
     else
         echo ""
         echo "Config File: $config_file"

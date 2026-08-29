@@ -556,42 +556,34 @@ logs_status_json() {
     }
 
     local data
-    data=$(cat <<EOF
-{
-  "status": "$(json_escape "$LOGS_STATUS_HEALTH")",
-  "log_root": "$(json_escape "$LOGS_ROOT")",
-  "config": {
-    "path": "$(json_escape "$LOGS_ROTATE_CONFIG_PATH")",
-    "present": $LOGS_STATUS_CONFIG_PRESENT,
-    "in_sync": $LOGS_STATUS_CONFIG_IN_SYNC
-  },
-  "logs": {
-    "active_files": $LOGS_STATUS_ACTIVE_FILE_COUNT,
-    "active_size_bytes": $LOGS_STATUS_ACTIVE_SIZE_BYTES,
-    "rotated_files": $LOGS_STATUS_ROTATED_FILE_COUNT,
-    "rotated_size_bytes": $LOGS_STATUS_ROTATED_SIZE_BYTES,
-    "sensitive_files": $LOGS_STATUS_SENSITIVE_FILE_COUNT,
-    "sensitive_permissions_ok": $LOGS_STATUS_SENSITIVE_PERMISSIONS_OK
-  },
-  "disk": {
-    "path": "$(json_escape "$(logs_df_target)")",
-    "ok": $LOGS_STATUS_DISK_OK,
-    "total_kb": $LOGS_STATUS_DISK_TOTAL_KB,
-    "used_kb": $LOGS_STATUS_DISK_USED_KB,
-    "available_kb": $LOGS_STATUS_DISK_AVAILABLE_KB,
-    "used_percent": $LOGS_STATUS_DISK_USED_PERCENT,
-    "required_free_kb": $LOGS_MIN_FREE_KB
-  },
-  "policy": {
-    "copytruncate": true,
-    "retention_days": $LOGS_RETENTION_DAYS,
-    "sensitive_retention_days": $LOGS_SENSITIVE_RETENTION_DAYS,
-    "max_size": "$(json_escape "$LOGS_MAX_SIZE")",
-    "min_size": "$(json_escape "$LOGS_MIN_SIZE")"
-  }
-}
-EOF
-)
+    data=$(json_object \
+        "$(json_kvs status "$LOGS_STATUS_HEALTH")" \
+        "$(json_kvs log_root "$LOGS_ROOT")" \
+        "$(json_kv_raw config "$(json_object \
+            "$(json_kvs path "$LOGS_ROTATE_CONFIG_PATH")" \
+            "$(json_kv_raw present "$(json_bool "$LOGS_STATUS_CONFIG_PRESENT")")" \
+            "$(json_kv_raw in_sync "$(json_bool "$LOGS_STATUS_CONFIG_IN_SYNC")")")")" \
+        "$(json_kv_raw logs "$(json_object \
+            "$(json_kv_raw active_files "$LOGS_STATUS_ACTIVE_FILE_COUNT")" \
+            "$(json_kv_raw active_size_bytes "$LOGS_STATUS_ACTIVE_SIZE_BYTES")" \
+            "$(json_kv_raw rotated_files "$LOGS_STATUS_ROTATED_FILE_COUNT")" \
+            "$(json_kv_raw rotated_size_bytes "$LOGS_STATUS_ROTATED_SIZE_BYTES")" \
+            "$(json_kv_raw sensitive_files "$LOGS_STATUS_SENSITIVE_FILE_COUNT")" \
+            "$(json_kv_raw sensitive_permissions_ok "$(json_bool "$LOGS_STATUS_SENSITIVE_PERMISSIONS_OK")")")")" \
+        "$(json_kv_raw disk "$(json_object \
+            "$(json_kvs path "$(logs_df_target)")" \
+            "$(json_kv_raw ok "$(json_bool "$LOGS_STATUS_DISK_OK")")" \
+            "$(json_kv_raw total_kb "$LOGS_STATUS_DISK_TOTAL_KB")" \
+            "$(json_kv_raw used_kb "$LOGS_STATUS_DISK_USED_KB")" \
+            "$(json_kv_raw available_kb "$LOGS_STATUS_DISK_AVAILABLE_KB")" \
+            "$(json_kv_raw used_percent "$LOGS_STATUS_DISK_USED_PERCENT")" \
+            "$(json_kv_raw required_free_kb "$LOGS_MIN_FREE_KB")")")" \
+        "$(json_kv_raw policy "$(json_object \
+            "$(json_kv_raw copytruncate "$(json_bool true)")" \
+            "$(json_kv_raw retention_days "$LOGS_RETENTION_DAYS")" \
+            "$(json_kv_raw sensitive_retention_days "$LOGS_SENSITIVE_RETENTION_DAYS")" \
+            "$(json_kvs max_size "$LOGS_MAX_SIZE")" \
+            "$(json_kvs min_size "$LOGS_MIN_SIZE")")")")
 
     json_output true "$data"
 }
@@ -662,14 +654,28 @@ logs_collect_recent_source_json() {
     python_bin=$(logs_python_bin)
 
     if [[ ! -x "$python_bin" ]]; then
-        printf '{"source":"%s","service":"%s","backing":"unavailable","available":false,"severity_supported":false,"time_window_supported":false,"events":[],"error":"python3 not found"}\n' \
-            "$(json_escape "$source")" "$(json_escape "$service")"
+        printf '%s\n' "$(json_object \
+            "$(json_kvs source "$source")" \
+            "$(json_kvs service "$service")" \
+            "$(json_kvs backing "unavailable")" \
+            "$(json_kv_raw available "$(json_bool false)")" \
+            "$(json_kv_raw severity_supported "$(json_bool false)")" \
+            "$(json_kv_raw time_window_supported "$(json_bool false)")" \
+            "$(json_kv_raw events "$(json_array)")" \
+            "$(json_kvs error "python3 not found")")"
         return 0
     fi
 
     if [[ ! -x "$journalctl_bin" ]]; then
-        printf '{"source":"%s","service":"%s","backing":"unavailable","available":false,"severity_supported":false,"time_window_supported":false,"events":[],"error":"journalctl not found"}\n' \
-            "$(json_escape "$source")" "$(json_escape "$service")"
+        printf '%s\n' "$(json_object \
+            "$(json_kvs source "$source")" \
+            "$(json_kvs service "$service")" \
+            "$(json_kvs backing "unavailable")" \
+            "$(json_kv_raw available "$(json_bool false)")" \
+            "$(json_kv_raw severity_supported "$(json_bool false)")" \
+            "$(json_kv_raw time_window_supported "$(json_bool false)")" \
+            "$(json_kv_raw events "$(json_array)")" \
+            "$(json_kvs error "journalctl not found")")"
         return 0
     fi
 

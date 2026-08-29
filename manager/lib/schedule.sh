@@ -627,12 +627,13 @@ schedule_list_next_run() {
 }
 
 schedule_list() {
-    local metadata_file json="" id job_type schedule_type time_value day timezone warnings announce_message next_run
+    local metadata_file id job_type schedule_type time_value day timezone warnings announce_message next_run
 
     schedule_load_config || return 1
     schedule_ensure_state_dir || return 1
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+        local rows=()
         for metadata_file in "$SCHEDULE_STATE_DIR"/*.conf; do
             [[ -f "$metadata_file" ]] || continue
             id=$(ini_read "$metadata_file" "job" "id" "")
@@ -644,18 +645,19 @@ schedule_list() {
             warnings=$(ini_read "$metadata_file" "job" "warnings" "")
             announce_message=$(ini_read "$metadata_file" "job" "announce_message" "")
             next_run=$(schedule_list_next_run "$(ini_read "$metadata_file" "job" "main_timer" "")")
-            json+=$(printf '{"id":"%s","job_type":"%s","schedule_type":"%s","time":"%s","day":"%s","timezone":"%s","warnings":"%s","announce_message":"%s","next_run":"%s"},' \
-                "$(json_escape "$id")" \
-                "$(json_escape "$job_type")" \
-                "$(json_escape "$schedule_type")" \
-                "$(json_escape "$time_value")" \
-                "$(json_escape "$day")" \
-                "$(json_escape "$timezone")" \
-                "$(json_escape "$warnings")" \
-                "$(json_escape "$announce_message")" \
-                "$(json_escape "$next_run")")
+            rows+=("$(json_object \
+                "$(json_kvs id "$id")" \
+                "$(json_kvs job_type "$job_type")" \
+                "$(json_kvs schedule_type "$schedule_type")" \
+                "$(json_kvs time "$time_value")" \
+                "$(json_kvs day "$day")" \
+                "$(json_kvs timezone "$timezone")" \
+                "$(json_kvs warnings "$warnings")" \
+                "$(json_kvs announce_message "$announce_message")" \
+                "$(json_kvs next_run "$next_run")")")
         done
-        json_output true "$(printf '{"schedules":[%s]}' "${json%,}")"
+        json_output true "$(json_object \
+            "$(json_kv_raw schedules "$(json_array ${rows[@]+"${rows[@]}"})")")"
         return 0
     fi
 

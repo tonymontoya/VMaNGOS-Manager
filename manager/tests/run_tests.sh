@@ -517,6 +517,48 @@ test_common_json() {
     assert_equals 'hello' "$(json_escape 'hello')" "json_escape: plain text" || all_passed=1
     assert_equals 'hello\"world' "$(json_escape 'hello"world')" "json_escape: quotes" || all_passed=1
     assert_equals 'hello\\world' "$(json_escape 'hello\world')" "json_escape: backslash" || all_passed=1
+
+    assert_equals '"hello \"world\""' "$(json_string 'hello "world"')" "json_string escapes and quotes" || all_passed=1
+    assert_equals 'true' "$(json_bool true)" "json_bool true" || all_passed=1
+    assert_equals 'true' "$(json_bool 1)" "json_bool 1 is true" || all_passed=1
+    assert_equals 'false' "$(json_bool false)" "json_bool false" || all_passed=1
+    assert_equals 'false' "$(json_bool "")" "json_bool empty is false" || all_passed=1
+    assert_equals '[]' "$(json_array)" "json_array empty" || all_passed=1
+    assert_equals '{}' "$(json_object)" "json_object empty" || all_passed=1
+    assert_equals '["a","b"]' "$(json_array '"a"' '"b"')" "json_array joins pre-encoded elements" || all_passed=1
+    assert_equals '["x\"y","z"]' "$(json_string_array 'x"y' 'z')" "json_string_array escapes raw strings" || all_passed=1
+    assert_equals '[]' "$(json_string_array)" "json_string_array empty" || all_passed=1
+    assert_equals '"key":"val\"ue"' "$(json_kvs key 'val"ue')" "json_kvs escapes value" || all_passed=1
+    assert_equals '{"a":1,"b":"two"}' "$(json_object "$(json_kv_raw a 1)" "$(json_kvs b two)")" "json_object builds from kv pairs" || all_passed=1
+    return $all_passed
+}
+
+test_config_validate_json_reports_findings() {
+    # shellcheck source=../lib/config.sh
+    source "$LIB_DIR/config.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local temp_config output compact_output
+    temp_config=$(mktemp)
+    chmod 644 "$temp_config"
+    printf '[database]\nhost = 127.0.0.1\n' > "$temp_config"
+
+    output=$(config_validate "$temp_config" json || true)
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+
+    assert_true "[[ \$compact_output == *'\"success\":true'* ]]" "config validate json succeeds as a command even when config is invalid" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"valid\":false'* ]]" "config validate json reports invalid config" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"errors\":[\"Missingrequiredfield'* ]]" "config validate json reports collected errors" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"warnings\":[\"Configfilepermissionsare644'* ]]" "config validate json reports collected warnings" || all_passed=1
+
+    chmod 600 "$temp_config"
+    printf '[database]\nhost = 127.0.0.1\nport = 3306\nuser = mangos\n\n[server]\nauth_service = auth\nworld_service = world\ninstall_root = /opt/mangos\n' > "$temp_config"
+    output=$(config_validate "$temp_config" json || true)
+    compact_output=$(printf '%s' "$output" | tr -d '[:space:]')
+    assert_true "[[ \$compact_output == *'\"valid\":true'* && \$compact_output == *'\"errors\":[]'* && \$compact_output == *'\"warnings\":[]'* ]]" "config validate json clean config yields empty findings" || all_passed=1
+
+    rm -f "$temp_config"
     return $all_passed
 }
 
@@ -2087,7 +2129,7 @@ fi
 
 if [[ "$args" == *"backup list --format json"* ]]; then
     cat <<'JSON'
-[{"timestamp":"2026-04-13T21:30:00+00:00","file":"backup-20260413-213000.tar.gz","size_bytes":52428800,"created_by":"manager","databases":["auth","characters","mangos","logs"]}]
+{"success":true,"timestamp":"2026-04-13T22:00:00+00:00","data":{"backups":[{"timestamp":"2026-04-13T21:30:00+00:00","file":"backup-20260413-213000.tar.gz","size_bytes":52428800,"created_by":"manager","databases":["auth","characters","mangos","logs"]}]},"error":null}
 JSON
     exit 0
 fi
@@ -4034,6 +4076,7 @@ main() {
     
     run_test "Common: JSON utilities" test_common_json
     run_test "Config: Loading" test_config_loading
+    run_test "Config: Validate JSON findings" test_config_validate_json_reports_findings
     run_test "Config: Manager root resolution" test_config_resolve_manager_root
     run_test "Config: Creation" test_config_create
     run_test "Config: Detect installer layout" test_config_detect_installer_layout

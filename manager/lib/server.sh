@@ -831,34 +831,34 @@ server_evaluate_alerts() {
 }
 
 server_active_alerts_json() {
-    local alert_entry severity source message json=""
+    local alert_entry severity source message rows=()
 
     for alert_entry in "${STATUS_ACTIVE_ALERTS[@]-}"; do
         [[ -n "$alert_entry" ]] || continue
         IFS=$'\t' read -r severity source message <<< "$alert_entry"
-        json+=$(printf '{"severity":"%s","source":"%s","message":"%s"},' \
-            "$(json_escape "$severity")" \
-            "$(json_escape "$source")" \
-            "$(json_escape "$message")")
+        rows+=("$(json_object \
+            "$(json_kvs severity "$severity")" \
+            "$(json_kvs source "$source")" \
+            "$(json_kvs message "$message")")")
     done
 
-    printf '[%s]' "${json%,}"
+    json_array ${rows[@]+"${rows[@]}"}
 }
 
 server_recent_events_json() {
-    local event_entry timestamp service message raw json=""
+    local event_entry timestamp service message raw rows=()
 
     for event_entry in "${STATUS_RECENT_EVENTS[@]-}"; do
         [[ -n "$event_entry" ]] || continue
         IFS=$'\t' read -r timestamp service message raw <<< "$event_entry"
-        json+=$(printf '{"timestamp":"%s","service":"%s","message":"%s","raw":"%s"},' \
-            "$(json_escape "$timestamp")" \
-            "$(json_escape "$service")" \
-            "$(json_escape "$message")" \
-            "$(json_escape "$raw")")
+        rows+=("$(json_object \
+            "$(json_kvs timestamp "$timestamp")" \
+            "$(json_kvs service "$service")" \
+            "$(json_kvs message "$message")" \
+            "$(json_kvs raw "$raw")")")
     done
 
-    printf '[%s]' "${json%,}"
+    json_array ${rows[@]+"${rows[@]}"}
 }
 
 server_collect_status() {
@@ -1109,122 +1109,96 @@ server_status_text() {
 # SERVER STATUS (JSON)
 # ============================================================================
 
+server_status_service_json() {
+    local base="STATUS_${1^^}"
+    local ref
+    local service state running pid uptime_sec uptime_human mem cpu health restarts crash
+    ref="${base}_SERVICE"; service="${!ref}"
+    ref="${base}_STATE"; state="${!ref}"
+    ref="${base}_RUNNING"; running="${!ref}"
+    ref="${base}_PID"; pid="${!ref}"
+    ref="${base}_UPTIME_SECONDS"; uptime_sec="${!ref}"
+    ref="${base}_UPTIME_HUMAN"; uptime_human="${!ref}"
+    ref="${base}_MEMORY_MB"; mem="${!ref}"
+    ref="${base}_CPU_PERCENT"; cpu="${!ref}"
+    ref="${base}_HEALTH"; health="${!ref}"
+    ref="${base}_RESTART_COUNT_1H"; restarts="${!ref}"
+    ref="${base}_CRASH_LOOP"; crash="${!ref}"
+
+    json_object \
+        "$(json_kvs service "$service")" \
+        "$(json_kvs state "$state")" \
+        "$(json_kv_raw running "$(json_bool "$running")")" \
+        "$(json_kv_raw pid "$pid")" \
+        "$(json_kv_raw uptime_seconds "$uptime_sec")" \
+        "$(json_kvs uptime_human "$uptime_human")" \
+        "$(json_kv_raw memory_mb "$mem")" \
+        "$(json_kv_raw cpu_percent "$cpu")" \
+        "$(json_kvs health "$health")" \
+        "$(json_kv_raw restart_count_1h "$restarts")" \
+        "$(json_kv_raw crash_loop_detected "$(json_bool "$crash")")"
+}
+
 server_status_json() {
     server_collect_status || {
         json_output false "null" "CONFIG_ERROR" "Failed to load configuration" "Check config file exists and is readable"
         return 1
     }
 
-    local install_root_escaped auth_service_escaped auth_state_escaped auth_uptime_escaped
-    local world_service_escaped world_state_escaped world_uptime_escaped db_message_escaped
-    local player_source_escaped disk_filesystem_escaped io_device_escaped io_source_escaped
-
-    install_root_escaped=$(json_escape "$INSTALL_ROOT")
-    auth_service_escaped=$(json_escape "$STATUS_AUTH_SERVICE")
-    auth_state_escaped=$(json_escape "$STATUS_AUTH_STATE")
-    auth_uptime_escaped=$(json_escape "$STATUS_AUTH_UPTIME_HUMAN")
-    world_service_escaped=$(json_escape "$STATUS_WORLD_SERVICE")
-    world_state_escaped=$(json_escape "$STATUS_WORLD_STATE")
-    world_uptime_escaped=$(json_escape "$STATUS_WORLD_UPTIME_HUMAN")
-    db_message_escaped=$(json_escape "$STATUS_DB_MESSAGE")
-    player_source_escaped=$(json_escape "$STATUS_PLAYER_COUNT_SOURCE")
-    disk_filesystem_escaped=$(json_escape "$STATUS_DISK_FILESYSTEM")
-    io_device_escaped=$(json_escape "$STATUS_IO_DEVICE")
-    io_source_escaped=$(json_escape "$STATUS_IO_SOURCE")
-
     local data
-    data=$(cat <<EOF
-{
-  "install_root": "$install_root_escaped",
-  "services": {
-    "auth": {
-      "service": "$auth_service_escaped",
-      "state": "$auth_state_escaped",
-      "running": $STATUS_AUTH_RUNNING,
-      "pid": $STATUS_AUTH_PID,
-      "uptime_seconds": $STATUS_AUTH_UPTIME_SECONDS,
-      "uptime_human": "$auth_uptime_escaped",
-      "memory_mb": $STATUS_AUTH_MEMORY_MB,
-      "cpu_percent": $STATUS_AUTH_CPU_PERCENT,
-      "health": "$(json_escape "$STATUS_AUTH_HEALTH")",
-      "restart_count_1h": $STATUS_AUTH_RESTART_COUNT_1H,
-      "crash_loop_detected": $STATUS_AUTH_CRASH_LOOP
-    },
-    "world": {
-      "service": "$world_service_escaped",
-      "state": "$world_state_escaped",
-      "running": $STATUS_WORLD_RUNNING,
-      "pid": $STATUS_WORLD_PID,
-      "uptime_seconds": $STATUS_WORLD_UPTIME_SECONDS,
-      "uptime_human": "$world_uptime_escaped",
-      "memory_mb": $STATUS_WORLD_MEMORY_MB,
-      "cpu_percent": $STATUS_WORLD_CPU_PERCENT,
-      "health": "$(json_escape "$STATUS_WORLD_HEALTH")",
-      "restart_count_1h": $STATUS_WORLD_RESTART_COUNT_1H,
-      "crash_loop_detected": $STATUS_WORLD_CRASH_LOOP
-    }
-  },
-  "checks": {
-    "database_connectivity": {
-      "ok": $STATUS_DB_OK,
-      "message": "$db_message_escaped"
-    },
-    "disk_space": {
-      "ok": $STATUS_DISK_OK,
-      "path": "$install_root_escaped",
-      "filesystem": "$disk_filesystem_escaped",
-      "total_kb": $STATUS_DISK_TOTAL_KB,
-      "used_kb": $STATUS_DISK_USED_KB,
-      "available_kb": $STATUS_DISK_AVAILABLE_KB,
-      "used_percent": $STATUS_DISK_USED_PERCENT,
-      "status": "$(json_escape "$STATUS_DISK_STATUS")"
-    }
-  },
-  "players": {
-    "online": $STATUS_PLAYERS_ONLINE,
-    "query_ok": $STATUS_PLAYER_COUNT_OK,
-    "source": "$player_source_escaped"
-  },
-  "host": {
-    "cpu": {
-      "usage_percent": $STATUS_HOST_CPU_PERCENT,
-      "status": "$(json_escape "$STATUS_HOST_CPU_STATUS")",
-      "cores": $STATUS_HOST_CPU_CORES
-    },
-    "memory": {
-      "total_kb": $STATUS_HOST_MEMORY_TOTAL_KB,
-      "used_kb": $STATUS_HOST_MEMORY_USED_KB,
-      "available_kb": $STATUS_HOST_MEMORY_AVAILABLE_KB,
-      "used_percent": $STATUS_HOST_MEMORY_USED_PERCENT,
-      "status": "$(json_escape "$STATUS_HOST_MEMORY_STATUS")"
-    },
-    "load": {
-      "load_1": $STATUS_HOST_LOAD_1,
-      "load_5": $STATUS_HOST_LOAD_5,
-      "load_15": $STATUS_HOST_LOAD_15,
-      "status": "$(json_escape "$STATUS_HOST_LOAD_STATUS")"
-    }
-  },
-  "storage_io": {
-    "available": $STATUS_IO_AVAILABLE,
-    "device": "$io_device_escaped",
-    "source": "$io_source_escaped",
-    "read_ops_per_sec": $STATUS_IO_READ_OPS,
-    "write_ops_per_sec": $STATUS_IO_WRITE_OPS,
-    "read_kbps": $STATUS_IO_READ_KBPS,
-    "write_kbps": $STATUS_IO_WRITE_KBPS,
-    "await_ms": $STATUS_IO_AWAIT_MS,
-    "util_percent": $STATUS_IO_UTIL_PERCENT,
-    "status": "$(json_escape "$STATUS_IO_STATUS")"
-  },
-  "alerts": {
-    "status": "$(json_escape "$STATUS_ALERT_STATUS")",
-    "active": $(server_active_alerts_json),
-    "recent_events": $(server_recent_events_json)
-  }
-}
-EOF
-)
+    data=$(json_object \
+        "$(json_kvs install_root "$INSTALL_ROOT")" \
+        "$(json_kv_raw services "$(json_object \
+            "$(json_kv_raw auth "$(server_status_service_json auth)")" \
+            "$(json_kv_raw world "$(server_status_service_json world)")")")" \
+        "$(json_kv_raw checks "$(json_object \
+            "$(json_kv_raw database_connectivity "$(json_object \
+                "$(json_kv_raw ok "$(json_bool "$STATUS_DB_OK")")" \
+                "$(json_kvs message "$STATUS_DB_MESSAGE")")")" \
+            "$(json_kv_raw disk_space "$(json_object \
+                "$(json_kv_raw ok "$(json_bool "$STATUS_DISK_OK")")" \
+                "$(json_kvs path "$INSTALL_ROOT")" \
+                "$(json_kvs filesystem "$STATUS_DISK_FILESYSTEM")" \
+                "$(json_kv_raw total_kb "$STATUS_DISK_TOTAL_KB")" \
+                "$(json_kv_raw used_kb "$STATUS_DISK_USED_KB")" \
+                "$(json_kv_raw available_kb "$STATUS_DISK_AVAILABLE_KB")" \
+                "$(json_kv_raw used_percent "$STATUS_DISK_USED_PERCENT")" \
+                "$(json_kvs status "$STATUS_DISK_STATUS")")")")")" \
+        "$(json_kv_raw players "$(json_object \
+            "$(json_kv_raw online "$STATUS_PLAYERS_ONLINE")" \
+            "$(json_kv_raw query_ok "$(json_bool "$STATUS_PLAYER_COUNT_OK")")" \
+            "$(json_kvs source "$STATUS_PLAYER_COUNT_SOURCE")")")" \
+        "$(json_kv_raw host "$(json_object \
+            "$(json_kv_raw cpu "$(json_object \
+                "$(json_kv_raw usage_percent "$STATUS_HOST_CPU_PERCENT")" \
+                "$(json_kvs status "$STATUS_HOST_CPU_STATUS")" \
+                "$(json_kv_raw cores "$STATUS_HOST_CPU_CORES")")")" \
+            "$(json_kv_raw memory "$(json_object \
+                "$(json_kv_raw total_kb "$STATUS_HOST_MEMORY_TOTAL_KB")" \
+                "$(json_kv_raw used_kb "$STATUS_HOST_MEMORY_USED_KB")" \
+                "$(json_kv_raw available_kb "$STATUS_HOST_MEMORY_AVAILABLE_KB")" \
+                "$(json_kv_raw used_percent "$STATUS_HOST_MEMORY_USED_PERCENT")" \
+                "$(json_kvs status "$STATUS_HOST_MEMORY_STATUS")")")" \
+            "$(json_kv_raw load "$(json_object \
+                "$(json_kv_raw load_1 "$STATUS_HOST_LOAD_1")" \
+                "$(json_kv_raw load_5 "$STATUS_HOST_LOAD_5")" \
+                "$(json_kv_raw load_15 "$STATUS_HOST_LOAD_15")" \
+                "$(json_kvs status "$STATUS_HOST_LOAD_STATUS")")")")")" \
+        "$(json_kv_raw storage_io "$(json_object \
+            "$(json_kv_raw available "$(json_bool "$STATUS_IO_AVAILABLE")")" \
+            "$(json_kvs device "$STATUS_IO_DEVICE")" \
+            "$(json_kvs source "$STATUS_IO_SOURCE")" \
+            "$(json_kv_raw read_ops_per_sec "$STATUS_IO_READ_OPS")" \
+            "$(json_kv_raw write_ops_per_sec "$STATUS_IO_WRITE_OPS")" \
+            "$(json_kv_raw read_kbps "$STATUS_IO_READ_KBPS")" \
+            "$(json_kv_raw write_kbps "$STATUS_IO_WRITE_KBPS")" \
+            "$(json_kv_raw await_ms "$STATUS_IO_AWAIT_MS")" \
+            "$(json_kv_raw util_percent "$STATUS_IO_UTIL_PERCENT")" \
+            "$(json_kvs status "$STATUS_IO_STATUS")")")" \
+        "$(json_kv_raw alerts "$(json_object \
+            "$(json_kvs status "$STATUS_ALERT_STATUS")" \
+            "$(json_kv_raw active "$(server_active_alerts_json)")" \
+            "$(json_kv_raw recent_events "$(server_recent_events_json)")")")")
 
     json_output true "$data"
 }

@@ -984,7 +984,7 @@ def empty_snapshot(error_message: str) -> dict[str, Any]:
         "update_inspect": {"ok": False, "data": {}, "error": error_message},
         "accounts_online": {"ok": False, "data": {}, "error": error_message},
         "accounts": {"ok": False, "data": {}, "error": error_message},
-        "backup_list": {"ok": False, "data": [], "error": error_message},
+        "backup_list": {"ok": False, "data": {}, "error": error_message},
         "backup_schedule_status": {"ok": False, "data": {}, "error": error_message},
         "config_validate": {"ok": False, "data": {}, "error": error_message},
         "config_show": {"ok": False, "data": {}, "error": error_message},
@@ -1102,7 +1102,7 @@ def build_snapshot(manager_bin: str, config_path: str, logs_query: dict[str, Any
         manager_bin,
         config_path,
         ["backup", "list", "--format", "json"],
-        parser_mode="json",
+        parser_mode="envelope",
         use_global_json=False,
     )
     backup_schedule_status = run_manager_command(
@@ -1132,7 +1132,7 @@ def build_snapshot(manager_bin: str, config_path: str, logs_query: dict[str, Any
         config_content = str(config_show["data"].get("content", ""))
 
     config_values = parse_ini_content(config_content)
-    backup_entries = backups["data"] if backups["ok"] and isinstance(backups["data"], list) else []
+    backup_entries = backups["data"].get("backups", []) if backups["ok"] else []
     players = online_accounts["data"].get("accounts", []) if online_accounts["ok"] else []
     all_accounts = accounts["data"].get("accounts", []) if accounts["ok"] else []
     log_events = realm_logs["data"].get("events", []) if realm_logs["ok"] else []

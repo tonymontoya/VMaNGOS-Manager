@@ -476,7 +476,7 @@ update_assess_db_requirements() {
 }
 
 update_db_pending_entries_json() {
-    local entry source role migration_id path database json=""
+    local entry source role migration_id path database rows=()
 
     if [[ ${#UPDATE_DB_PENDING_ENTRIES[@]} -eq 0 ]]; then
         printf '[]'
@@ -487,19 +487,19 @@ update_db_pending_entries_json() {
         [[ -n "$entry" ]] || continue
         IFS='|' read -r source role migration_id path <<< "$entry"
         database=$(db_name_for_role "$role") || return 1
-        json+=$(printf '{"source":"%s","role":"%s","database":"%s","id":"%s","path":"%s"},' \
-            "$(json_escape "$source")" \
-            "$(json_escape "$role")" \
-            "$(json_escape "$database")" \
-            "$(json_escape "$migration_id")" \
-            "$(json_escape "$path")")
+        rows+=("$(json_object \
+            "$(json_kvs source "$source")" \
+            "$(json_kvs role "$role")" \
+            "$(json_kvs database "$database")" \
+            "$(json_kvs id "$migration_id")" \
+            "$(json_kvs path "$path")")")
     done < <(printf '%s\n' "${UPDATE_DB_PENDING_ENTRIES[@]}" | sort)
 
-    printf '[%s]' "${json%,}"
+    json_array ${rows[@]+"${rows[@]}"}
 }
 
 update_db_manual_changes_json() {
-    local entry path reason json=""
+    local entry path reason rows=()
 
     if [[ ${#UPDATE_DB_MANUAL_CHANGES[@]} -eq 0 ]]; then
         printf '[]'
@@ -509,12 +509,12 @@ update_db_manual_changes_json() {
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
         IFS='|' read -r path reason <<< "$entry"
-        json+=$(printf '{"path":"%s","reason":"%s"},' \
-            "$(json_escape "$path")" \
-            "$(json_escape "$reason")")
+        rows+=("$(json_object \
+            "$(json_kvs path "$path")" \
+            "$(json_kvs reason "$reason")")")
     done < <(printf '%s\n' "${UPDATE_DB_MANUAL_CHANGES[@]}" | sort)
 
-    printf '[%s]' "${json%,}"
+    json_array ${rows[@]+"${rows[@]}"}
 }
 
 update_emit_db_inspect_result() {
@@ -534,21 +534,20 @@ update_emit_db_inspect_result() {
     fi
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_output true "{
-\"target\":\"vmangos-core\",
-\"source_repo\":\"$(json_escape "$source_root")\",
-\"branch\":\"$(json_escape "$current_branch")\",
-\"remote_ref\":\"$(json_escape "$remote_ref")\",
-\"local_commit\":\"$(json_escape "$local_commit")\",
-\"remote_commit\":\"$(json_escape "$remote_commit")\",
-\"commits_behind\":$commits_behind,
-\"commits_ahead\":$commits_ahead,
-\"worktree_dirty\":$( [[ "$dirty_state" == "dirty" ]] && echo true || echo false ),
-\"db_assessment\":\"$(json_escape "$UPDATE_DB_ASSESSMENT_MODE")\",
-\"db_automation_supported\":$automation_supported,
-\"pending_migrations\":$(update_db_pending_entries_json),
-\"manual_review\":$(update_db_manual_changes_json)
-}"
+        json_output true "$(json_object \
+            "$(json_kvs target "vmangos-core")" \
+            "$(json_kvs source_repo "$source_root")" \
+            "$(json_kvs branch "$current_branch")" \
+            "$(json_kvs remote_ref "$remote_ref")" \
+            "$(json_kvs local_commit "$local_commit")" \
+            "$(json_kvs remote_commit "$remote_commit")" \
+            "$(json_kv_raw commits_behind "$commits_behind")" \
+            "$(json_kv_raw commits_ahead "$commits_ahead")" \
+            "$(json_kv_raw worktree_dirty "$(json_bool "$( [[ "$dirty_state" == "dirty" ]] && echo true)")")" \
+            "$(json_kvs db_assessment "$UPDATE_DB_ASSESSMENT_MODE")" \
+            "$(json_kv_raw db_automation_supported "$(json_bool "$automation_supported")")" \
+            "$(json_kv_raw pending_migrations "$(update_db_pending_entries_json)")" \
+            "$(json_kv_raw manual_review "$(update_db_manual_changes_json)")")"
         return 0
     fi
 
@@ -629,23 +628,15 @@ update_build_core_steps() {
 
 update_instructions_json() {
     local instructions_text="$1"
-    local line escaped_line
+    local line
     local json_lines=()
 
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
-        escaped_line=$(json_escape "$line")
-        json_lines+=("\"$escaped_line\"")
+        json_lines+=("$(json_string "$line")")
     done <<< "$instructions_text"
 
-    if [[ ${#json_lines[@]} -eq 0 ]]; then
-        printf '[]'
-        return 0
-    fi
-
-    local joined
-    joined=$(printf '%s,' "${json_lines[@]}")
-    printf '[%s]' "${joined%,}"
+    json_array ${json_lines[@]+"${json_lines[@]}"}
 }
 
 update_emit_result() {
@@ -669,18 +660,17 @@ update_emit_result() {
     fi
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_output true "{
-\"repo_root\":\"$(json_escape "$repo_root")\",
-\"branch\":\"$(json_escape "$current_branch")\",
-\"remote_ref\":\"$(json_escape "$remote_ref")\",
-\"local_commit\":\"$(json_escape "$local_commit")\",
-\"remote_commit\":\"$(json_escape "$remote_commit")\",
-\"commits_behind\":$commits_behind,
-\"update_available\":$( [[ "$commits_behind" -gt 0 ]] && echo true || echo false ),
-\"worktree_dirty\":$( [[ "$dirty_state" == "dirty" ]] && echo true || echo false ),
-\"install_target\":\"$(json_escape "$install_target")\",
-\"instructions\":$instructions_json
-}"
+        json_output true "$(json_object \
+            "$(json_kvs repo_root "$repo_root")" \
+            "$(json_kvs branch "$current_branch")" \
+            "$(json_kvs remote_ref "$remote_ref")" \
+            "$(json_kvs local_commit "$local_commit")" \
+            "$(json_kvs remote_commit "$remote_commit")" \
+            "$(json_kv_raw commits_behind "$commits_behind")" \
+            "$(json_kv_raw update_available "$(json_bool "$( [[ "$commits_behind" -gt 0 ]] && echo true)")")" \
+            "$(json_kv_raw worktree_dirty "$(json_bool "$( [[ "$dirty_state" == "dirty" ]] && echo true)")")" \
+            "$(json_kvs install_target "$install_target")" \
+            "$(json_kv_raw instructions "$instructions_json")")"
         return 0
     fi
 
@@ -729,22 +719,21 @@ update_emit_plan_result() {
     fi
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_output true "{
-\"source_repo\":\"$(json_escape "$source_root")\",
-\"build_dir\":\"$(json_escape "$build_root")\",
-\"run_dir\":\"$(json_escape "$run_root")\",
-\"branch\":\"$(json_escape "$current_branch")\",
-\"remote_ref\":\"$(json_escape "$remote_ref")\",
-\"local_commit\":\"$(json_escape "$local_commit")\",
-\"remote_commit\":\"$(json_escape "$remote_commit")\",
-\"commits_behind\":$commits_behind,
-\"commits_ahead\":$commits_ahead,
-\"update_available\":$update_available,
-\"worktree_dirty\":$( [[ "$dirty_state" == "dirty" ]] && echo true || echo false ),
-\"backup_required\":true,
-\"warning\":\"$(json_escape "$warning_text")\",
-\"steps\":$steps_json
-}"
+        json_output true "$(json_object \
+            "$(json_kvs source_repo "$source_root")" \
+            "$(json_kvs build_dir "$build_root")" \
+            "$(json_kvs run_dir "$run_root")" \
+            "$(json_kvs branch "$current_branch")" \
+            "$(json_kvs remote_ref "$remote_ref")" \
+            "$(json_kvs local_commit "$local_commit")" \
+            "$(json_kvs remote_commit "$remote_commit")" \
+            "$(json_kv_raw commits_behind "$commits_behind")" \
+            "$(json_kv_raw commits_ahead "$commits_ahead")" \
+            "$(json_kv_raw update_available "$(json_bool "$update_available")")" \
+            "$(json_kv_raw worktree_dirty "$(json_bool "$( [[ "$dirty_state" == "dirty" ]] && echo true)")")" \
+            "$(json_kv_raw backup_required "$(json_bool true)")" \
+            "$(json_kvs warning "$warning_text")" \
+            "$(json_kv_raw steps "$steps_json")")"
         return 0
     fi
 
@@ -802,22 +791,21 @@ update_emit_source_check_result() {
     next_steps=$'vmangos-manager update plan\nvmangos-manager update apply --backup-first'
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_output true "{
-\"target\":\"vmangos-core\",
-\"source_repo\":\"$(json_escape "$source_root")\",
-\"build_dir\":\"$(json_escape "$build_root")\",
-\"run_dir\":\"$(json_escape "$run_root")\",
-\"branch\":\"$(json_escape "$current_branch")\",
-\"remote_ref\":\"$(json_escape "$remote_ref")\",
-\"local_commit\":\"$(json_escape "$local_commit")\",
-\"remote_commit\":\"$(json_escape "$remote_commit")\",
-\"commits_behind\":$commits_behind,
-\"commits_ahead\":$commits_ahead,
-\"update_available\":$( [[ "$commits_behind" -gt 0 ]] && echo true || echo false ),
-\"worktree_dirty\":$( [[ "$dirty_state" == "dirty" ]] && echo true || echo false ),
-\"warning\":\"$(json_escape "$warning_text")\",
-\"next_steps\":$(update_instructions_json "$next_steps")
-}"
+        json_output true "$(json_object \
+            "$(json_kvs target "vmangos-core")" \
+            "$(json_kvs source_repo "$source_root")" \
+            "$(json_kvs build_dir "$build_root")" \
+            "$(json_kvs run_dir "$run_root")" \
+            "$(json_kvs branch "$current_branch")" \
+            "$(json_kvs remote_ref "$remote_ref")" \
+            "$(json_kvs local_commit "$local_commit")" \
+            "$(json_kvs remote_commit "$remote_commit")" \
+            "$(json_kv_raw commits_behind "$commits_behind")" \
+            "$(json_kv_raw commits_ahead "$commits_ahead")" \
+            "$(json_kv_raw update_available "$(json_bool "$( [[ "$commits_behind" -gt 0 ]] && echo true)")")" \
+            "$(json_kv_raw worktree_dirty "$(json_bool "$( [[ "$dirty_state" == "dirty" ]] && echo true)")")" \
+            "$(json_kvs warning "$warning_text")" \
+            "$(json_kv_raw next_steps "$(update_instructions_json "$next_steps")")")"
         return 0
     fi
 
@@ -866,25 +854,24 @@ update_emit_db_plan_result() {
     fi
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_output true "{
-\"source_repo\":\"$(json_escape "$source_root")\",
-\"build_dir\":\"$(json_escape "$build_root")\",
-\"run_dir\":\"$(json_escape "$run_root")\",
-\"branch\":\"$(json_escape "$current_branch")\",
-\"remote_ref\":\"$(json_escape "$remote_ref")\",
-\"local_commit\":\"$(json_escape "$local_commit")\",
-\"remote_commit\":\"$(json_escape "$remote_commit")\",
-\"commits_behind\":$commits_behind,
-\"commits_ahead\":$commits_ahead,
-\"worktree_dirty\":$( [[ "$dirty_state" == "dirty" ]] && echo true || echo false ),
-\"backup_required\":true,
-\"db_assessment\":\"$(json_escape "$UPDATE_DB_ASSESSMENT_MODE")\",
-\"db_automation_supported\":$automation_supported,
-\"pending_migrations\":$(update_db_pending_entries_json),
-\"manual_review\":$(update_db_manual_changes_json),
-\"warning\":\"$(json_escape "$warning_text")\",
-\"steps\":$(update_instructions_json "$steps_text")
-}"
+        json_output true "$(json_object \
+            "$(json_kvs source_repo "$source_root")" \
+            "$(json_kvs build_dir "$build_root")" \
+            "$(json_kvs run_dir "$run_root")" \
+            "$(json_kvs branch "$current_branch")" \
+            "$(json_kvs remote_ref "$remote_ref")" \
+            "$(json_kvs local_commit "$local_commit")" \
+            "$(json_kvs remote_commit "$remote_commit")" \
+            "$(json_kv_raw commits_behind "$commits_behind")" \
+            "$(json_kv_raw commits_ahead "$commits_ahead")" \
+            "$(json_kv_raw worktree_dirty "$(json_bool "$( [[ "$dirty_state" == "dirty" ]] && echo true)")")" \
+            "$(json_kv_raw backup_required "$(json_bool true)")" \
+            "$(json_kvs db_assessment "$UPDATE_DB_ASSESSMENT_MODE")" \
+            "$(json_kv_raw db_automation_supported "$(json_bool "$automation_supported")")" \
+            "$(json_kv_raw pending_migrations "$(update_db_pending_entries_json)")" \
+            "$(json_kv_raw manual_review "$(update_db_manual_changes_json)")" \
+            "$(json_kvs warning "$warning_text")" \
+            "$(json_kv_raw steps "$(update_instructions_json "$steps_text")")")"
         return 0
     fi
 

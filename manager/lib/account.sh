@@ -332,22 +332,19 @@ account_list() {
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
         local rows=()
-        local id username gmlevel online banned escaped_username
+        local id username gmlevel online banned
         while IFS=$'\t' read -r id username gmlevel online banned; do
             [[ -n "${id:-}" ]] || continue
-            escaped_username=$(json_escape "$username")
-            rows+=("{\"id\":$id,\"username\":\"$escaped_username\",\"gm_level\":$gmlevel,\"online\":$( [[ "$online" == "1" ]] && echo true || echo false ),\"banned\":$( [[ "$banned" == "1" ]] && echo true || echo false )}")
+            rows+=("$(json_object \
+                "$(json_kv_raw id "$id")" \
+                "$(json_kvs username "$username")" \
+                "$(json_kv_raw gm_level "$gmlevel")" \
+                "$(json_kv_raw online "$(json_bool "$online")")" \
+                "$(json_kv_raw banned "$(json_bool "$banned")")")")
         done <<< "$results"
 
-        local joined=""
-        if [[ ${#rows[@]} -gt 0 ]]; then
-            joined=$(printf '%s,' "${rows[@]}")
-            joined="[${joined%,}]"
-        else
-            joined="[]"
-        fi
-
-        json_output true "{\"accounts\":$joined}"
+        json_output true "$(json_object \
+            "$(json_kv_raw accounts "$(json_array ${rows[@]+"${rows[@]}"})")")"
         return 0
     fi
 

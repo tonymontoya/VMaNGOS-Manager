@@ -120,17 +120,17 @@ backup_schedule_label_from_oncalendar() {
     esac
 }
 
+# Emit one schedule record as pipe-delimited structured data:
+# id|timer|present|enabled|active|configured|description|next_run|timer_path
 backup_schedule_collect_state() {
     local schedule_id="$1"
     local timer_name="$2"
-    local timer_path description on_calendar configured enabled active next_run
+    local timer_path description on_calendar configured enabled=false active=false next_run
 
     timer_path=$(backup_timer_file_path "$timer_name")
     if [[ ! -f "$timer_path" ]]; then
-        printf '{"id":"%s","timer":"%s","present":false,"enabled":false,"active":false,"configured":"n/a","next_run":"","timer_path":"%s"}' \
-            "$(json_escape "$schedule_id")" \
-            "$(json_escape "$timer_name")" \
-            "$(json_escape "$timer_path")"
+        printf '%s|%s|false|false|false|n/a|||%s\n' \
+            "$schedule_id" "$timer_name" "$timer_path"
         return 0
     fi
 
@@ -138,8 +138,6 @@ backup_schedule_collect_state() {
     on_calendar=$(awk -F= '/^OnCalendar=/{print $2; exit}' "$timer_path" 2>/dev/null || true)
     configured=$(backup_schedule_label_from_oncalendar "$on_calendar")
 
-    enabled=false
-    active=false
     if backup_systemctl is-enabled "$timer_name" >/dev/null 2>&1; then
         enabled=true
     fi
@@ -152,56 +150,68 @@ backup_schedule_collect_state() {
         next_run=""
     fi
 
-    printf '{"id":"%s","timer":"%s","present":true,"enabled":%s,"active":%s,"configured":"%s","description":"%s","next_run":"%s","timer_path":"%s"}' \
-        "$(json_escape "$schedule_id")" \
-        "$(json_escape "$timer_name")" \
-        "$enabled" \
-        "$active" \
-        "$(json_escape "$configured")" \
-        "$(json_escape "$description")" \
-        "$(json_escape "$next_run")" \
-        "$(json_escape "$timer_path")"
+    printf '%s|%s|true|%s|%s|%s|%s|%s|%s\n' \
+        "$schedule_id" "$timer_name" "$enabled" "$active" \
+        "$configured" "$description" "$next_run" "$timer_path"
 }
 
-backup_schedule_json_string_field() {
-    local json="$1"
-    local field="$2"
-    sed -n "s/.*\"$field\":\"\\([^\"]*\\)\".*/\\1/p" <<< "$json"
+backup_schedule_record_field() {
+    local record="$1"
+    local index="$2"
+    cut -d'|' -f"$index" <<< "$record"
 }
 
-backup_schedule_json_bool_field() {
-    local json="$1"
-    local field="$2"
-    sed -n "s/.*\"$field\":\\(true\\|false\\).*/\\1/p" <<< "$json"
+backup_schedule_state_json() {
+    local record="$1"
+
+    json_object \
+        "$(json_kvs id "$(backup_schedule_record_field "$record" 1)")" \
+        "$(json_kvs timer "$(backup_schedule_record_field "$record" 2)")" \
+        "$(json_kv_raw present "$(json_bool "$(backup_schedule_record_field "$record" 3)")")" \
+        "$(json_kv_raw enabled "$(json_bool "$(backup_schedule_record_field "$record" 4)")")" \
+        "$(json_kv_raw active "$(json_bool "$(backup_schedule_record_field "$record" 5)")")" \
+        "$(json_kvs configured "$(backup_schedule_record_field "$record" 6)")" \
+        "$(json_kvs description "$(backup_schedule_record_field "$record" 7)")" \
+        "$(json_kvs next_run "$(backup_schedule_record_field "$record" 8)")" \
+        "$(json_kvs timer_path "$(backup_schedule_record_field "$record" 9)")"
 }
 
 backup_schedule_status() {
     local output_format="${1:-${OUTPUT_FORMAT:-text}}"
-    local daily weekly configured_count
+    local daily weekly configured_count=0 record present
 
     daily=$(backup_schedule_collect_state "daily" "vmangos-backup-daily.timer")
     weekly=$(backup_schedule_collect_state "weekly" "vmangos-backup-weekly.timer")
-    configured_count=$(printf '%s\n%s\n' "$daily" "$weekly" | awk '/"present":true/ {count++} END {print count+0}')
+    for record in "$daily" "$weekly"; do
+        present=$(backup_schedule_record_field "$record" 3)
+        if [[ "$present" == "true" ]]; then
+            configured_count=$((configured_count + 1))
+        fi
+    done
 
     if [[ "$output_format" == "json" ]]; then
-        json_output true "{\"configured_count\":$configured_count,\"schedules\":[$daily,$weekly]}"
+        json_output true "$(json_object \
+            "$(json_kv_raw configured_count "$configured_count")" \
+            "$(json_kv_raw schedules "$(json_array \
+                "$(backup_schedule_state_json "$daily")" \
+                "$(backup_schedule_state_json "$weekly")")")")"
         return 0
     fi
 
     echo "=== Backup Schedule State ==="
     echo ""
-    printf '%s\n' "$daily" "$weekly" | while IFS= read -r entry; do
-        local schedule_id configured enabled active next_run
-        [[ -n "$entry" ]] || continue
-        schedule_id=$(backup_schedule_json_string_field "$entry" "id")
-        if [[ "$entry" == *'"present":false'* ]]; then
+    local schedule_id configured enabled active next_run
+    for record in "$daily" "$weekly"; do
+        schedule_id=$(backup_schedule_record_field "$record" 1)
+        present=$(backup_schedule_record_field "$record" 3)
+        if [[ "$present" != "true" ]]; then
             printf '%s: not configured\n' "$schedule_id"
             continue
         fi
-        configured=$(backup_schedule_json_string_field "$entry" "configured")
-        enabled=$(backup_schedule_json_bool_field "$entry" "enabled")
-        active=$(backup_schedule_json_bool_field "$entry" "active")
-        next_run=$(backup_schedule_json_string_field "$entry" "next_run")
+        configured=$(backup_schedule_record_field "$record" 6)
+        enabled=$(backup_schedule_record_field "$record" 4)
+        active=$(backup_schedule_record_field "$record" 5)
+        next_run=$(backup_schedule_record_field "$record" 8)
         printf '%s: %s  enabled=%s  active=%s\n' "$schedule_id" "$configured" "$enabled" "$active"
         if [[ -n "$next_run" ]]; then
             printf '  next run: %s\n' "$next_run"
@@ -331,57 +341,58 @@ backup_manager_version() {
     fi
 }
 
-metadata_json_get() {
+# Metadata readers — real JSON parsing via python3 (the metadata files are
+# JSON this tool produced; no hand-rolled awk/sed JSON parsing).
+# Unreadable/malformed metadata yields empty output, never a hard failure.
+metadata_json_read() {
     local metadata_file="$1"
-    local key="$2"
+    local mode="$2"
+    local key="$3"
 
-    awk -v key="$key" '
-        {
-            if (match($0, "\"" key "\"[[:space:]]*:[[:space:]]*\"[^\"]*\"")) {
-                value = substr($0, RSTART, RLENGTH)
-                sub(/^[^:]*:[[:space:]]*"/, "", value)
-                sub(/"$/, "", value)
-                print value
-                exit
-            }
-            if (match($0, "\"" key "\"[[:space:]]*:[[:space:]]*[0-9]+")) {
-                value = substr($0, RSTART, RLENGTH)
-                sub(/^[^:]*:[[:space:]]*/, "", value)
-                print value
-                exit
-            }
-        }
-    ' "$metadata_file"
+    python3 - "$metadata_file" "$mode" "$key" <<'PYEOF'
+import json
+import sys
+
+path, mode, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+
+value = data.get(key) if isinstance(data, dict) else None
+
+if mode == "get":
+    if isinstance(value, str):
+        print(value)
+    elif value is not None:
+        print(json.dumps(value))
+elif mode == "values":
+    if isinstance(value, list):
+        for item in value:
+            print(item if isinstance(item, str) else json.dumps(item))
+elif mode == "join":
+    if isinstance(value, list):
+        print(", ".join(str(item) for item in value))
+elif mode == "count":
+    print(len(value) if isinstance(value, list) else 0)
+PYEOF
+}
+
+metadata_json_get() {
+    metadata_json_read "$1" get "$2"
 }
 
 metadata_json_array_values() {
-    local metadata_file="$1"
-    local key="$2"
-
-    local line values
-    line=$(grep -m1 "\"$key\"" "$metadata_file" 2>/dev/null || true)
-    [[ -n "$line" ]] || return 0
-
-    values=$(printf '%s\n' "$line" | sed -E 's/^[^[]*\[//; s/\].*$//; s/"//g; s/[[:space:]]*,[[:space:]]*/\n/g')
-    if [[ -n "$values" ]]; then
-        printf '%s\n' "$values"
-    fi
+    metadata_json_read "$1" values "$2"
 }
 
 metadata_json_array_join() {
-    local metadata_file="$1"
-    local key="$2"
-    local joined
-
-    joined=$(metadata_json_array_values "$metadata_file" "$key" | paste -sd ', ' -)
-    printf '%s' "$joined"
+    metadata_json_read "$1" join "$2"
 }
 
 metadata_json_array_count() {
-    local metadata_file="$1"
-    local key="$2"
-
-    metadata_json_array_values "$metadata_file" "$key" | awk 'NF {count++} END {print count+0}'
+    metadata_json_read "$1" count "$2"
 }
 
 backup_now() {
@@ -1031,45 +1042,56 @@ schedule_create_weekly() {
 
 backup_list() {
     local format="${1:-text}"
-    
-    log_section "Backup List"
-    
+
     backup_load_config || return 1
-    
+
     if [[ ! -d "$BACKUP_DIR" ]]; then
         log_error "Backup directory not found: $BACKUP_DIR"
         return 1
     fi
-    
+
     # Find all backup metadata files
     local metadata_files=()
     while IFS= read -r -d '' file; do
         metadata_files+=("$file")
     done < <(find "$BACKUP_DIR" -maxdepth 1 -name "*.json" -type f -print0 2>/dev/null | sort -z)
-    
+
     if [[ ${#metadata_files[@]} -eq 0 ]]; then
+        if [[ "$format" == "json" ]]; then
+            # JSON output must stay machine-parseable: no log banners
+            json_output true "$(json_object "$(json_kv_raw backups "$(json_array)")")"
+            return 0
+        fi
+        log_section "Backup List"
         log_info "No backups found in $BACKUP_DIR"
         return 0
     fi
-    
+
     if [[ "$format" == "json" ]]; then
-        # Output JSON array
-        echo "["
-        local first=1
+        local backups=()
+        local meta_file content
         for meta_file in "${metadata_files[@]}"; do
-            [[ $first -eq 1 ]] || echo ","
-            first=0
-            tr -d '\n' < "$meta_file" || echo "null"
+            content=$(tr -d '\n' < "$meta_file" 2>/dev/null || true)
+            if [[ -z "$content" ]]; then
+                # Unreadable/empty metadata stays visible in the listing
+                backups+=("null")
+                continue
+            fi
+            backups+=("$content")
         done
-        echo ""
-        echo "]"
-    else
-        # Output text table
-        echo ""
-        printf "%-20s %-12s %-10s %s\n" "Timestamp" "Size" "Verified" "File"
-        printf "%-20s %-12s %-10s %s\n" "--------------------" "------------" "----------" "----"
-        
-        for meta_file in "${metadata_files[@]}"; do
+        json_output true "$(json_object \
+            "$(json_kv_raw backups "$(json_array ${backups[@]+"${backups[@]}"})")")"
+        return 0
+    fi
+
+    log_section "Backup List"
+
+    # Output text table
+    echo ""
+    printf "%-20s %-12s %-10s %s\n" "Timestamp" "Size" "Verified" "File"
+    printf "%-20s %-12s %-10s %s\n" "--------------------" "------------" "----------" "----"
+
+    for meta_file in "${metadata_files[@]}"; do
             local timestamp size_bytes file verified
             timestamp=$(metadata_json_get "$meta_file" "timestamp" | cut -d'T' -f1)
             size_bytes=$(metadata_json_get "$meta_file" "size_bytes")
@@ -1103,9 +1125,8 @@ backup_list() {
             fi
             
             printf "%-20s %-12s %-10s %s\n" "$timestamp" "$size_str" "$verified" "$file"
-        done
-        echo ""
-    fi
+    done
+    echo ""
 }
 
 backup_clean() {
