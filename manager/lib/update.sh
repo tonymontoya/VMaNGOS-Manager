@@ -31,6 +31,13 @@ UPDATE_SOURCE_REPO_ERROR_MESSAGE=""
 UPDATE_SOURCE_REPO_ERROR_SUGGESTION=""
 UPDATE_SOURCE_REPO_ROOT=""
 
+# Repo state populated by update_collect_repo_state (single source of truth;
+# no pipe-delimited records, no re-parsing at call sites).
+declare -A UPDATE_REPO_STATE=()
+UPDATE_REPO_STATE_ERROR_CODE=""
+UPDATE_REPO_STATE_ERROR_MESSAGE=""
+UPDATE_REPO_STATE_ERROR_SUGGESTION=""
+
 update_git() {
     git "$@"
 }
@@ -197,12 +204,23 @@ update_try_source_repo_root() {
     return 1
 }
 
+update_repo_state_set_error() {
+    UPDATE_REPO_STATE_ERROR_CODE="$1"
+    UPDATE_REPO_STATE_ERROR_MESSAGE="$2"
+    UPDATE_REPO_STATE_ERROR_SUGGESTION="$3"
+    log_error "$UPDATE_REPO_STATE_ERROR_MESSAGE"
+}
+
 update_collect_repo_state() {
     local repo_root="$1"
     local current_branch remote_ref remote_name remote_branch local_commit remote_commit commits_behind commits_ahead dirty_state
 
+    UPDATE_REPO_STATE_ERROR_CODE=""
+    UPDATE_REPO_STATE_ERROR_MESSAGE=""
+    UPDATE_REPO_STATE_ERROR_SUGGESTION=""
+
     current_branch=$(update_git -C "$repo_root" rev-parse --abbrev-ref HEAD) || {
-        log_error "Failed to determine current branch for $repo_root"
+        update_repo_state_set_error "GIT_ERROR" "Failed to determine current branch for $repo_root" "Check that the repository is readable"
         return 1
     }
 
@@ -211,12 +229,12 @@ update_collect_repo_state() {
     remote_branch="${remote_ref#*/}"
 
     if ! update_git -C "$repo_root" fetch --quiet "$remote_name"; then
-        log_error "Failed to fetch remote metadata from $remote_name for $repo_root"
+        update_repo_state_set_error "FETCH_FAILED" "Failed to fetch remote metadata from $remote_name for $repo_root" "Check git remote access and retry"
         return 1
     fi
 
     if ! update_git -C "$repo_root" rev-parse "$remote_ref^{commit}" >/dev/null 2>&1; then
-        log_error "Unable to resolve remote reference: $remote_ref"
+        update_repo_state_set_error "REMOTE_REF_NOT_FOUND" "Unable to resolve remote reference: $remote_ref" "Check the configured branch and remote tracking setup"
         return 1
     fi
 
@@ -231,9 +249,17 @@ update_collect_repo_state() {
         dirty_state="clean"
     fi
 
-    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-        "$current_branch" "$remote_ref" "$remote_name" "$remote_branch" \
-        "$local_commit" "$remote_commit" "$commits_behind" "$commits_ahead" "$dirty_state"
+    UPDATE_REPO_STATE[current_branch]="$current_branch"
+    UPDATE_REPO_STATE[remote_ref]="$remote_ref"
+    UPDATE_REPO_STATE[remote_name]="$remote_name"
+    UPDATE_REPO_STATE[remote_branch]="$remote_branch"
+    UPDATE_REPO_STATE[local_commit]="$local_commit"
+    UPDATE_REPO_STATE[remote_commit]="$remote_commit"
+    UPDATE_REPO_STATE[commits_behind]="$commits_behind"
+    UPDATE_REPO_STATE[commits_ahead]="$commits_ahead"
+    UPDATE_REPO_STATE[dirty_state]="$dirty_state"
+
+    return 0
 }
 
 update_reset_db_assessment() {
@@ -518,74 +544,54 @@ update_db_manual_changes_json() {
 }
 
 update_emit_db_inspect_result() {
-    local source_root="$1"
-    local current_branch="$2"
-    local remote_ref="$3"
-    local local_commit="$4"
-    local remote_commit="$5"
-    local commits_behind="$6"
-    local commits_ahead="$7"
-    local dirty_state="$8"
     local automation_supported=true
     local entry source role migration_id path reason database
+    local members=() lines=()
 
     if [[ "$UPDATE_DB_ASSESSMENT_MODE" == "manual_review_required" ]]; then
         automation_supported=false
     fi
 
-    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_output true "$(json_object \
-            "$(json_kvs target "vmangos-core")" \
-            "$(json_kvs source_repo "$source_root")" \
-            "$(json_kvs branch "$current_branch")" \
-            "$(json_kvs remote_ref "$remote_ref")" \
-            "$(json_kvs local_commit "$local_commit")" \
-            "$(json_kvs remote_commit "$remote_commit")" \
-            "$(json_kv_raw commits_behind "$commits_behind")" \
-            "$(json_kv_raw commits_ahead "$commits_ahead")" \
-            "$(json_kv_raw worktree_dirty "$(json_bool "$( [[ "$dirty_state" == "dirty" ]] && echo true)")")" \
-            "$(json_kvs db_assessment "$UPDATE_DB_ASSESSMENT_MODE")" \
-            "$(json_kv_raw db_automation_supported "$(json_bool "$automation_supported")")" \
-            "$(json_kv_raw pending_migrations "$(update_db_pending_entries_json)")" \
-            "$(json_kv_raw manual_review "$(update_db_manual_changes_json)")")"
-        return 0
-    fi
+    mapfile -t members <<< "$(update_repo_state_json_fields source_repo 1)"
+    members+=(
+        "$(json_kvs target "vmangos-core")"
+        "$(json_kv_raw db_assessment "$(json_string "$UPDATE_DB_ASSESSMENT_MODE")")"
+        "$(json_kv_raw db_automation_supported "$(json_bool "$automation_supported")")"
+        "$(json_kv_raw pending_migrations "$(update_db_pending_entries_json)")"
+        "$(json_kv_raw manual_review "$(update_db_manual_changes_json)")"
+    )
 
-    echo "VMANGOS Core DB Update Inspect"
-    echo "Source repo: $source_root"
-    echo "Branch: $current_branch"
-    echo "Tracking: $remote_ref"
-    echo "Local commit: $local_commit"
-    echo "Remote commit: $remote_commit"
-    echo "Commits behind: $commits_behind"
-    echo "Commits ahead: $commits_ahead"
-    echo "Worktree: $dirty_state"
-    echo "DB assessment: $UPDATE_DB_ASSESSMENT_MODE"
-    echo "DB automation supported: $automation_supported"
+    mapfile -t lines <<< "$(update_repo_state_text_fields "Source repo" 1)"
+    lines+=(
+        "DB assessment: $UPDATE_DB_ASSESSMENT_MODE"
+        "DB automation supported: $automation_supported"
+    )
 
     if [[ ${#UPDATE_DB_PENDING_ENTRIES[@]} -gt 0 ]]; then
-        echo ""
-        echo "Pending supported migrations:"
+        lines+=("")
+        lines+=("Pending supported migrations:")
         while IFS= read -r entry; do
             [[ -n "$entry" ]] || continue
             IFS='|' read -r source role migration_id path <<< "$entry"
             database=$(db_name_for_role "$role") || return 1
-            printf '  [%s] %s %s -> %s (%s)\n' "$source" "$(update_db_role_label "$role")" "$migration_id" "$database" "$path"
+            lines+=("  [$source] $(update_db_role_label "$role") $migration_id -> $database ($path)")
         done < <(printf '%s\n' "${UPDATE_DB_PENDING_ENTRIES[@]}" | sort)
     else
-        echo ""
-        echo "Pending supported migrations: none"
+        lines+=("")
+        lines+=("Pending supported migrations: none")
     fi
 
     if [[ ${#UPDATE_DB_MANUAL_CHANGES[@]} -gt 0 ]]; then
-        echo ""
-        echo "Manual DB review required:"
+        lines+=("")
+        lines+=("Manual DB review required:")
         while IFS= read -r entry; do
             [[ -n "$entry" ]] || continue
             IFS='|' read -r path reason <<< "$entry"
-            printf '  %s - %s\n' "$path" "$reason"
+            lines+=("  $path - $reason")
         done < <(printf '%s\n' "${UPDATE_DB_MANUAL_CHANGES[@]}" | sort)
     fi
+
+    update_emit_snapshot "VMANGOS Core DB Update Inspect" "${members[@]}" <<< "$(printf '%s\n' "${lines[@]}")"
 }
 
 update_build_db_steps() {
@@ -639,281 +645,250 @@ update_instructions_json() {
     json_array ${json_lines[@]+"${json_lines[@]}"}
 }
 
+# Common repo-state JSON members. <repo_key> is the payload key for the repo
+# path (repo_root|source_repo|target); build_dir/run_dir members are added
+# when install roots are known; commits_ahead when <with_ahead> is 1.
+update_repo_state_json_fields() {
+    local repo_key="$1"
+    local with_ahead="$2"
+    local repo_root="${3:-$UPDATE_SOURCE_REPO_ROOT}"
+
+    json_kvs "$repo_key" "$repo_root"
+    if [[ -n "$UPDATE_BUILD_ROOT" ]]; then
+        printf '\n%s' "$(json_kvs build_dir "$UPDATE_BUILD_ROOT")"
+    fi
+    if [[ -n "$UPDATE_RUN_ROOT" ]]; then
+        printf '\n%s' "$(json_kvs run_dir "$UPDATE_RUN_ROOT")"
+    fi
+    printf '\n%s' "$(json_kvs branch "${UPDATE_REPO_STATE[current_branch]}")"
+    printf '\n%s' "$(json_kvs remote_ref "${UPDATE_REPO_STATE[remote_ref]}")"
+    printf '\n%s' "$(json_kvs local_commit "${UPDATE_REPO_STATE[local_commit]}")"
+    printf '\n%s' "$(json_kvs remote_commit "${UPDATE_REPO_STATE[remote_commit]}")"
+    printf '\n%s' "$(json_kv_raw commits_behind "${UPDATE_REPO_STATE[commits_behind]}")"
+    if [[ "$with_ahead" == "1" ]]; then
+        printf '\n%s' "$(json_kv_raw commits_ahead "${UPDATE_REPO_STATE[commits_ahead]}")"
+    fi
+    printf '\n%s' "$(json_kv_raw worktree_dirty "$(json_bool "$( [[ "${UPDATE_REPO_STATE[dirty_state]}" == "dirty" ]] && echo true)")")"
+}
+
+# Common repo-state text lines (must mirror update_repo_state_json_fields).
+update_repo_state_text_fields() {
+    local repo_label="$1"
+    local with_ahead="$2"
+    local repo_root="${3:-$UPDATE_SOURCE_REPO_ROOT}"
+
+    printf '%s: %s\n' "$repo_label" "$repo_root"
+    if [[ -n "$UPDATE_BUILD_ROOT" ]]; then
+        printf 'Build dir: %s\n' "$UPDATE_BUILD_ROOT"
+    fi
+    if [[ -n "$UPDATE_RUN_ROOT" ]]; then
+        printf 'Run dir: %s\n' "$UPDATE_RUN_ROOT"
+    fi
+    printf 'Branch: %s\n' "${UPDATE_REPO_STATE[current_branch]}"
+    printf 'Tracking: %s\n' "${UPDATE_REPO_STATE[remote_ref]}"
+    printf 'Local commit: %s\n' "${UPDATE_REPO_STATE[local_commit]}"
+    printf 'Remote commit: %s\n' "${UPDATE_REPO_STATE[remote_commit]}"
+    printf 'Commits behind: %s\n' "${UPDATE_REPO_STATE[commits_behind]}"
+    if [[ "$with_ahead" == "1" ]]; then
+        printf 'Commits ahead: %s\n' "${UPDATE_REPO_STATE[commits_ahead]}"
+    fi
+    printf 'Worktree: %s\n' "${UPDATE_REPO_STATE[dirty_state]}"
+}
+
+# The single success emitter: JSON members as arguments, text body on stdin.
+update_emit_snapshot() {
+    local title="$1"
+    shift
+
+    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+        json_output true "$(json_object "$@")"
+        return 0
+    fi
+
+    echo "$title"
+    local line
+    while IFS= read -r line; do
+        printf '%s\n' "$line"
+    done
+}
+
+update_print_lines() {
+    local text="$1"
+    local line
+
+    while IFS= read -r line; do
+        printf '  %s\n' "$line"
+    done <<< "$text"
+}
+
 update_emit_result() {
     local repo_root="$1"
-    local current_branch="$2"
-    local remote_ref="$3"
-    local local_commit="$4"
-    local remote_commit="$5"
-    local commits_behind="$6"
-    local dirty_state="$7"
-    local install_target="$8"
-    local instructions_text instructions_json status_text
+    local install_target="$2"
+    local instructions_text status_text line
+    local members=() lines=()
 
-    instructions_text=$(update_build_manual_instructions "$repo_root" "$remote_ref" "$install_target")
-    instructions_json=$(update_instructions_json "$instructions_text")
+    instructions_text=$(update_build_manual_instructions "$repo_root" "${UPDATE_REPO_STATE[remote_ref]}" "$install_target")
 
-    if [[ "$commits_behind" -gt 0 ]]; then
+    if [[ "${UPDATE_REPO_STATE[commits_behind]}" -gt 0 ]]; then
         status_text="update available"
     else
         status_text="up to date"
     fi
 
-    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_output true "$(json_object \
-            "$(json_kvs repo_root "$repo_root")" \
-            "$(json_kvs branch "$current_branch")" \
-            "$(json_kvs remote_ref "$remote_ref")" \
-            "$(json_kvs local_commit "$local_commit")" \
-            "$(json_kvs remote_commit "$remote_commit")" \
-            "$(json_kv_raw commits_behind "$commits_behind")" \
-            "$(json_kv_raw update_available "$(json_bool "$( [[ "$commits_behind" -gt 0 ]] && echo true)")")" \
-            "$(json_kv_raw worktree_dirty "$(json_bool "$( [[ "$dirty_state" == "dirty" ]] && echo true)")")" \
-            "$(json_kvs install_target "$install_target")" \
-            "$(json_kv_raw instructions "$instructions_json")")"
-        return 0
+    mapfile -t members <<< "$(update_repo_state_json_fields repo_root 0 "$repo_root")"
+    members+=(
+        "$(json_kv_raw update_available "$(json_bool "$( [[ "${UPDATE_REPO_STATE[commits_behind]}" -gt 0 ]] && echo true)")")"
+        "$(json_kvs install_target "$install_target")"
+        "$(json_kv_raw instructions "$(update_instructions_json "$instructions_text")")"
+    )
+
+    mapfile -t lines <<< "$(update_repo_state_text_fields "Repository" 0 "$repo_root")"
+    lines+=("Status: $status_text")
+
+    if [[ "${UPDATE_REPO_STATE[dirty_state]}" == "dirty" ]]; then
+        lines+=("")
+        lines+=("Warning: local changes are present. Review them before applying any update.")
     fi
 
-    echo "VMANGOS Manager Update Check"
-    echo "Repository: $repo_root"
-    echo "Branch: $current_branch"
-    echo "Tracking: $remote_ref"
-    echo "Local commit: $local_commit"
-    echo "Remote commit: $remote_commit"
-    echo "Commits behind: $commits_behind"
-    echo "Worktree: $dirty_state"
-    echo "Status: $status_text"
-
-    if [[ "$dirty_state" == "dirty" ]]; then
-        echo ""
-        echo "Warning: local changes are present. Review them before applying any update."
-    fi
-
-    echo ""
-    echo "Manual update steps (non-atomic):"
+    lines+=("")
+    lines+=("Manual update steps (non-atomic):")
     while IFS= read -r line; do
-        printf '  %s\n' "$line"
+        lines+=("  $line")
     done <<< "$instructions_text"
+
+    update_emit_snapshot "VMANGOS Manager Update Check" "${members[@]}" <<< "$(printf '%s\n' "${lines[@]}")"
 }
 
 update_emit_plan_result() {
-    local source_root="$1"
-    local build_root="$2"
-    local run_root="$3"
-    local current_branch="$4"
-    local remote_ref="$5"
-    local local_commit="$6"
-    local remote_commit="$7"
-    local commits_behind="$8"
-    local commits_ahead="$9"
-    local dirty_state="${10}"
-    local steps_text="${11}"
-    local warning_text="${12}"
-    local steps_json update_available
+    local steps_text="$1"
+    local warning_text="$2"
+    local line
+    local members=() lines=()
 
-    steps_json=$(update_instructions_json "$steps_text")
-    if [[ "$commits_behind" -gt 0 ]]; then
-        update_available=true
-    else
-        update_available=false
-    fi
+    mapfile -t members <<< "$(update_repo_state_json_fields source_repo 1)"
+    members+=(
+        "$(json_kv_raw update_available "$(json_bool "$( [[ "${UPDATE_REPO_STATE[commits_behind]}" -gt 0 ]] && echo true)")")"
+        "$(json_kv_raw backup_required "$(json_bool true)")"
+        "$(json_kvs warning "$warning_text")"
+        "$(json_kv_raw steps "$(update_instructions_json "$steps_text")")"
+    )
 
-    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_output true "$(json_object \
-            "$(json_kvs source_repo "$source_root")" \
-            "$(json_kvs build_dir "$build_root")" \
-            "$(json_kvs run_dir "$run_root")" \
-            "$(json_kvs branch "$current_branch")" \
-            "$(json_kvs remote_ref "$remote_ref")" \
-            "$(json_kvs local_commit "$local_commit")" \
-            "$(json_kvs remote_commit "$remote_commit")" \
-            "$(json_kv_raw commits_behind "$commits_behind")" \
-            "$(json_kv_raw commits_ahead "$commits_ahead")" \
-            "$(json_kv_raw update_available "$(json_bool "$update_available")")" \
-            "$(json_kv_raw worktree_dirty "$(json_bool "$( [[ "$dirty_state" == "dirty" ]] && echo true)")")" \
-            "$(json_kv_raw backup_required "$(json_bool true)")" \
-            "$(json_kvs warning "$warning_text")" \
-            "$(json_kv_raw steps "$steps_json")")"
-        return 0
-    fi
-
-    echo "VMANGOS Core Update Plan"
-    echo "Source repo: $source_root"
-    echo "Build dir: $build_root"
-    echo "Run dir: $run_root"
-    echo "Branch: $current_branch"
-    echo "Tracking: $remote_ref"
-    echo "Local commit: $local_commit"
-    echo "Remote commit: $remote_commit"
-    echo "Commits behind: $commits_behind"
-    echo "Commits ahead: $commits_ahead"
-    echo "Worktree: $dirty_state"
-    echo "Backup required: yes"
+    mapfile -t lines <<< "$(update_repo_state_text_fields "Source repo" 1)"
+    lines+=("Backup required: yes")
     if [[ -n "$warning_text" ]]; then
-        echo ""
-        echo "Warning: $warning_text"
+        lines+=("")
+        lines+=("Warning: $warning_text")
     fi
-    echo ""
-    echo "Planned steps (non-atomic):"
+    lines+=("")
+    lines+=("Planned steps (non-atomic):")
     while IFS= read -r line; do
-        printf '  %s\n' "$line"
+        lines+=("  $line")
     done <<< "$steps_text"
-    echo ""
-    echo "Recovery note: database migrations are one-way unless upstream explicitly documents rollback."
+    lines+=("")
+    lines+=("Recovery note: database migrations are one-way unless upstream explicitly documents rollback.")
+
+    update_emit_snapshot "VMANGOS Core Update Plan" "${members[@]}" <<< "$(printf '%s\n' "${lines[@]}")"
 }
 
 update_emit_source_check_result() {
-    local source_root="$1"
-    local build_root="$2"
-    local run_root="$3"
-    local current_branch="$4"
-    local remote_ref="$5"
-    local local_commit="$6"
-    local remote_commit="$7"
-    local commits_behind="$8"
-    local commits_ahead="$9"
-    local dirty_state="${10}"
-    local status_text next_steps warning_text
+    local status_text next_steps warning_text line
+    local members=() lines=()
 
-    if [[ "$commits_behind" -gt 0 ]]; then
+    if [[ "${UPDATE_REPO_STATE[commits_behind]}" -gt 0 ]]; then
         status_text="update available"
     else
         status_text="up to date"
     fi
 
     warning_text=""
-    if [[ "$dirty_state" == "dirty" ]]; then
+    if [[ "${UPDATE_REPO_STATE[dirty_state]}" == "dirty" ]]; then
         warning_text="Local changes are present in the VMANGOS source tree."
-    elif [[ "$commits_ahead" -gt 0 ]]; then
+    elif [[ "${UPDATE_REPO_STATE[commits_ahead]}" -gt 0 ]]; then
         warning_text="Local commits are ahead of the tracked remote."
     fi
 
     next_steps=$'vmangos-manager update plan\nvmangos-manager update apply --backup-first'
 
-    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_output true "$(json_object \
-            "$(json_kvs target "vmangos-core")" \
-            "$(json_kvs source_repo "$source_root")" \
-            "$(json_kvs build_dir "$build_root")" \
-            "$(json_kvs run_dir "$run_root")" \
-            "$(json_kvs branch "$current_branch")" \
-            "$(json_kvs remote_ref "$remote_ref")" \
-            "$(json_kvs local_commit "$local_commit")" \
-            "$(json_kvs remote_commit "$remote_commit")" \
-            "$(json_kv_raw commits_behind "$commits_behind")" \
-            "$(json_kv_raw commits_ahead "$commits_ahead")" \
-            "$(json_kv_raw update_available "$(json_bool "$( [[ "$commits_behind" -gt 0 ]] && echo true)")")" \
-            "$(json_kv_raw worktree_dirty "$(json_bool "$( [[ "$dirty_state" == "dirty" ]] && echo true)")")" \
-            "$(json_kvs warning "$warning_text")" \
-            "$(json_kv_raw next_steps "$(update_instructions_json "$next_steps")")")"
-        return 0
-    fi
+    mapfile -t members <<< "$(update_repo_state_json_fields source_repo 1)"
+    members+=(
+        "$(json_kvs target "vmangos-core")"
+        "$(json_kv_raw update_available "$(json_bool "$( [[ "${UPDATE_REPO_STATE[commits_behind]}" -gt 0 ]] && echo true)")")"
+        "$(json_kvs warning "$warning_text")"
+        "$(json_kv_raw next_steps "$(update_instructions_json "$next_steps")")"
+    )
 
-    echo "VMANGOS Core Update Check"
-    echo "Source repo: $source_root"
-    echo "Build dir: $build_root"
-    echo "Run dir: $run_root"
-    echo "Branch: $current_branch"
-    echo "Tracking: $remote_ref"
-    echo "Local commit: $local_commit"
-    echo "Remote commit: $remote_commit"
-    echo "Commits behind: $commits_behind"
-    echo "Commits ahead: $commits_ahead"
-    echo "Worktree: $dirty_state"
-    echo "Status: $status_text"
+    mapfile -t lines <<< "$(update_repo_state_text_fields "Source repo" 1)"
+    lines+=("Status: $status_text")
 
     if [[ -n "$warning_text" ]]; then
-        echo ""
-        echo "Warning: $warning_text"
+        lines+=("")
+        lines+=("Warning: $warning_text")
     fi
 
-    echo ""
-    echo "Next steps:"
+    lines+=("")
+    lines+=("Next steps:")
     while IFS= read -r line; do
-        printf '  %s\n' "$line"
+        lines+=("  $line")
     done <<< "$next_steps"
+
+    update_emit_snapshot "VMANGOS Core Update Check" "${members[@]}" <<< "$(printf '%s\n' "${lines[@]}")"
 }
 
 update_emit_db_plan_result() {
-    local source_root="$1"
-    local build_root="$2"
-    local run_root="$3"
-    local current_branch="$4"
-    local remote_ref="$5"
-    local local_commit="$6"
-    local remote_commit="$7"
-    local commits_behind="$8"
-    local commits_ahead="$9"
-    local dirty_state="${10}"
-    local steps_text="${11}"
-    local warning_text="${12}"
+    local steps_text="$1"
+    local warning_text="$2"
     local automation_supported=true
+    local entry path reason line
+    local members=() lines=()
 
     if [[ "$UPDATE_DB_ASSESSMENT_MODE" == "manual_review_required" ]]; then
         automation_supported=false
     fi
 
-    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_output true "$(json_object \
-            "$(json_kvs source_repo "$source_root")" \
-            "$(json_kvs build_dir "$build_root")" \
-            "$(json_kvs run_dir "$run_root")" \
-            "$(json_kvs branch "$current_branch")" \
-            "$(json_kvs remote_ref "$remote_ref")" \
-            "$(json_kvs local_commit "$local_commit")" \
-            "$(json_kvs remote_commit "$remote_commit")" \
-            "$(json_kv_raw commits_behind "$commits_behind")" \
-            "$(json_kv_raw commits_ahead "$commits_ahead")" \
-            "$(json_kv_raw worktree_dirty "$(json_bool "$( [[ "$dirty_state" == "dirty" ]] && echo true)")")" \
-            "$(json_kv_raw backup_required "$(json_bool true)")" \
-            "$(json_kvs db_assessment "$UPDATE_DB_ASSESSMENT_MODE")" \
-            "$(json_kv_raw db_automation_supported "$(json_bool "$automation_supported")")" \
-            "$(json_kv_raw pending_migrations "$(update_db_pending_entries_json)")" \
-            "$(json_kv_raw manual_review "$(update_db_manual_changes_json)")" \
-            "$(json_kvs warning "$warning_text")" \
-            "$(json_kv_raw steps "$(update_instructions_json "$steps_text")")")"
-        return 0
-    fi
+    mapfile -t members <<< "$(update_repo_state_json_fields source_repo 1)"
+    members+=(
+        "$(json_kv_raw backup_required "$(json_bool true)")"
+        "$(json_kv_raw db_assessment "$(json_string "$UPDATE_DB_ASSESSMENT_MODE")")"
+        "$(json_kv_raw db_automation_supported "$(json_bool "$automation_supported")")"
+        "$(json_kv_raw pending_migrations "$(update_db_pending_entries_json)")"
+        "$(json_kv_raw manual_review "$(update_db_manual_changes_json)")"
+        "$(json_kvs warning "$warning_text")"
+        "$(json_kv_raw steps "$(update_instructions_json "$steps_text")")"
+    )
 
-    echo "VMANGOS Core DB-Aware Update Plan"
-    echo "Source repo: $source_root"
-    echo "Build dir: $build_root"
-    echo "Run dir: $run_root"
-    echo "Branch: $current_branch"
-    echo "Tracking: $remote_ref"
-    echo "Local commit: $local_commit"
-    echo "Remote commit: $remote_commit"
-    echo "Commits behind: $commits_behind"
-    echo "Commits ahead: $commits_ahead"
-    echo "Worktree: $dirty_state"
-    echo "Backup required: yes"
-    echo "DB assessment: $UPDATE_DB_ASSESSMENT_MODE"
-    echo "DB automation supported: $automation_supported"
+    mapfile -t lines <<< "$(update_repo_state_text_fields "Source repo" 1)"
+    lines+=(
+        "Backup required: yes"
+        "DB assessment: $UPDATE_DB_ASSESSMENT_MODE"
+        "DB automation supported: $automation_supported"
+    )
     if [[ -n "$warning_text" ]]; then
-        echo ""
-        echo "Warning: $warning_text"
+        lines+=("")
+        lines+=("Warning: $warning_text")
     fi
-    echo ""
+    lines+=("")
     if [[ ${#UPDATE_DB_PENDING_ENTRIES[@]} -gt 0 ]]; then
-        echo "Pending supported migrations:"
-        update_build_db_steps | while IFS= read -r line; do
-            printf '  %s\n' "$line"
-        done
-        echo ""
+        lines+=("Pending supported migrations:")
+        while IFS= read -r line; do
+            lines+=("  $line")
+        done < <(update_build_db_steps)
+        lines+=("")
     fi
     if [[ ${#UPDATE_DB_MANUAL_CHANGES[@]} -gt 0 ]]; then
-        echo "Manual DB review required:"
+        lines+=("Manual DB review required:")
         while IFS= read -r entry; do
             [[ -n "$entry" ]] || continue
             IFS='|' read -r path reason <<< "$entry"
-            printf '  %s - %s\n' "$path" "$reason"
+            lines+=("  $path - $reason")
         done < <(printf '%s\n' "${UPDATE_DB_MANUAL_CHANGES[@]}" | sort)
-        echo ""
+        lines+=("")
     fi
-    echo "Planned steps:"
+    lines+=("Planned steps:")
     while IFS= read -r line; do
-        printf '  %s\n' "$line"
+        lines+=("  $line")
     done <<< "$steps_text"
+
+    update_emit_snapshot "VMANGOS Core DB-Aware Update Plan" "${members[@]}" <<< "$(printf '%s\n' "${lines[@]}")"
 }
 
 update_emit_error() {
@@ -1068,18 +1043,17 @@ update_print_recovery_steps() {
 }
 
 update_check() {
-    local repo_root current_branch remote_ref remote_name local_commit remote_commit commits_behind dirty_state install_target
-    local source_repo_root repo_state commits_ahead
+    local repo_root install_target
+    local source_repo_root
 
     if update_try_source_repo_root; then
         source_repo_root="$UPDATE_SOURCE_REPO_ROOT"
         update_load_install_context >/dev/null 2>&1 || true
-        repo_state=$(update_collect_repo_state "$source_repo_root") || {
+        update_collect_repo_state "$source_repo_root" || {
             update_emit_error "SOURCE_GIT_ERROR" "Failed to inspect the VMANGOS source repository" "Check git remote access and repository health"
             return 1
         }
-        IFS='|' read -r current_branch remote_ref _ _ local_commit remote_commit commits_behind commits_ahead dirty_state <<< "$repo_state"
-        update_emit_source_check_result "$source_repo_root" "$UPDATE_BUILD_ROOT" "$UPDATE_RUN_ROOT" "$current_branch" "$remote_ref" "$local_commit" "$remote_commit" "$commits_behind" "$commits_ahead" "$dirty_state"
+        update_emit_source_check_result
         return 0
     fi
 
@@ -1095,40 +1069,17 @@ update_check() {
         return 1
     }
 
-    current_branch=$(update_git -C "$repo_root" rev-parse --abbrev-ref HEAD) || {
-        update_emit_error "GIT_ERROR" "Failed to determine current branch" "Check that the repository is readable"
+    if ! update_collect_repo_state "$repo_root"; then
+        update_emit_error "$UPDATE_REPO_STATE_ERROR_CODE" "$UPDATE_REPO_STATE_ERROR_MESSAGE" "$UPDATE_REPO_STATE_ERROR_SUGGESTION"
         return 1
-    }
-
-    remote_ref=$(update_get_tracking_ref "$repo_root")
-    remote_name="${remote_ref%%/*}"
-
-    if ! update_git -C "$repo_root" fetch --quiet "$remote_name"; then
-        update_emit_error "FETCH_FAILED" "Failed to fetch remote metadata from $remote_name" "Check git remote access and retry"
-        return 1
-    fi
-
-    if ! update_git -C "$repo_root" rev-parse "$remote_ref^{commit}" >/dev/null 2>&1; then
-        update_emit_error "REMOTE_REF_NOT_FOUND" "Unable to resolve remote reference: $remote_ref" "Check the configured branch and remote tracking setup"
-        return 1
-    fi
-
-    local_commit=$(update_git -C "$repo_root" rev-parse HEAD)
-    remote_commit=$(update_git -C "$repo_root" rev-parse "$remote_ref")
-    commits_behind=$(update_git -C "$repo_root" rev-list --count "HEAD..$remote_ref")
-
-    if [[ -n "$(update_git -C "$repo_root" status --porcelain)" ]]; then
-        dirty_state="dirty"
-    else
-        dirty_state="clean"
     fi
 
     install_target=$(update_get_install_target)
-    update_emit_result "$repo_root" "$current_branch" "$remote_ref" "$local_commit" "$remote_commit" "$commits_behind" "$dirty_state" "$install_target"
+    update_emit_result "$repo_root" "$install_target"
 }
 
 update_inspect() {
-    local repo_root repo_state current_branch remote_ref local_commit remote_commit commits_behind commits_ahead dirty_state
+    local repo_root
 
     update_load_install_context || {
         update_emit_error "CONFIG_ERROR" "Failed to load manager configuration" "Check config file exists and is readable"
@@ -1141,24 +1092,22 @@ update_inspect() {
     fi
     repo_root="$UPDATE_SOURCE_REPO_ROOT"
 
-    repo_state=$(update_collect_repo_state "$repo_root") || {
+    update_collect_repo_state "$repo_root" || {
         update_emit_error "SOURCE_GIT_ERROR" "Failed to inspect the VMANGOS source repository" "Check git remote access and repository health"
         return 1
     }
 
-    IFS='|' read -r current_branch remote_ref _ _ local_commit remote_commit commits_behind commits_ahead dirty_state <<< "$repo_state"
-
-    update_assess_db_requirements "$repo_root" "$remote_ref" || {
+    update_assess_db_requirements "$repo_root" "${UPDATE_REPO_STATE[remote_ref]}" || {
         update_emit_error "DB_ASSESSMENT_FAILED" "Failed to assess DB update requirements" "Verify DB connectivity, migrations tables, and manager DB configuration"
         return 1
     }
 
-    update_emit_db_inspect_result "$repo_root" "$current_branch" "$remote_ref" "$local_commit" "$remote_commit" "$commits_behind" "$commits_ahead" "$dirty_state"
+    update_emit_db_inspect_result
 }
 
 update_plan() {
     local include_db="${1:-false}"
-    local repo_root repo_state current_branch remote_ref local_commit remote_commit commits_behind commits_ahead dirty_state warning_text steps_text
+    local repo_root warning_text steps_text
 
     update_load_install_context || {
         update_emit_error "CONFIG_ERROR" "Failed to load manager configuration" "Check config file exists and is readable"
@@ -1171,24 +1120,22 @@ update_plan() {
     fi
     repo_root="$UPDATE_SOURCE_REPO_ROOT"
 
-    repo_state=$(update_collect_repo_state "$repo_root") || {
+    update_collect_repo_state "$repo_root" || {
         update_emit_error "SOURCE_GIT_ERROR" "Failed to inspect the VMANGOS source repository" "Check git remote access and repository health"
         return 1
     }
 
-    IFS='|' read -r current_branch remote_ref _ _ local_commit remote_commit commits_behind commits_ahead dirty_state <<< "$repo_state"
-
     warning_text=""
-    if [[ "$dirty_state" == "dirty" ]]; then
+    if [[ "${UPDATE_REPO_STATE[dirty_state]}" == "dirty" ]]; then
         warning_text="Local changes are present in the VMANGOS source tree. update apply will refuse to continue until the tree is clean."
-    elif [[ "$commits_ahead" -gt 0 ]]; then
+    elif [[ "${UPDATE_REPO_STATE[commits_ahead]}" -gt 0 ]]; then
         warning_text="Local commits are ahead of the tracked remote. update apply will refuse to overwrite a divergent source tree."
-    elif [[ "$commits_behind" -eq 0 ]]; then
+    elif [[ "${UPDATE_REPO_STATE[commits_behind]}" -eq 0 ]]; then
         warning_text="No upstream update is currently pending."
     fi
 
     if [[ "$include_db" == "true" ]]; then
-        update_assess_db_requirements "$repo_root" "$remote_ref" || {
+        update_assess_db_requirements "$repo_root" "${UPDATE_REPO_STATE[remote_ref]}" || {
             update_emit_error "DB_ASSESSMENT_FAILED" "Failed to assess DB update requirements" "Verify DB connectivity, migrations tables, and manager DB configuration"
             return 1
         }
@@ -1207,20 +1154,30 @@ update_plan() {
             fi
         fi
 
-        steps_text=$(update_build_apply_steps "$repo_root" "$remote_ref" "$UPDATE_BUILD_ROOT" "$UPDATE_INSTALL_ROOT" "$(update_nproc)" "backup-first" "true" "$commits_behind")
-        update_emit_db_plan_result "$repo_root" "$UPDATE_BUILD_ROOT" "$UPDATE_RUN_ROOT" "$current_branch" "$remote_ref" "$local_commit" "$remote_commit" "$commits_behind" "$commits_ahead" "$dirty_state" "$steps_text" "$warning_text"
+        steps_text=$(update_build_apply_steps "$repo_root" "${UPDATE_REPO_STATE[remote_ref]}" "$UPDATE_BUILD_ROOT" "$UPDATE_INSTALL_ROOT" "$(update_nproc)" "backup-first" "true" "${UPDATE_REPO_STATE[commits_behind]}")
+        update_emit_db_plan_result "$steps_text" "$warning_text"
         return 0
     fi
 
-    steps_text=$(update_build_core_steps "$repo_root" "$remote_ref" "$UPDATE_BUILD_ROOT" "$UPDATE_INSTALL_ROOT" "$(update_nproc)" "backup-first")
-    update_emit_plan_result "$repo_root" "$UPDATE_BUILD_ROOT" "$UPDATE_RUN_ROOT" "$current_branch" "$remote_ref" "$local_commit" "$remote_commit" "$commits_behind" "$commits_ahead" "$dirty_state" "$steps_text" "$warning_text"
+    steps_text=$(update_build_core_steps "$repo_root" "${UPDATE_REPO_STATE[remote_ref]}" "$UPDATE_BUILD_ROOT" "$UPDATE_INSTALL_ROOT" "$(update_nproc)" "backup-first")
+    update_emit_plan_result "$steps_text" "$warning_text"
+}
+
+# Shared failure tail for update_apply: print recovery guidance, drop the
+# update lock, and signal failure to the caller (which returns 1).
+update_fail_apply() {
+    local repo_root="$1"
+    local previous_commit="$2"
+
+    update_print_recovery_steps "$repo_root" "$previous_commit"
+    release_lock "update-assistant"
+    return 1
 }
 
 update_apply() {
     local backup_first="${1:-false}"
     local include_db="${2:-false}"
-    local repo_root repo_state current_branch remote_ref remote_name remote_branch local_commit remote_commit commits_behind commits_ahead dirty_state
-    local previous_commit jobs
+    local repo_root previous_commit jobs
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
         update_emit_error "UNSUPPORTED_FORMAT" "update apply does not support JSON output" "Run update apply without --format json"
@@ -1235,21 +1192,20 @@ update_apply() {
         return 1
     fi
     repo_root="$UPDATE_SOURCE_REPO_ROOT"
-    repo_state=$(update_collect_repo_state "$repo_root") || return 1
-    IFS='|' read -r current_branch remote_ref remote_name remote_branch local_commit remote_commit commits_behind commits_ahead dirty_state <<< "$repo_state"
+    update_collect_repo_state "$repo_root" || return 1
 
-    if [[ "$dirty_state" == "dirty" ]]; then
+    if [[ "${UPDATE_REPO_STATE[dirty_state]}" == "dirty" ]]; then
         log_error "Refusing to apply update with local uncommitted changes in $repo_root"
         return 1
     fi
 
-    if [[ "$commits_ahead" -gt 0 ]]; then
-        log_error "Refusing to apply update because $repo_root has local commits ahead of $remote_ref"
+    if [[ "${UPDATE_REPO_STATE[commits_ahead]}" -gt 0 ]]; then
+        log_error "Refusing to apply update because $repo_root has local commits ahead of ${UPDATE_REPO_STATE[remote_ref]}"
         return 1
     fi
 
     if [[ "$include_db" == "true" ]]; then
-        if ! update_assess_db_requirements "$repo_root" "$remote_ref"; then
+        if ! update_assess_db_requirements "$repo_root" "${UPDATE_REPO_STATE[remote_ref]}"; then
             log_error "Failed to assess DB update requirements"
             return 1
         fi
@@ -1259,11 +1215,11 @@ update_apply() {
             return 1
         fi
 
-        if [[ "$commits_behind" -eq 0 && ${#UPDATE_DB_PENDING_ENTRIES[@]} -eq 0 ]]; then
+        if [[ "${UPDATE_REPO_STATE[commits_behind]}" -eq 0 && ${#UPDATE_DB_PENDING_ENTRIES[@]} -eq 0 ]]; then
             log_info "No code or supported DB update available for $repo_root"
             return 0
         fi
-    elif [[ "$commits_behind" -eq 0 ]]; then
+    elif [[ "${UPDATE_REPO_STATE[commits_behind]}" -eq 0 ]]; then
         log_info "No update available for $repo_root"
         return 0
     fi
@@ -1279,16 +1235,16 @@ update_apply() {
     fi
 
     acquire_lock "update-assistant"
-    previous_commit="$local_commit"
+    previous_commit="${UPDATE_REPO_STATE[local_commit]}"
     jobs=$(update_nproc)
 
     log_info "========================================"
     log_info "Applying VMANGOS Core Update"
     log_info "========================================"
     log_info "Source repo: $repo_root"
-    log_info "Tracking: $remote_ref"
-    if [[ "$commits_behind" -gt 0 ]]; then
-        log_info "Updating from $local_commit to $remote_commit"
+    log_info "Tracking: ${UPDATE_REPO_STATE[remote_ref]}"
+    if [[ "${UPDATE_REPO_STATE[commits_behind]}" -gt 0 ]]; then
+        log_info "Updating from ${UPDATE_REPO_STATE[local_commit]} to ${UPDATE_REPO_STATE[remote_commit]}"
     else
         log_info "No code pull required; applying supported DB changes only"
     fi
@@ -1299,11 +1255,10 @@ update_apply() {
         return 1
     fi
 
-    if [[ "$commits_behind" -gt 0 ]]; then
-        if ! update_git -C "$repo_root" pull --ff-only "$remote_name" "$remote_branch"; then
+    if [[ "${UPDATE_REPO_STATE[commits_behind]}" -gt 0 ]]; then
+        if ! update_git -C "$repo_root" pull --ff-only "${UPDATE_REPO_STATE[remote_name]}" "${UPDATE_REPO_STATE[remote_branch]}"; then
             log_error "git pull failed after services were stopped"
-            update_print_recovery_steps "$repo_root" "$previous_commit"
-            release_lock "update-assistant"
+            update_fail_apply "$repo_root" "$previous_commit"
             return 1
         fi
     fi
@@ -1311,57 +1266,50 @@ update_apply() {
     if [[ "$include_db" == "true" ]]; then
         if ! update_assess_db_requirements "$repo_root" ""; then
             log_error "Failed to reassess DB update requirements after pull"
-            update_print_recovery_steps "$repo_root" "$previous_commit"
-            release_lock "update-assistant"
+            update_fail_apply "$repo_root" "$previous_commit"
             return 1
         fi
 
         if [[ ${#UPDATE_DB_PENDING_ENTRIES[@]} -gt 0 ]]; then
             if ! update_apply_pending_db_migrations "$repo_root"; then
-                update_print_recovery_steps "$repo_root" "$previous_commit"
-                release_lock "update-assistant"
+                update_fail_apply "$repo_root" "$previous_commit"
                 return 1
             fi
         fi
     fi
 
-    if [[ "$commits_behind" -gt 0 ]]; then
+    if [[ "${UPDATE_REPO_STATE[commits_behind]}" -gt 0 ]]; then
         log_info "Reconfiguring build tree..."
         if ! update_run_cmake "$repo_root" "$UPDATE_BUILD_ROOT" "$UPDATE_INSTALL_ROOT"; then
             log_error "cmake configure failed"
-            update_print_recovery_steps "$repo_root" "$previous_commit"
-            release_lock "update-assistant"
+            update_fail_apply "$repo_root" "$previous_commit"
             return 1
         fi
 
         log_info "Building with $jobs parallel jobs..."
         if ! update_run_make_build "$UPDATE_BUILD_ROOT" "$jobs"; then
             log_error "Build failed"
-            update_print_recovery_steps "$repo_root" "$previous_commit"
-            release_lock "update-assistant"
+            update_fail_apply "$repo_root" "$previous_commit"
             return 1
         fi
 
         log_info "Installing updated binaries..."
         if ! update_run_make_install "$UPDATE_BUILD_ROOT"; then
             log_error "Install failed"
-            update_print_recovery_steps "$repo_root" "$previous_commit"
-            release_lock "update-assistant"
+            update_fail_apply "$repo_root" "$previous_commit"
             return 1
         fi
     fi
 
     if ! ( server_start true 60 ); then
         log_error "Services failed to restart after update"
-        update_print_recovery_steps "$repo_root" "$previous_commit"
-        release_lock "update-assistant"
+        update_fail_apply "$repo_root" "$previous_commit"
         return 1
     fi
 
     if ! update_post_apply_verify; then
         log_error "Post-update verification failed"
-        update_print_recovery_steps "$repo_root" "$previous_commit"
-        release_lock "update-assistant"
+        update_fail_apply "$repo_root" "$previous_commit"
         return 1
     fi
 

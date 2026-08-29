@@ -1375,6 +1375,7 @@ test_update_check_text_output() {
             *"rev-parse HEAD"*) printf '1111111111111111111111111111111111111111\n' ;;
             *"rev-parse origin/main"*) printf '2222222222222222222222222222222222222222\n' ;;
             *"rev-list --count HEAD..origin/main"*) printf '2\n' ;;
+            *"rev-list --count origin/main..HEAD"*) printf '0\n' ;;
             *"status --porcelain"*) return 0 ;;
             *)
                 echo "unexpected git args: $args" >&2
@@ -1419,6 +1420,7 @@ test_update_check_json_output() {
             *"rev-parse HEAD"*) printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' ;;
             *"rev-parse origin/main"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
             *"rev-list --count HEAD..origin/main"*) printf '3\n' ;;
+            *"rev-list --count origin/main..HEAD"*) printf '0\n' ;;
             *"status --porcelain"*) printf ' M README.md\n' ;;
             *)
                 echo "unexpected git args: $args" >&2
