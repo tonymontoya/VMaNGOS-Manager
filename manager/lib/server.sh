@@ -126,12 +126,6 @@ server_kill_service() {
     systemctl kill -s "$signal" "$service" 2>/dev/null || true
 }
 
-server_get_systemctl_property() {
-    local service="$1"
-    local property="$2"
-    systemctl show -p "$property" "$service" 2>/dev/null | cut -d= -f2-
-}
-
 server_get_restart_count_1h() {
     local service="$1"
     local count
@@ -1238,10 +1232,3 @@ server_status_watch() {
 # ============================================================================
 # UTILITY
 # ============================================================================
-
-log_section() {
-    echo ""
-    log_info "========================================"
-    log_info "$1"
-    log_info "========================================"
-}

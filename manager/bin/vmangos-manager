@@ -19,7 +19,6 @@ readonly LIB_DIR="$SCRIPT_DIR/../lib"
 # Global options (exported for use by sourced libraries)
 VERBOSE=0
 OUTPUT_FORMAT="text"
-CONFIG_FILE="${MANAGER_CONFIG:-/opt/mangos/manager/config/manager.conf}"
 
 # ============================================================================
 # USAGE

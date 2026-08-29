@@ -11,7 +11,6 @@ set -euo pipefail
 # ============================================================================
 
 export CONFIG_FILE="${MANAGER_CONFIG:-/opt/mangos/manager/config/manager.conf}"
-LOG_FILE="${MANAGER_LOG:-/var/log/vmangos-manager.log}"
 LOCK_DIR="/var/run/vmangos-manager"
 VERBOSE="${VERBOSE:-0}"
 
@@ -25,20 +24,8 @@ export E_CONFIG_ERROR=5
 export E_SERVICE_ERROR=6
 
 # ============================================================================
-# INITIALIZATION (Called explicitly, not at import)
+# INITIALIZATION (directory creation is lazy; nothing to do at import)
 # ============================================================================
-
-init_manager() {
-    # Only create directories when explicitly initialized
-    if [[ "${SKIP_ROOT_INIT:-0}" -eq 0 ]]; then
-        mkdir -p "$LOCK_DIR" 2>/dev/null || true
-        if [[ -d "$(dirname "$LOG_FILE")" ]]; then
-            : # Log directory exists
-        else
-            mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-        fi
-    fi
-}
 
 # ============================================================================
 # LOGGING
@@ -448,14 +435,9 @@ service_start() {
     fi
 }
 
-service_stop() {
-    local service="$1"
-    log_info "Stopping $service..."
-    if systemctl stop "$service"; then
-        log_info "$service stopped"
-        return 0
-    else
-        log_error "Failed to stop $service"
-        return 1
-    fi
+log_section() {
+    echo ""
+    log_info "========================================"
+    log_info "$1"
+    log_info "========================================"
 }

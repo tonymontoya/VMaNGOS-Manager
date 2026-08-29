@@ -87,7 +87,6 @@ LOG_SOURCE_PATTERN = re.compile(r"^(all|auth|world)$", re.IGNORECASE)
 LOG_LIMIT_PATTERN = re.compile(r"^[1-9][0-9]{0,2}$")
 
 TREND_HISTORY_LIMIT = 24
-SPARKLINE_BARS = "▁▂▃▄▅▆▇█"
 METER_FILLED = "█"
 METER_EMPTY = "░"
 TREND_THRESHOLDS = {
@@ -194,11 +193,6 @@ def clamp_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def format_mb_from_kb(value_kb: Any) -> str:
-    value = clamp_int(value_kb)
-    return f"{value / 1024:.1f} MB"
 
 
 def format_gb_from_kb(value_kb: Any) -> str:
@@ -328,30 +322,6 @@ def append_monitoring_sample(
 
 def history_values(history: list[dict[str, Any]], key: str) -> list[float | None]:
     return [parse_optional_float(sample.get(key)) for sample in history]
-
-
-def render_sparkline(values: list[float | None], width: int = 10) -> str:
-    window = list(values[-width:])
-    available = [value for value in window if value is not None]
-    if not available:
-        return "·" * width
-
-    if len(window) < width:
-        window = [available[0]] * (width - len(window)) + window
-
-    minimum = min(available)
-    maximum = max(available)
-    if abs(maximum - minimum) < 0.001:
-        return SPARKLINE_BARS[3] * width
-
-    chars: list[str] = []
-    for value in window:
-        if value is None:
-            chars.append("·")
-            continue
-        index = int(round(((value - minimum) / (maximum - minimum)) * (len(SPARKLINE_BARS) - 1)))
-        chars.append(SPARKLINE_BARS[index])
-    return "".join(chars)
 
 
 def strip_markup(value: str) -> str:
@@ -1939,8 +1909,6 @@ def render_realm_logs_summary(snapshot: dict[str, Any]) -> str:
     available_sources = ", ".join(summary.get("available_sources", [])) or "none"
     events_returned = clamp_int(summary.get("events_returned", 0))
     top_severity = summarize_named_counts(summary.get("severity_counts", {}), ["critical", "error", "warning"])
-    if top_severity == "none":
-        top_severity = "none"
     latest_event = snapshot.get("log_events", [None])[0]
     latest_summary = "none in current window"
     if latest_event:
@@ -2390,16 +2358,6 @@ def create_app(
             color: #111827;
         }
 
-        Footer {
-            background: #0c2340;
-            color: #f8fafc;
-        }
-
-        Screen.theme-light Footer {
-            background: #d8ebff;
-            color: #111827;
-        }
-
         #shell {
             layout: horizontal;
             height: 1fr;
@@ -2555,11 +2513,6 @@ def create_app(
         Screen.theme-light .detail-pane {
             border-left: heavy #93c5fd;
             background: #fff9ef;
-        }
-
-        #players-table {
-            height: 1fr;
-            margin-top: 1;
         }
 
         #player-pulse-pane,
@@ -3736,7 +3689,7 @@ def create_app(
             view_context = self.active_view
             running_receipt = ""
             if feedback:
-                running_receipt = feedback.get("running_receipt", feedback.get("success_receipt", ""))
+                running_receipt = feedback.get("success_receipt", "")
             self.set_action_result(f"{label} running...", tone="running", receipt=running_receipt, view_context=view_context)
             threading.Thread(
                 target=self.run_command_action,

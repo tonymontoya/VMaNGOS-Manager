@@ -7,8 +7,6 @@
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 # Globals
-CONFIG_FILE="${MANAGER_CONFIG:-/opt/mangos/manager/config/manager.conf}"
-export CONFIG_FILE
 CONFIG_PASSWORD_FILE=""
 
 # Loaded config values (exported for use by other modules)
@@ -117,19 +115,6 @@ config_array_contains() {
     done
 
     return 1
-}
-
-config_join_by() {
-    local delimiter="$1"
-    shift || true
-
-    local joined="" item
-    for item in "$@"; do
-        [[ -n "$joined" ]] && joined+="$delimiter"
-        joined+="$item"
-    done
-
-    printf '%s' "$joined"
 }
 
 # ============================================================================
@@ -404,16 +389,6 @@ config_detect_add_assumption() {
 
 config_detect_add_issue() {
     CONFIG_DETECT_CURRENT_ISSUES+=("$1")
-}
-
-config_detect_add_unique_value() {
-    local value="$1"
-    shift
-
-    [[ -n "$value" ]] || return 0
-    if ! config_array_contains "$value" "$@"; then
-        printf '%s\n' "$value"
-    fi
 }
 
 config_detect_analyze_candidate() {

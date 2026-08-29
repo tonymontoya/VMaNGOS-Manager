@@ -2770,6 +2770,16 @@ PY
     return $all_passed
 }
 
+test_common_standalone_suite() {
+    local all_passed=0 output
+
+    output=$(bash "$TEST_DIR/test_common.sh" 2>&1) || all_passed=1
+
+    assert_true "[[ \$all_passed -eq 0 && \$output == *'Common tests complete'* ]]" "standalone common.sh suite runs green under the harness" || all_passed=1
+
+    return $all_passed
+}
+
 test_dashboard_monitoring_history_helpers() {
     local all_passed=0 output compact_output
 
@@ -2813,7 +2823,7 @@ payload = {
     "window": module.history_window_label(history, 2),
     "cpu_trend": module.describe_trend(module.history_values(history, "cpu"), "cpu"),
     "player_trend": module.describe_trend(module.history_values(history, "players"), "players"),
-    "io_sparkline": module.render_sparkline(module.history_values(history, "io"), 5),
+    "io_trend": module.describe_trend(module.history_values(history, "io"), "io"),
     "last_players": history[-1]["players"],
 }
 
@@ -2825,7 +2835,7 @@ PY
 
     assert_true "[[ \$compact_output == *'\"history_len\":3'* && \$compact_output == *'\"window\":\"3samples/~4s\"'* ]]" "dashboard monitoring history keeps a rolling sample window" || all_passed=1
     assert_true "[[ \$compact_output == *'\"cpu_trend\":\"rising\"'* && \$compact_output == *'\"player_trend\":\"rising\"'* && \$compact_output == *'\"last_players\":7.0'* ]]" "dashboard monitoring history derives trend direction from recent samples" || all_passed=1
-    assert_true "[[ \$compact_output == *'\"io_sparkline\":\"▁▁·▁█\"'* ]]" "dashboard monitoring history renders compact sparklines for optional metrics" || all_passed=1
+    assert_true "[[ \$compact_output == *'\"io_trend\":\"rising\"'* ]]" "dashboard monitoring history derives trends for optional metrics once data appears" || all_passed=1
 
     return $all_passed
 }
@@ -4396,6 +4406,7 @@ main() {
     run_test "Dashboard: Render helpers" test_dashboard_render_helpers
     run_test "Dashboard: Render markup safety" test_dashboard_render_markup_safety
     run_test "Dashboard: Monitoring history" test_dashboard_monitoring_history_helpers
+    run_test "Common: Standalone suite" test_common_standalone_suite
     run_test "Dashboard: Snapshot fixture helpers" test_dashboard_snapshot_fixture_helpers
     run_test "Dashboard: Parse args demo capture" test_dashboard_parse_args_supports_demo_capture
     run_test "Server: Player count fallback" test_server_player_count_fallback
