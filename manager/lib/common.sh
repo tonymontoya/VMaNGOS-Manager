@@ -102,30 +102,191 @@ check_root() {
     fi
 }
 
+# HH:MM (24-hour)
+validate_hhmm() {
+    [[ "${1:-}" =~ ^([0-1][0-9]|2[0-3]):[0-5][0-9]$ ]]
+}
+
+# Three-letter English day abbreviation
+validate_day_name() {
+    [[ "${1:-}" =~ ^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)$ ]]
+}
+
+validate_positive_int() {
+    [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
+}
+
+# ============================================================================
+# DISK STATISTICS (single df parser family)
+# ============================================================================
+
+# Filesystem device of the mount containing <path> (empty on failure)
+disk_device() {
+    df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $1}' || true
+}
+
+# "total|used|available|pct" in KB from df -Pk (empty on failure, % stripped)
+disk_stats_kb() {
+    df -Pk "$1" 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $2 "|" $3 "|" $4 "|" $5}' || true
+}
+
+# Available KB for the mount containing <path> (0 on failure)
+disk_available_kb() {
+    local stats
+    stats=$(disk_stats_kb "$1")
+    if [[ -n "$stats" ]]; then
+        printf '%s\n' "$stats" | cut -d'|' -f3
+    else
+        printf '0\n'
+    fi
+}
+
+# ============================================================================
+# SYSTEMD UNIT INSTALLATION (single elevation strategy: direct write; the
+# caller must already be root — see check_root)
+# ============================================================================
+
+systemd_service_unit_content() {
+    local description="$1"
+    local exec_start="$2"
+
+    cat <<EOF
+[Unit]
+Description=$description
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=$exec_start
+User=root
+StandardOutput=journal
+StandardError=journal
+EOF
+}
+
+systemd_timer_unit_content() {
+    local description="$1"
+    local on_calendar="$2"
+
+    cat <<EOF
+[Unit]
+Description=$description
+
+[Timer]
+OnCalendar=$on_calendar
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+# systemd_install_units <unit_dir> <service_name> <service_content> <timer_name> <timer_content>
+systemd_install_units() {
+    local unit_dir="$1"
+    local service_name="$2"
+    local service_content="$3"
+    local timer_name="$4"
+    local timer_content="$5"
+
+    printf '%s' "$service_content" > "$unit_dir/$service_name"
+    printf '%s' "$timer_content" > "$unit_dir/$timer_name"
+}
+
+# systemd_enable_timer <ctl_fn> <timer_name>
+# ctl_fn is the module's systemctl seam (schedule_systemctl/backup_systemctl)
+# so tests can stub the daemon interaction per module.
+systemd_enable_timer() {
+    local ctl_fn="$1"
+    local timer_name="$2"
+    "$ctl_fn" daemon-reload
+    "$ctl_fn" enable "$timer_name" >/dev/null
+    "$ctl_fn" start "$timer_name" >/dev/null
+}
+
+# ============================================================================
+# INTERACTIVE WATCH LOOP (single implementation; render_fn returns non-zero
+# to stop the loop; max_iterations empty = run until interrupted)
+# ============================================================================
+
+watch_loop() {
+    local interval="$1"
+    local title="$2"
+    local max_iterations="${3:-}"
+    local render_fn="$4"
+    local interactive="false"
+    local stop_requested=0
+    local iterations=0
+
+    [[ -t 1 ]] && interactive="true"
+
+    trap 'stop_requested=1' INT TERM
+
+    if [[ "$interactive" == "true" ]]; then
+        printf '\033[?25l'
+    fi
+
+    while [[ "$stop_requested" -eq 0 ]]; do
+        if [[ "$interactive" == "true" ]]; then
+            printf '\033[H\033[2J'
+        fi
+
+        echo "$title"
+        echo "Interval: ${interval}s"
+        echo "Press Ctrl+C to stop"
+        echo ""
+
+        "$render_fn" || break
+
+        if [[ -n "$max_iterations" ]]; then
+            iterations=$((iterations + 1))
+            if [[ "$iterations" -ge "$max_iterations" ]]; then
+                break
+            fi
+        fi
+
+        sleep "$interval" || true
+        if [[ "$interactive" != "true" ]]; then
+            echo ""
+        fi
+    done
+
+    trap - INT TERM
+
+    if [[ "$interactive" == "true" ]]; then
+        printf '\033[?25h'
+    fi
+}
+
 # ============================================================================
 # LOCKING
 # ============================================================================
 
+# acquire_lock <name> [<label> <exit_code>]
+# label customizes the "busy" message (default: "instance"); exit_code
+# defaults to E_LOCK_FAILED.
 acquire_lock() {
     local lock_name="${1:-global}"
+    local lock_label="${2:-instance}"
+    local lock_exit_code="${3:-$E_LOCK_FAILED}"
     local lock_file="$LOCK_DIR/$lock_name.lock"
     local pid
-    
+
     # Create lock directory if needed (lazy init)
     if [[ ! -d "$LOCK_DIR" ]]; then
         mkdir -p "$LOCK_DIR" 2>/dev/null || {
-            error_exit "Cannot create lock directory: $LOCK_DIR" "$E_LOCK_FAILED"
+            error_exit "Cannot create lock directory: $LOCK_DIR" "$lock_exit_code"
         }
     fi
-    
+
     if [[ -f "$lock_file" ]]; then
         pid=$(cat "$lock_file" 2>/dev/null) || true
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            error_exit "Another instance is running (PID: $pid)" "$E_LOCK_FAILED"
+            error_exit "Another $lock_label is running (PID: $pid)" "$lock_exit_code"
         fi
         rm -f "$lock_file"
     fi
-    
+
     echo $$ > "$lock_file"
     register_cleanup "rm -f $lock_file"
     log_debug "Acquired lock: $lock_name"

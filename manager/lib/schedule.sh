@@ -72,11 +72,11 @@ schedule_resolve_manager_bin() {
 }
 
 schedule_validate_time() {
-    [[ "${1:-}" =~ ^([0-1][0-9]|2[0-3]):[0-5][0-9]$ ]]
+    validate_hhmm "${1:-}"
 }
 
 schedule_validate_day() {
-    [[ "${1:-}" =~ ^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)$ ]]
+    validate_day_name "${1:-}"
 }
 
 schedule_validate_timezone() {
@@ -94,7 +94,7 @@ schedule_validate_warnings() {
 
     for item in "${items[@]}"; do
         item=$(config_trim "$item")
-        [[ "$item" =~ ^[1-9][0-9]*$ ]] || return 1
+        validate_positive_int "$item" || return 1
         if [[ ",$seen," == *",$item,"* ]]; then
             return 1
         fi
@@ -404,35 +404,14 @@ schedule_service_unit_content() {
     local description="$1"
     local exec_args="$2"
 
-    cat <<EOF
-[Unit]
-Description=$description
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=$SCHEDULE_MANAGER_BIN -c $CONFIG_FILE schedule $exec_args
-User=root
-StandardOutput=journal
-StandardError=journal
-EOF
+    systemd_service_unit_content "$description" "$SCHEDULE_MANAGER_BIN -c $CONFIG_FILE schedule $exec_args"
 }
 
 schedule_timer_unit_content() {
     local description="$1"
     local on_calendar="$2"
 
-    cat <<EOF
-[Unit]
-Description=$description
-
-[Timer]
-OnCalendar=$on_calendar
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
+    systemd_timer_unit_content "$description" "$on_calendar"
 }
 
 schedule_main_exec_args() {
@@ -456,15 +435,12 @@ schedule_install_units() {
     local timer_name="$3"
     local timer_content="$4"
 
-    schedule_write_file "$(schedule_timer_unit_path "$service_name")" "$service_content"
-    schedule_write_file "$(schedule_timer_unit_path "$timer_name")" "$timer_content"
+    systemd_install_units "$SCHEDULE_UNIT_DIR" "$service_name" "$service_content" "$timer_name" "$timer_content"
 }
 
 schedule_enable_timer() {
     local timer_name="$1"
-    schedule_systemctl daemon-reload
-    schedule_systemctl enable "$timer_name" >/dev/null
-    schedule_systemctl start "$timer_name" >/dev/null
+    systemd_enable_timer schedule_systemctl "$timer_name"
 }
 
 schedule_disable_timer() {

@@ -81,8 +81,7 @@ get_online_player_count() {
 }
 
 server_validate_positive_integer() {
-    local value="${1:-}"
-    [[ "$value" =~ ^[1-9][0-9]*$ ]]
+    validate_positive_int "${1:-}"
 }
 
 server_validate_timeout() {
@@ -218,7 +217,7 @@ preflight_check() {
     
     # Check disk space (using config-driven install root)
     local available
-    available=$(df "$INSTALL_ROOT" | awk 'NR==2 {print $4}')
+    available=$(disk_available_kb "$INSTALL_ROOT")
     if [[ "$available" -lt 512000 ]]; then
         log_error "Insufficient disk space: ${available}KB available, need 500MB"
         error_count=$((error_count + 1))
@@ -651,7 +650,7 @@ server_collect_load_stats() {
 }
 
 server_disk_device_source() {
-    df -Pk "$INSTALL_ROOT" 2>/dev/null | awk 'NR==2 {print $1}' || true
+    disk_device "$INSTALL_ROOT"
 }
 
 server_disk_device_name() {
@@ -925,7 +924,14 @@ server_collect_status() {
     load_critical_threshold=$((STATUS_HOST_CPU_CORES * 2))
     STATUS_HOST_LOAD_STATUS=$(server_metric_level "$STATUS_HOST_LOAD_1" "$load_warning_threshold" "$load_critical_threshold")
 
-    disk_data=$(df -Pk "$INSTALL_ROOT" 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $1 "|" $2 "|" $3 "|" $4 "|" $5}' || true)
+    local disk_stats disk_device_name_value
+    disk_stats=$(disk_stats_kb "$INSTALL_ROOT")
+    disk_device_name_value=$(disk_device "$INSTALL_ROOT")
+    if [[ -n "$disk_stats" ]]; then
+        disk_data="${disk_device_name_value:-unknown}|${disk_stats}"
+    else
+        disk_data=""
+    fi
     if [[ -n "$disk_data" ]]; then
         STATUS_DISK_FILESYSTEM="${disk_data%%|*}"
         disk_data="${disk_data#*|}"
@@ -1207,60 +1213,24 @@ server_validate_interval() {
     server_validate_positive_integer "${1:-}"
 }
 
+server_watch_render() {
+    if server_collect_status; then
+        server_render_status_text
+    else
+        log_error "Failed to load configuration"
+        return 1
+    fi
+}
+
 server_status_watch() {
     local interval="${1:-2}"
-    local interactive="false"
-    local stop_requested=0
-    local iterations=0
 
     if ! server_validate_interval "$interval"; then
         log_error "Invalid watch interval: $interval"
         return "$E_INVALID_ARGS"
     fi
 
-    [[ -t 1 ]] && interactive="true"
-
-    trap 'stop_requested=1' INT TERM
-
-    if [[ "$interactive" == "true" ]]; then
-        printf '\033[?25l'
-    fi
-
-    while [[ "$stop_requested" -eq 0 ]]; do
-        if [[ "$interactive" == "true" ]]; then
-            printf '\033[H\033[2J'
-        fi
-
-        echo "VMANGOS Server Status Watch"
-        echo "Interval: ${interval}s"
-        echo "Press Ctrl+C to stop"
-        echo ""
-
-        if server_collect_status; then
-            server_render_status_text
-        else
-            log_error "Failed to load configuration"
-            break
-        fi
-
-        if [[ -n "${STATUS_WATCH_MAX_ITERATIONS:-}" ]]; then
-            iterations=$((iterations + 1))
-            if [[ "$iterations" -ge "$STATUS_WATCH_MAX_ITERATIONS" ]]; then
-                break
-            fi
-        fi
-
-        sleep "$interval" || true
-        if [[ "$interactive" != "true" ]]; then
-            echo ""
-        fi
-    done
-
-    trap - INT TERM
-
-    if [[ "$interactive" == "true" ]]; then
-        printf '\033[?25h'
-    fi
+    watch_loop "$interval" "VMANGOS Server Status Watch" "${STATUS_WATCH_MAX_ITERATIONS:-}" server_watch_render
 
     echo "Stopped status watch."
 }

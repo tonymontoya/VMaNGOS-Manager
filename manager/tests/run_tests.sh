@@ -3822,34 +3822,34 @@ test_backup_schedule_parsing() {
     local all_passed=0
     
     # Test valid daily format
-    if schedule_parse_daily "04:00" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} schedule_parse_daily accepts valid 04:00"
+    if backup_schedule_parse_daily "04:00" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} backup_schedule_parse_daily accepts valid 04:00"
     else
-        echo -e "${RED}✗${NC} schedule_parse_daily rejected valid 04:00"
+        echo -e "${RED}✗${NC} backup_schedule_parse_daily rejected valid 04:00"
         all_passed=1
     fi
     
     # Test invalid daily format
-    if ! schedule_parse_daily "25:00" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} schedule_parse_daily rejects invalid 25:00"
+    if ! backup_schedule_parse_daily "25:00" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} backup_schedule_parse_daily rejects invalid 25:00"
     else
-        echo -e "${RED}✗${NC} schedule_parse_daily accepted invalid 25:00"
+        echo -e "${RED}✗${NC} backup_schedule_parse_daily accepted invalid 25:00"
         all_passed=1
     fi
     
     # Test valid weekly format
-    if schedule_parse_weekly "Sun 04:00" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} schedule_parse_weekly accepts valid 'Sun 04:00'"
+    if backup_schedule_parse_weekly "Sun 04:00" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} backup_schedule_parse_weekly accepts valid 'Sun 04:00'"
     else
-        echo -e "${RED}✗${NC} schedule_parse_weekly rejected valid 'Sun 04:00'"
+        echo -e "${RED}✗${NC} backup_schedule_parse_weekly rejected valid 'Sun 04:00'"
         all_passed=1
     fi
     
     # Test invalid day
-    if ! schedule_parse_weekly "Someday 04:00" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} schedule_parse_weekly rejects invalid day"
+    if ! backup_schedule_parse_weekly "Someday 04:00" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} backup_schedule_parse_weekly rejects invalid day"
     else
-        echo -e "${RED}✗${NC} schedule_parse_weekly accepted invalid day"
+        echo -e "${RED}✗${NC} backup_schedule_parse_weekly accepted invalid day"
         all_passed=1
     fi
     

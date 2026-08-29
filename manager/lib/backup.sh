@@ -22,7 +22,6 @@ export BACKUP_VERIFY_AFTER=""
 export MANAGER_BIN="${MANAGER_BIN:-}"
 export BACKUP_SYSTEMD_DIR="${BACKUP_SYSTEMD_DIR:-/etc/systemd/system}"
 
-export BACKUP_LOCK_FILE="/var/run/vmangos-manager/backup.lock"
 
 # Exit codes
 export E_BACKUP_NOSPACE=10
@@ -224,32 +223,11 @@ backup_schedule_status() {
 # ============================================================================
 
 backup_acquire_lock() {
-    if [[ -f "$BACKUP_LOCK_FILE" ]]; then
-        local pid
-        pid=$(cat "$BACKUP_LOCK_FILE" 2>/dev/null) || true
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            error_exit "Another backup is in progress (PID: $pid)" "$E_BACKUP_LOCKED"
-        fi
-        rm -f "$BACKUP_LOCK_FILE"
-    fi
-    
-    # Ensure lock directory exists
-    local lock_dir
-    lock_dir=$(dirname "$BACKUP_LOCK_FILE")
-    if [[ ! -d "$lock_dir" ]]; then
-        mkdir -p "$lock_dir" 2>/dev/null || {
-            log_warn "Cannot create lock directory: $lock_dir"
-        }
-    fi
-    
-    echo $$ > "$BACKUP_LOCK_FILE"
-    register_cleanup "rm -f $BACKUP_LOCK_FILE"
-    log_debug "Acquired backup lock"
+    acquire_lock backup "backup" "$E_BACKUP_LOCKED"
 }
 
 backup_release_lock() {
-    rm -f "$BACKUP_LOCK_FILE"
-    log_debug "Released backup lock"
+    release_lock backup
 }
 
 # ============================================================================
@@ -285,7 +263,7 @@ backup_preflight_check() {
     # Estimate required space
     local required_mb available_mb
     required_mb=$(backup_estimate_size)
-    available_mb=$(df "$BACKUP_DIR" | awk 'NR==2 {print int($4/1024)}')
+    available_mb=$(( $(disk_available_kb "$BACKUP_DIR") / 1024 ))
 
     log_info "Backup size estimate: ${required_mb}MB"
     log_info "Available space: ${available_mb}MB"
@@ -885,63 +863,63 @@ backup_restore_dry_run() {
 backup_schedule() {
     local schedule_type="$1"
     local schedule_value="$2"
-    
+
+    check_root
     log_section "Backup Scheduling"
-    
+
     case "$schedule_type" in
         daily)
-            schedule_parse_daily "$schedule_value" || return 1
-            schedule_create_daily "$schedule_value" || return 1
+            backup_schedule_parse_daily "$schedule_value" || return 1
+            backup_schedule_create_daily "$schedule_value" || return 1
             ;;
         weekly)
-            schedule_parse_weekly "$schedule_value" || return 1
-            schedule_create_weekly "$schedule_value" || return 1
+            backup_schedule_parse_weekly "$schedule_value" || return 1
+            backup_schedule_create_weekly "$schedule_value" || return 1
             ;;
         *)
             error_exit "Invalid schedule type: $schedule_type (use 'daily' or 'weekly')" "$E_SCHEDULE_INVALID"
             ;;
     esac
-    
+
     log_info "✓ Backup schedule created"
     return 0
 }
 
-schedule_parse_daily() {
+backup_schedule_parse_daily() {
     local time_str="$1"
-    
+
     # Validate HH:MM format (24-hour)
-    if [[ ! "$time_str" =~ ^([0-1][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+    if ! validate_hhmm "$time_str"; then
         log_error "Invalid time format: $time_str"
         log_info "Expected format: HH:MM (24-hour, e.g., 04:00, 23:30)"
         return "$E_SCHEDULE_INVALID"
     fi
-    
+
     return 0
 }
 
-schedule_parse_weekly() {
+backup_schedule_parse_weekly() {
     local schedule_str="$1"
-    
+
     # Validate "Day HH:MM" format
     local day time
     day=$(echo "$schedule_str" | awk '{print $1}')
     time=$(echo "$schedule_str" | awk '{print $2}')
-    
+
     # Validate day
-    local valid_days="Mon Tue Wed Thu Fri Sat Sun"
-    if [[ ! "$valid_days" =~ (^| )$day($| ) ]]; then
+    if ! validate_day_name "$day"; then
         log_error "Invalid day: $day"
         log_info "Valid days: Mon, Tue, Wed, Thu, Fri, Sat, Sun"
         return "$E_SCHEDULE_INVALID"
     fi
-    
+
     # Validate time
-    if [[ ! "$time" =~ ^([0-1][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+    if ! validate_hhmm "$time"; then
         log_error "Invalid time format: $time"
         log_info "Expected format: HH:MM (24-hour)"
         return "$E_SCHEDULE_INVALID"
     fi
-    
+
     return 0
 }
 
@@ -949,110 +927,77 @@ backup_service_unit_content() {
     local description="$1"
     local manager_bin_path="$2"
 
-    cat << EOF
-[Unit]
-Description=$description
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=$manager_bin_path backup now --verify
-User=root
-StandardOutput=journal
-StandardError=journal
-EOF
+    systemd_service_unit_content "$description" "$manager_bin_path backup now --verify"
 }
 
 backup_timer_unit_content() {
     local description="$1"
     local on_calendar="$2"
 
-    cat << EOF
-[Unit]
-Description=$description
-
-[Timer]
-OnCalendar=$on_calendar
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
+    systemd_timer_unit_content "$description" "$on_calendar"
 }
 
-schedule_create_daily() {
+backup_schedule_create_daily() {
     local time_str="$1"
     local hour minute
     hour="${time_str%%:*}"
     minute="${time_str#*:}"
-    
+
     local timer_name="vmangos-backup-daily"
     local service_name="vmangos-backup"
     local manager_bin_path
     manager_bin_path="$(backup_resolve_manager_bin)"
-    
-    # Create systemd service file
-    local service_file="/etc/systemd/system/${service_name}.service"
-    log_info "Creating service: $service_file"
-    
-    backup_service_unit_content "VMANGOS Daily Backup" "$manager_bin_path" | sudo tee "$service_file" > /dev/null
-    
-    # Create systemd timer file (Ubuntu 22.04 format)
-    local timer_file="/etc/systemd/system/${timer_name}.timer"
-    log_info "Creating timer: $timer_file"
-    
-    backup_timer_unit_content "Run VMANGOS backup daily at $time_str" "*-*-* $hour:$minute:00" | sudo tee "$timer_file" > /dev/null
-    
-    # Reload and enable
+
+    log_info "Creating service: $(backup_timer_file_path "${service_name}.service")"
+    log_info "Creating timer: $(backup_timer_file_path "${timer_name}.timer")"
+
+    systemd_install_units "$BACKUP_SYSTEMD_DIR" \
+        "${service_name}.service" \
+        "$(backup_service_unit_content "VMANGOS Daily Backup" "$manager_bin_path")" \
+        "${timer_name}.timer" \
+        "$(backup_timer_unit_content "Run VMANGOS backup daily at $time_str" "*-*-* $hour:$minute:00")"
+
     log_info "Enabling timer..."
-    sudo systemctl daemon-reload
-    sudo systemctl enable "${timer_name}.timer"
-    sudo systemctl start "${timer_name}.timer"
-    
+    systemd_enable_timer backup_systemctl "${timer_name}.timer"
+
     log_info "✓ Daily backup scheduled for $time_str"
     log_info "Timer status:"
-    systemctl list-timers "${timer_name}.timer" 2>/dev/null || true
-    
+    backup_systemctl list-timers "${timer_name}.timer" 2>/dev/null || true
+
     return 0
 }
 
-schedule_create_weekly() {
+backup_schedule_create_weekly() {
     local schedule_str="$1"
     local day time
     day=$(echo "$schedule_str" | awk '{print $1}')
     time=$(echo "$schedule_str" | awk '{print $2}')
-    
+
     local hour minute
     hour="${time%%:*}"
     minute="${time#*:}"
-    
+
     local timer_name="vmangos-backup-weekly"
     local service_name="vmangos-backup"
     local manager_bin_path
     manager_bin_path="$(backup_resolve_manager_bin)"
-    
-    # Create systemd service file
-    local service_file="/etc/systemd/system/${service_name}.service"
-    log_info "Creating service: $service_file"
-    
-    backup_service_unit_content "VMANGOS Weekly Backup" "$manager_bin_path" | sudo tee "$service_file" > /dev/null
-    
-    # Create systemd timer file (Ubuntu 22.04 format)
-    local timer_file="/etc/systemd/system/${timer_name}.timer"
-    log_info "Creating timer: $timer_file"
-    
-    backup_timer_unit_content "Run VMANGOS backup weekly on $day at $time" "$day *-*-* $hour:$minute:00" | sudo tee "$timer_file" > /dev/null
-    
-    # Reload and enable
+
+    log_info "Creating service: $(backup_timer_file_path "${service_name}.service")"
+    log_info "Creating timer: $(backup_timer_file_path "${timer_name}.timer")"
+
+    systemd_install_units "$BACKUP_SYSTEMD_DIR" \
+        "${service_name}.service" \
+        "$(backup_service_unit_content "VMANGOS Weekly Backup" "$manager_bin_path")" \
+        "${timer_name}.timer" \
+        "$(backup_timer_unit_content "Run VMANGOS backup weekly on $day at $time" "$day *-*-* $hour:$minute:00")"
+
     log_info "Enabling timer..."
-    sudo systemctl daemon-reload
-    sudo systemctl enable "${timer_name}.timer"
-    sudo systemctl start "${timer_name}.timer"
-    
+    systemd_enable_timer backup_systemctl "${timer_name}.timer"
+
     log_info "✓ Weekly backup scheduled for $day at $time"
     log_info "Timer status:"
-    systemctl list-timers "${timer_name}.timer" 2>/dev/null || true
-    
+    backup_systemctl list-timers "${timer_name}.timer" 2>/dev/null || true
+
     return 0
 }
 

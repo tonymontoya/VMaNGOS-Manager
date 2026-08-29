@@ -64,8 +64,7 @@ logs_python_bin() {
 }
 
 logs_validate_positive_integer() {
-    local value="${1:-}"
-    [[ "$value" =~ ^[1-9][0-9]*$ ]]
+    validate_positive_int "${1:-}"
 }
 
 logs_validate_recent_source() {
@@ -220,9 +219,10 @@ logs_df_target() {
 }
 
 logs_collect_disk_stats() {
-    local target disk_data
+    local target
     target=$(logs_df_target)
-    disk_data=$(df -Pk "$target" 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $2 "|" $3 "|" $4 "|" $5}' || true)
+    local disk_data
+    disk_data=$(disk_stats_kb "$target")
 
     if [[ -n "$disk_data" ]]; then
         printf '%s\n' "$disk_data"
@@ -958,15 +958,16 @@ logs_recent_json() {
     json_output true "$data"
 }
 
+logs_watch_render() {
+    logs_recent_text "$LOGS_WATCH_SOURCE" "$LOGS_WATCH_WINDOW" "$LOGS_WATCH_SEVERITY" "$LOGS_WATCH_LIMIT"
+}
+
 logs_recent_watch() {
     local source="${1:-$LOGS_RECENT_DEFAULT_SOURCE}"
     local window="${2:-$LOGS_RECENT_DEFAULT_WINDOW}"
     local severity="${3:-$LOGS_RECENT_DEFAULT_SEVERITY}"
     local limit="${4:-$LOGS_RECENT_DEFAULT_LIMIT}"
     local interval="${5:-$LOGS_RECENT_DEFAULT_INTERVAL}"
-    local interactive="false"
-    local stop_requested=0
-    local iterations=0
 
     logs_validate_recent_request "$source" "$window" "$severity" "$limit" || {
         log_error "$(logs_validate_recent_request "$source" "$window" "$severity" "$limit")"
@@ -977,42 +978,12 @@ logs_recent_watch() {
         return "$E_INVALID_ARGS"
     fi
 
-    [[ -t 1 ]] && interactive="true"
-    trap 'stop_requested=1' INT TERM
+    LOGS_WATCH_SOURCE="$source"
+    LOGS_WATCH_WINDOW="$window"
+    LOGS_WATCH_SEVERITY="$severity"
+    LOGS_WATCH_LIMIT="$limit"
 
-    if [[ "$interactive" == "true" ]]; then
-        printf '\033[?25l'
-    fi
-
-    while [[ "$stop_requested" -eq 0 ]]; do
-        if [[ "$interactive" == "true" ]]; then
-            printf '\033[H\033[2J'
-        fi
-
-        echo "VMANGOS Realm Log Watch"
-        echo "Interval: ${interval}s"
-        echo "Press Ctrl+C to stop"
-        echo ""
-
-        logs_recent_text "$source" "$window" "$severity" "$limit" || break
-
-        if [[ -n "${LOGS_WATCH_MAX_ITERATIONS:-}" ]]; then
-            iterations=$((iterations + 1))
-            if [[ "$iterations" -ge "$LOGS_WATCH_MAX_ITERATIONS" ]]; then
-                break
-            fi
-        fi
-
-        sleep "$interval" || true
-        if [[ "$interactive" != "true" ]]; then
-            echo ""
-        fi
-    done
-
-    trap - INT TERM
-    if [[ "$interactive" == "true" ]]; then
-        printf '\033[?25h'
-    fi
+    watch_loop "$interval" "VMANGOS Realm Log Watch" "${LOGS_WATCH_MAX_ITERATIONS:-}" logs_watch_render
 
     echo "Stopped log watch."
 }
