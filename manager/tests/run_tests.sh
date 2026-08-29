@@ -4065,6 +4065,129 @@ test_backup_restore_requires_explicit_credentials() {
     return $all_passed
 }
 
+# Shared fake environment for tests that drive backup_now end-to-end.
+backup_now_test_env() {
+    BACKUP_DIR="$1"
+    BACKUP_DATABASES=("auth" "characters")
+    BACKUP_CONFIG_LOADED=1
+    backup_load_config() { return 0; }
+    server_load_config() { return 0; }
+    backup_acquire_lock() { return 0; }
+    backup_release_lock() { return 0; }
+    backup_preflight_check() { return 0; }
+    db_dump() { printf 'DUMP'; }
+    gzip() { cat; }
+    backup_manager_version() { printf '0.3.0-test'; }
+    sha256_file() { printf 'deadbeefdeadbeef'; }
+    error_exit() { TEST_ERROR_EXIT_MESSAGE="$1"; TEST_ERROR_EXIT_CODE="$2"; return 1; }
+    TEST_ERROR_EXIT_MESSAGE=""
+    TEST_ERROR_EXIT_CODE=""
+}
+
+backup_now_test_cleanup() {
+    unset -f backup_load_config server_load_config backup_acquire_lock backup_release_lock
+    unset -f backup_preflight_check db_dump gzip backup_manager_version sha256_file error_exit mv
+    unset TEST_ERROR_EXIT_MESSAGE TEST_ERROR_EXIT_CODE
+}
+
+test_backup_now_metadata_failure_preserves_dump() {
+    # shellcheck source=../lib/backup.sh
+    source "$LIB_DIR/backup.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local temp_dir dump_file
+    temp_dir=$(mktemp -d)
+
+    backup_now_test_env "$temp_dir"
+    mv() {
+        [[ "$2" == *.json ]] && return 1
+        command mv "$@"
+    }
+
+    backup_now false >/dev/null 2>&1 || true
+
+    dump_file=$(find "$temp_dir" -name '*.sql.gz' | head -1)
+    assert_true "[[ -n \"\$dump_file\" ]]" "metadata-move failure keeps the sql.gz dump" || all_passed=1
+    if [[ -n "$dump_file" ]]; then
+        assert_equals "DUMP" "$(cat "$dump_file")" "preserved dump still has full content" || all_passed=1
+    fi
+    assert_equals "Failed to move metadata file" "$TEST_ERROR_EXIT_MESSAGE" "metadata failure reports through error path" || all_passed=1
+    assert_equals "13" "$TEST_ERROR_EXIT_CODE" "metadata failure uses E_BACKUP_METADATA" || all_passed=1
+
+    backup_now_test_cleanup
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
+test_backup_list_tolerates_legacy_metadata() {
+    # shellcheck source=../lib/backup.sh
+    source "$LIB_DIR/backup.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local temp_dir stderr_file output json_entries
+    temp_dir=$(mktemp -d)
+    stderr_file=$(mktemp)
+
+    printf '%s\n' '{"timestamp":"2026-04-13T10:00:00+00:00","file":"legacy.sql.gz","basename":"legacy"}' > "$temp_dir/legacy.json"
+    : > "$temp_dir/empty.json"
+
+    BACKUP_DIR="$temp_dir"
+    BACKUP_CONFIG_LOADED=1
+    DB_CONFIG_LOADED=1
+
+    output=$(backup_list text 2>"$stderr_file" || true)
+    assert_equals "" "$(cat "$stderr_file")" "legacy metadata listing produces no stderr noise" || all_passed=1
+    assert_true "[[ \$output == *'legacy.sql.gz'* && \$output == *'0B'* ]]" "legacy metadata renders zero-size row" || all_passed=1
+
+    json_entries=$(backup_list json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]["backups"]; print(len(d), [e is None for e in d])')
+    assert_equals "2 [True, False]" "$json_entries" "json list stays valid with empty metadata as null element" || all_passed=1
+
+    rm -rf "$temp_dir" "$stderr_file"
+    return $all_passed
+}
+
+test_backup_metadata_carries_real_commit() {
+    # shellcheck source=../lib/backup.sh
+    source "$LIB_DIR/backup.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local temp_dir metadata_file commit
+
+    temp_dir=$(mktemp -d)
+    mkdir -p "$temp_dir/backups" "$temp_dir/opt/mangos/source"
+    git -C "$temp_dir/opt/mangos/source" init -q
+    git -C "$temp_dir/opt/mangos/source" -c user.email=t@t.local -c user.name=tester commit --allow-empty -m init -q
+    commit=$(git -C "$temp_dir/opt/mangos/source" rev-parse HEAD)
+    CONFIG_SERVER_INSTALL_ROOT="$temp_dir/opt/mangos"
+
+    backup_now_test_env "$temp_dir/backups"
+    backup_now false >/dev/null 2>&1 || true
+
+    metadata_file=$(find "$temp_dir/backups" -name '*.json' | head -1)
+    assert_true "[[ -n \"\$metadata_file\" ]]" "backup_now produced metadata" || all_passed=1
+    if [[ -n "$metadata_file" ]]; then
+        assert_equals "$commit" "$(metadata_json_get "$metadata_file" "vmangos_commit")" "metadata records the real source commit" || all_passed=1
+    fi
+
+    # Without a source repo the field must be absent, not a stale constant
+    rm -rf "$temp_dir/opt/mangos/source"
+    rm -f "$temp_dir/backups"/*.json "$temp_dir/backups"/*.sql.gz
+    backup_now false >/dev/null 2>&1 || true
+    metadata_file=$(find "$temp_dir/backups" -name '*.json' | head -1)
+    if [[ -n "$metadata_file" ]]; then
+        assert_equals "" "$(metadata_json_get "$metadata_file" "vmangos_commit")" "metadata omits vmangos_commit when source repo is absent" || all_passed=1
+        assert_true "! grep -q 'vmangos_commit' \"\$metadata_file\"" "vmangos_commit key absent entirely without source repo" || all_passed=1
+    fi
+
+    backup_now_test_cleanup
+    unset CONFIG_SERVER_INSTALL_ROOT
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -4155,6 +4278,9 @@ main() {
     run_test "Backup: Verify loads config for Level 2" test_backup_verify_loads_config_for_level2
     run_test "Backup: Restore dry-run non-mutating" test_backup_restore_dry_run_non_mutating
     run_test "Backup: Restore requires explicit creds" test_backup_restore_requires_explicit_credentials
+    run_test "Backup: Metadata failure preserves dump" test_backup_now_metadata_failure_preserves_dump
+    run_test "Backup: List tolerates legacy metadata" test_backup_list_tolerates_legacy_metadata
+    run_test "Backup: Metadata carries real commit" test_backup_metadata_carries_real_commit
     
     local unregistered_failed=0
     if ! report_unregistered_tests; then

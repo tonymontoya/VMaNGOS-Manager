@@ -258,22 +258,22 @@ backup_release_lock() {
 
 backup_preflight_check() {
     log_info "Running backup pre-flight checks..."
-    
+
     local error_count=0
-    
+
     # Ensure backup directory exists
     if [[ ! -d "$BACKUP_DIR" ]]; then
         log_info "Creating backup directory: $BACKUP_DIR"
         mkdir -p "$BACKUP_DIR" || {
-            error_exit "Failed to create backup directory: $BACKUP_DIR" "$E_BACKUP_NOSPACE"
+            error_exit "Failed to create backup directory: $BACKUP_DIR" "$E_CONFIG_ERROR"
         }
     fi
-    
+
     # Check write permissions
     if [[ ! -w "$BACKUP_DIR" ]]; then
-        error_exit "Backup directory not writable: $BACKUP_DIR" "$E_BACKUP_NOSPACE"
+        error_exit "Backup directory not writable: $BACKUP_DIR" "$E_CONFIG_ERROR"
     fi
-    
+
     # Check database connectivity
     if ! db_check_connection; then
         log_error "Database connectivity check failed"
@@ -281,15 +281,15 @@ backup_preflight_check() {
     else
         log_info "✓ Database connectivity OK"
     fi
-    
+
     # Estimate required space
     local required_mb available_mb
     required_mb=$(backup_estimate_size)
     available_mb=$(df "$BACKUP_DIR" | awk 'NR==2 {print int($4/1024)}')
-    
+
     log_info "Backup size estimate: ${required_mb}MB"
     log_info "Available space: ${available_mb}MB"
-    
+
     # Require 2x estimated size for safety margin
     local required_with_margin=$((required_mb * 2))
     if [[ "$available_mb" -lt "$required_with_margin" ]]; then
@@ -298,8 +298,9 @@ backup_preflight_check() {
     else
         log_info "✓ Disk space OK"
     fi
-    
-    return "$error_count"
+
+    # Boolean verdict only — a count is meaningless as a shell status
+    [[ "$error_count" -eq 0 ]]
 }
 
 backup_estimate_size() {
@@ -339,6 +340,14 @@ backup_manager_version() {
     else
         printf '%s' 'unknown'
     fi
+}
+
+# Best-effort resolution of the deployed VMaNGOS source commit; prints
+# nothing when the source tree or its git metadata is unavailable.
+backup_source_commit() {
+    local source_root="${CONFIG_SERVER_INSTALL_ROOT:-/opt/mangos}/source"
+    [[ -d "$source_root" ]] || return 0
+    git -C "$source_root" rev-parse HEAD 2>/dev/null || true
 }
 
 # Metadata readers — real JSON parsing via python3 (the metadata files are
@@ -410,7 +419,7 @@ backup_now() {
     # Pre-flight checks
     if ! backup_preflight_check; then
         backup_release_lock
-        error_exit "Backup pre-flight checks failed" "$E_BACKUP_NOSPACE"
+        error_exit "Backup pre-flight checks failed" "$E_CONFIG_ERROR"
     fi
     
     # Generate filenames
@@ -427,13 +436,14 @@ backup_now() {
     temp_backup=$(mktemp -t vmangos_backup.XXXXXX)
     temp_metadata=$(mktemp -t vmangos_metadata.XXXXXX)
     
-    # Cleanup on failure
+    # Cleanup on failure: temp artifacts and the lock only. Final artifacts
+    # are never removed here — by the time they exist, the dump itself is
+    # good and must be preserved (see the metadata finalization path below).
     cleanup_partial() {
         rm -f "$temp_backup" "$temp_metadata"
-        rm -f "$backup_file" "$metadata_file"
         backup_release_lock
     }
-    
+
     # Perform backup
     log_info "Dumping databases..."
 
@@ -443,42 +453,49 @@ backup_now() {
         cleanup_partial
         error_exit "Database dump failed" "$E_BACKUP_MYSQLDUMP"
     fi
-    
+
     local backup_size
     backup_size=$(get_file_size_bytes "$temp_backup")
+    [[ "$backup_size" =~ ^[0-9]+$ ]] || backup_size=0
     log_info "Backup size: $backup_size bytes"
-    
+
     # Generate metadata
     log_info "Generating metadata..."
-    local checksum manager_version timestamp
+    local checksum manager_version timestamp vmangos_commit
     checksum=$(sha256_file "$temp_backup")
     manager_version=$(backup_manager_version)
     timestamp=$(date -Iseconds)
-    
-    # Create metadata JSON
-    cat > "$temp_metadata" << EOF
-{
-  "timestamp": "$timestamp",
-  "file": "${basename}.sql.gz",
-  "basename": "$basename",
-  "size_bytes": $backup_size,
-  "checksum_sha256": "$checksum",
-  "databases": [$(printf '"%s",' "${BACKUP_DATABASES[@]}" | sed 's/,$//')],
-  "vmangos_commit": "e7de79f3beb1eeed7fcdcf2f4d9c057d3db6f149",
-    "created_by": "vmangos-manager $manager_version"
-}
-EOF
-    
+    vmangos_commit=$(backup_source_commit)
+
+    # Create metadata JSON (vmangos_commit only when actually resolvable)
+    local metadata_fields=(
+        "$(json_kvs timestamp "$timestamp")"
+        "$(json_kvs file "${basename}.sql.gz")"
+        "$(json_kvs basename "$basename")"
+        "$(json_kv_raw size_bytes "$backup_size")"
+        "$(json_kvs checksum_sha256 "$checksum")"
+        "$(json_kv_raw databases "$(json_string_array "${BACKUP_DATABASES[@]}")")"
+        "$(json_kvs created_by "vmangos-manager $manager_version")"
+    )
+    if [[ -n "$vmangos_commit" ]]; then
+        metadata_fields+=("$(json_kvs vmangos_commit "$vmangos_commit")")
+    fi
+    printf '%s\n' "$(json_object "${metadata_fields[@]}")" > "$temp_metadata"
+
     # Atomic move to final location
     log_info "Finalizing backup..."
     if ! mv "$temp_backup" "$backup_file"; then
         cleanup_partial
         error_exit "Failed to move backup file" "$E_BACKUP_METADATA"
     fi
-    
+
     if ! mv "$temp_metadata" "$metadata_file"; then
-        rm -f "$backup_file"
-        cleanup_partial
+        # The dump is already safely in place — keep it, drop only the
+        # orphaned temp metadata, and tell the user what survived.
+        rm -f "$temp_metadata"
+        backup_release_lock
+        log_error "Backup dump preserved: $backup_file"
+        log_error "Metadata file could not be finalized; verification and listing will be degraded"
         error_exit "Failed to move metadata file" "$E_BACKUP_METADATA"
     fi
     
@@ -497,7 +514,10 @@ EOF
     fi
     
     # Output result
-    json_output true "{\"backup_file\": \"$backup_file\", \"metadata_file\": \"$metadata_file\", \"size_bytes\": $backup_size}"
+    json_output true "$(json_object \
+        "$(json_kvs backup_file "$backup_file")" \
+        "$(json_kvs metadata_file "$metadata_file")" \
+        "$(json_kv_raw size_bytes "$backup_size")")"
     return 0
 }
 
@@ -726,7 +746,7 @@ backup_restore() {
     
     # Validate backup file
     if [[ ! -f "$backup_file" ]]; then
-        error_exit "Backup file not found: $backup_file" "$E_CONFIG_ERROR"
+        error_exit "Backup file not found: $backup_file" "$E_INVALID_ARGS"
     fi
     
     # Dry-run mode
@@ -1092,10 +1112,11 @@ backup_list() {
     printf "%-20s %-12s %-10s %s\n" "--------------------" "------------" "----------" "----"
 
     for meta_file in "${metadata_files[@]}"; do
-            local timestamp size_bytes file verified
-            timestamp=$(metadata_json_get "$meta_file" "timestamp" | cut -d'T' -f1)
-            size_bytes=$(metadata_json_get "$meta_file" "size_bytes")
-            file=$(metadata_json_get "$meta_file" "file")
+        local timestamp size_bytes file verified
+        timestamp=$(metadata_json_get "$meta_file" "timestamp" | cut -d'T' -f1)
+        size_bytes=$(metadata_json_get "$meta_file" "size_bytes")
+        [[ "$size_bytes" =~ ^[0-9]+$ ]] || size_bytes=0
+        file=$(metadata_json_get "$meta_file" "file")
             
             # Check if backup file exists and verify checksum
             local backup_file="$BACKUP_DIR/$file"
