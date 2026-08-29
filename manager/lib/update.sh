@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
 # shellcheck source=lib/common.sh
 # shellcheck source=lib/config.sh
+# shellcheck source=lib/db.sh
 #
 # Update check module for VMANGOS Manager
 #
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/db.sh"
 
 UPDATE_INSTALL_ROOT=""
 UPDATE_SOURCE_ROOT=""
 UPDATE_BUILD_ROOT=""
 UPDATE_RUN_ROOT=""
-UPDATE_DB_HOST=""
-UPDATE_DB_PORT=""
-UPDATE_DB_USER=""
-UPDATE_DB_PASSWORD=""
-UPDATE_DB_AUTH_DB=""
-UPDATE_DB_WORLD_DB=""
-UPDATE_DB_LOGS_DB=""
-UPDATE_DB_CONTEXT_LOADED=0
 UPDATE_DB_PENDING_ENTRIES=()
 UPDATE_DB_MANUAL_CHANGES=()
 UPDATE_DB_ASSESSMENT_MODE=""
@@ -251,40 +245,6 @@ update_reset_db_assessment() {
     UPDATE_DB_MANUAL_CHANGE_COUNT=0
 }
 
-update_db_load_context() {
-    [[ "$UPDATE_DB_CONTEXT_LOADED" -eq 1 ]] && return 0
-
-    config_load "$CONFIG_FILE" >/dev/null 2>&1 || {
-        log_error "Failed to load configuration: $CONFIG_FILE"
-        return 1
-    }
-
-    UPDATE_DB_HOST="${CONFIG_DATABASE_HOST:-127.0.0.1}"
-    UPDATE_DB_PORT="${CONFIG_DATABASE_PORT:-3306}"
-    UPDATE_DB_USER="${CONFIG_DATABASE_USER:-mangos}"
-    UPDATE_DB_PASSWORD="${CONFIG_DATABASE_PASSWORD:-}"
-    UPDATE_DB_AUTH_DB="${CONFIG_DATABASE_AUTH_DB:-auth}"
-    UPDATE_DB_WORLD_DB="${CONFIG_DATABASE_WORLD_DB:-world}"
-    UPDATE_DB_LOGS_DB="${CONFIG_DATABASE_LOGS_DB:-logs}"
-    UPDATE_DB_CONTEXT_LOADED=1
-}
-
-update_db_name_for_role() {
-    local role="$1"
-
-    update_db_load_context || return 1
-
-    case "$role" in
-        auth) printf '%s\n' "$UPDATE_DB_AUTH_DB" ;;
-        world) printf '%s\n' "$UPDATE_DB_WORLD_DB" ;;
-        logs) printf '%s\n' "$UPDATE_DB_LOGS_DB" ;;
-        *)
-            log_error "Unknown DB role: $role"
-            return 1
-            ;;
-    esac
-}
-
 update_db_role_label() {
     case "$1" in
         auth) printf 'auth\n' ;;
@@ -292,33 +252,6 @@ update_db_role_label() {
         logs) printf 'logs\n' ;;
         *) printf '%s\n' "$1" ;;
     esac
-}
-
-update_mysql_query() {
-    local database="$1"
-    local query="$2"
-
-    update_db_load_context || return 1
-
-    MYSQL_PWD="$UPDATE_DB_PASSWORD" mysql -N -B \
-        -h "$UPDATE_DB_HOST" \
-        -P "$UPDATE_DB_PORT" \
-        -u "$UPDATE_DB_USER" \
-        -D "$database" \
-        -e "$query"
-}
-
-update_mysql_exec_file() {
-    local database="$1"
-    local sql_file="$2"
-
-    update_db_load_context || return 1
-
-    MYSQL_PWD="$UPDATE_DB_PASSWORD" mysql \
-        -h "$UPDATE_DB_HOST" \
-        -P "$UPDATE_DB_PORT" \
-        -u "$UPDATE_DB_USER" \
-        -D "$database" < "$sql_file"
 }
 
 update_parse_migration_path() {
@@ -398,9 +331,9 @@ update_load_applied_migrations_for_role() {
             ;;
     esac
 
-    database=$(update_db_name_for_role "$role") || return 1
+    database=$(db_name_for_role "$role") || return 1
 
-    if ! table_name=$(update_mysql_query "$database" "SHOW TABLES LIKE 'migrations';" 2>/dev/null); then
+    if ! table_name=$(db_query "$database" "SHOW TABLES LIKE 'migrations';" 2>/dev/null); then
         log_error "Failed to inspect migrations table in database: $database"
         return 1
     fi
@@ -410,7 +343,7 @@ update_load_applied_migrations_for_role() {
         return 1
     fi
 
-    if ! ids=$(update_mysql_query "$database" "SELECT id FROM migrations ORDER BY id;" 2>/dev/null); then
+    if ! ids=$(db_query "$database" "SELECT id FROM migrations ORDER BY id;" 2>/dev/null); then
         log_error "Failed to read applied migrations from database: $database"
         return 1
     fi
@@ -553,7 +486,7 @@ update_db_pending_entries_json() {
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
         IFS='|' read -r source role migration_id path <<< "$entry"
-        database=$(update_db_name_for_role "$role") || return 1
+        database=$(db_name_for_role "$role") || return 1
         json+=$(printf '{"source":"%s","role":"%s","database":"%s","id":"%s","path":"%s"},' \
             "$(json_escape "$source")" \
             "$(json_escape "$role")" \
@@ -637,7 +570,7 @@ update_emit_db_inspect_result() {
         while IFS= read -r entry; do
             [[ -n "$entry" ]] || continue
             IFS='|' read -r source role migration_id path <<< "$entry"
-            database=$(update_db_name_for_role "$role") || return 1
+            database=$(db_name_for_role "$role") || return 1
             printf '  [%s] %s %s -> %s (%s)\n' "$source" "$(update_db_role_label "$role")" "$migration_id" "$database" "$path"
         done < <(printf '%s\n' "${UPDATE_DB_PENDING_ENTRIES[@]}" | sort)
     else
@@ -666,7 +599,7 @@ update_build_db_steps() {
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
         IFS='|' read -r source role migration_id path <<< "$entry"
-        database=$(update_db_name_for_role "$role") || return 1
+        database=$(db_name_for_role "$role") || return 1
         printf 'Apply migration %s to %s database (%s) from %s\n' "$migration_id" "$(update_db_role_label "$role")" "$database" "$path"
     done < <(printf '%s\n' "${UPDATE_DB_PENDING_ENTRIES[@]}" | sort)
 }
@@ -1055,7 +988,7 @@ update_apply_pending_db_migrations() {
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
         IFS='|' read -r source role migration_id path <<< "$entry"
-        database=$(update_db_name_for_role "$role") || return 1
+        database=$(db_name_for_role "$role") || return 1
         full_path="$repo_root/$path"
 
         if [[ ! -f "$full_path" ]]; then
@@ -1064,7 +997,7 @@ update_apply_pending_db_migrations() {
         fi
 
         log_info "Applying $(update_db_role_label "$role") migration $migration_id to $database"
-        if ! update_mysql_exec_file "$database" "$full_path"; then
+        if ! db_exec_file "$database" "$full_path"; then
             log_error "Failed applying migration $migration_id from $path"
             return 1
         fi

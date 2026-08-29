@@ -1,7 +1,7 @@
 .PHONY: all test lint install uninstall clean help
 
 # Shell scripts to lint
-SCRIPTS := bin/vmangos-manager install_manager.sh lib/common.sh lib/config.sh lib/server.sh lib/account.sh lib/update.sh lib/backup.sh lib/logs.sh lib/dashboard.sh
+SCRIPTS := bin/vmangos-manager install_manager.sh lib/common.sh lib/config.sh lib/db.sh lib/server.sh lib/account.sh lib/update.sh lib/backup.sh lib/logs.sh lib/dashboard.sh
 
 PREFIX ?= /opt/mangos/manager
 DESTDIR ?=

@@ -8,6 +8,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/db.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/server.sh"
 
 # ============================================================================
@@ -55,12 +56,12 @@ backup_load_config() {
     BACKUP_RETENTION_DAYS="${CONFIG_BACKUP_RETENTION_DAYS:-30}"
     BACKUP_VERIFY_AFTER="${CONFIG_BACKUP_VERIFY_AFTER:-true}"
 
-    server_load_config || {
-        log_error "Failed to load server configuration"
+    db_load_config || {
+        log_error "Failed to load database configuration"
         return 1
     }
 
-    BACKUP_DATABASES=("$AUTH_DB" "${CONFIG_DATABASE_CHARACTERS_DB:-characters}" "${CONFIG_DATABASE_WORLD_DB:-mangos}" "${CONFIG_DATABASE_LOGS_DB:-logs}")
+    BACKUP_DATABASES=("$DB_AUTH_DB" "$DB_CHARACTERS_DB" "$DB_WORLD_DB" "$DB_LOGS_DB")
     MANAGER_BIN="$(backup_resolve_manager_bin)"
     
     BACKUP_CONFIG_LOADED="1"
@@ -298,12 +299,7 @@ backup_estimate_size() {
 
     for db in "${BACKUP_DATABASES[@]}"; do
         local size
-        # MYSQL_PWD keeps credentials off the command line (visible via ps otherwise)
-        size=$(MYSQL_PWD="$DB_PASS" mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B -e "
-            SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024)
-            FROM information_schema.tables
-            WHERE table_schema = '$db'
-        " 2>/dev/null || echo "0")
+        size=$(db_query "$db" "SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024) FROM information_schema.tables WHERE table_schema = '$db'" || echo "0")
 
         if [[ "$size" =~ ^[0-9]+$ ]]; then
             total_size=$((total_size + size))
@@ -430,14 +426,8 @@ backup_now() {
     # Perform backup
     log_info "Dumping databases..."
 
-    # Dump all required databases
-    # MYSQL_PWD keeps credentials off the command line (visible via ps otherwise)
-    if ! MYSQL_PWD="$DB_PASS" mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" \
-        --single-transaction \
-        --routines \
-        --triggers \
-        --databases "${BACKUP_DATABASES[@]}" \
-        2>/dev/null | gzip > "$temp_backup"; then
+    # Dump all required databases (mysqldump itself lives in db.sh)
+    if ! db_dump "${BACKUP_DATABASES[@]}" | gzip > "$temp_backup"; then
         log_error "mysqldump failed"
         cleanup_partial
         error_exit "Database dump failed" "$E_BACKUP_MYSQLDUMP"
@@ -613,16 +603,16 @@ verify_level_2() {
     
     # Build required tables list from actual DB names
     local required_tables=(
-        "$AUTH_DB.account"
-        "$AUTH_DB.account_banned"
-        "$AUTH_DB.realmcharacters"
-        "${CONFIG_DATABASE_CHARACTERS_DB:-characters}.characters"
-        "${CONFIG_DATABASE_CHARACTERS_DB:-characters}.character_inventory"
-        "${CONFIG_DATABASE_CHARACTERS_DB:-characters}.character_homebind"
-        "${CONFIG_DATABASE_WORLD_DB:-world}.creature"
-        "${CONFIG_DATABASE_WORLD_DB:-world}.gameobject"
-        "${CONFIG_DATABASE_WORLD_DB:-world}.item_template"
-        "${CONFIG_DATABASE_WORLD_DB:-world}.quest_template"
+        "$DB_AUTH_DB.account"
+        "$DB_AUTH_DB.account_banned"
+        "$DB_AUTH_DB.realmcharacters"
+        "$DB_CHARACTERS_DB.characters"
+        "$DB_CHARACTERS_DB.character_inventory"
+        "$DB_CHARACTERS_DB.character_homebind"
+        "$DB_WORLD_DB.creature"
+        "$DB_WORLD_DB.gameobject"
+        "$DB_WORLD_DB.item_template"
+        "$DB_WORLD_DB.quest_template"
     )
     
     for table in "${required_tables[@]}"; do
@@ -636,7 +626,7 @@ verify_level_2() {
     done
 
     local logs_db_name
-    logs_db_name="${CONFIG_DATABASE_LOGS_DB:-logs}"
+    logs_db_name="$DB_LOGS_DB"
     if ! backup_dump_has_any_table_in_db "$backup_file" "$logs_db_name"; then
         missing_tables+=("$logs_db_name.<any table>")
     fi
@@ -805,51 +795,10 @@ backup_restore() {
 
 backup_restore_full() {
     local backup_file="$1"
-    local mysql_defaults
-    mysql_defaults=$(backup_restore_defaults_file) || return "$E_RESTORE_PRIVS"
-    
-    # Restore from backup using defaults file
-    local restore_result=0
-    if ! gunzip -c "$backup_file" 2>/dev/null | mysql --defaults-file="$mysql_defaults" 2>/dev/null; then
-        restore_result=1
-    fi
-    
-    # Clean up temporary file
-    rm -f "$mysql_defaults"
-    
-    return "$restore_result"
-}
 
-backup_restore_defaults_file() {
-    if [[ -n "${MYSQL_RESTORE_DEFAULTS_FILE:-}" ]]; then
-        if [[ ! -f "$MYSQL_RESTORE_DEFAULTS_FILE" ]]; then
-            log_error "Restore defaults file not found: $MYSQL_RESTORE_DEFAULTS_FILE"
-            return "$E_RESTORE_PRIVS"
-        fi
+    db_restore_credentials || return "$E_RESTORE_PRIVS"
 
-        printf '%s' "$MYSQL_RESTORE_DEFAULTS_FILE"
-        return 0
-    fi
-
-    if [[ -z "${MYSQL_RESTORE_PASSWORD:-}" ]]; then
-        log_error "Privileged restore credentials not provided"
-        log_info "Set MYSQL_RESTORE_DEFAULTS_FILE or MYSQL_RESTORE_PASSWORD before running restore"
-        return "$E_RESTORE_PRIVS"
-    fi
-
-    local restore_user="${MYSQL_RESTORE_USER:-root}"
-    local mysql_defaults
-    mysql_defaults=$(mktemp_secure vmangos_restore.XXXXXX)
-
-    cat > "$mysql_defaults" << EOF
-[client]
-host = $DB_HOST
-port = $DB_PORT
-user = $restore_user
-password = $MYSQL_RESTORE_PASSWORD
-EOF
-
-    printf '%s' "$mysql_defaults"
+    db_restore "$backup_file"
 }
 
 backup_restore_dry_run() {

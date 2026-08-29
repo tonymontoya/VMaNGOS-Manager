@@ -593,8 +593,8 @@ config_detect_analyze_candidate() {
     fi
 
     if [[ -z "$CONFIG_DETECT_CURRENT_WORLD_DB" ]]; then
-        CONFIG_DETECT_CURRENT_WORLD_DB="world"
-        config_detect_add_assumption "World DB name could not be detected; defaulting to world"
+        CONFIG_DETECT_CURRENT_WORLD_DB="mangos"
+        config_detect_add_assumption "World DB name could not be detected; defaulting to mangos"
     fi
 
     if [[ -z "$CONFIG_DETECT_CURRENT_LOGS_DB" ]]; then
@@ -844,7 +844,7 @@ config_create() {
     default_db_user="${VMANGOS_DB_USER:-mangos}"
     default_auth_db="${VMANGOS_AUTH_DB:-auth}"
     default_characters_db="${VMANGOS_CHAR_DB:-characters}"
-    default_world_db="${VMANGOS_WORLD_DB:-world}"
+    default_world_db="${VMANGOS_WORLD_DB:-mangos}"
     default_logs_db="${VMANGOS_LOGS_DB:-logs}"
     
     log_info "Creating default config: $config_path"

@@ -7,25 +7,15 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/db.sh"
 
 ACCOUNT_CONFIG_LOADED=""
-ACCOUNT_DB_HOST=""
-ACCOUNT_DB_PORT=""
-ACCOUNT_DB_USER=""
-ACCOUNT_DB_PASS=""
-ACCOUNT_AUTH_DB=""
 ACCOUNT_PASSWORD_VALUE=""
 
 account_load_config() {
     [[ "$ACCOUNT_CONFIG_LOADED" == "1" ]] && return 0
 
-    config_load "$CONFIG_FILE" || return 1
-
-    ACCOUNT_DB_HOST="${CONFIG_DATABASE_HOST:-127.0.0.1}"
-    ACCOUNT_DB_PORT="${CONFIG_DATABASE_PORT:-3306}"
-    ACCOUNT_DB_USER="${CONFIG_DATABASE_USER:-mangos}"
-    ACCOUNT_DB_PASS="${CONFIG_DATABASE_PASSWORD:-}"
-    ACCOUNT_AUTH_DB="${CONFIG_DATABASE_AUTH_DB:-auth}"
+    db_load_config || return 1
 
     ACCOUNT_CONFIG_LOADED="1"
     return 0
@@ -244,36 +234,16 @@ duration_to_seconds() {
     esac
 }
 
-account_mysql_query() {
-    local database="$1"
-    local query="$2"
-
-    account_load_config || return 1
-
-    # MYSQL_PWD keeps credentials off the command line (visible via ps otherwise)
-    MYSQL_PWD="$ACCOUNT_DB_PASS" mysql -h "$ACCOUNT_DB_HOST" -P "$ACCOUNT_DB_PORT" -u "$ACCOUNT_DB_USER" -N -B -e "$query" "$database" 2>/dev/null
-}
-
-account_mysql_exec() {
-    local database="$1"
-    local query="$2"
-
-    account_load_config || return 1
-
-    # MYSQL_PWD keeps credentials off the command line (visible via ps otherwise)
-    MYSQL_PWD="$ACCOUNT_DB_PASS" mysql -h "$ACCOUNT_DB_HOST" -P "$ACCOUNT_DB_PORT" -u "$ACCOUNT_DB_USER" -N -B -e "$query" "$database" >/dev/null 2>&1
-}
-
 account_resolve_account_id() {
     local username="$1"
     account_load_config || return 1
-    account_mysql_query "$ACCOUNT_AUTH_DB" "SELECT id FROM ${ACCOUNT_AUTH_DB}.account WHERE username = '${username}' LIMIT 1" | head -1
+    db_query "$DB_AUTH_DB" "SELECT id FROM ${DB_AUTH_DB}.account WHERE username = '${username}' LIMIT 1" | head -1
 }
 
 account_get_default_realm_id() {
     local realm_id
     account_load_config || return 1
-    realm_id=$(account_mysql_query "$ACCOUNT_AUTH_DB" "SELECT COALESCE(MIN(id), 1) FROM ${ACCOUNT_AUTH_DB}.realmlist" | head -1 || true)
+    realm_id=$(db_query "$DB_AUTH_DB" "SELECT COALESCE(MIN(id), 1) FROM ${DB_AUTH_DB}.realmlist" | head -1 || true)
     if [[ "$realm_id" =~ ^[0-9]+$ ]]; then
         printf '%s\n' "$realm_id"
     else
@@ -336,9 +306,9 @@ SELECT
     WHEN MAX(CASE WHEN ab.active = 1 AND (ab.unbandate > UNIX_TIMESTAMP() OR ab.unbandate = ab.bandate) THEN 1 ELSE 0 END) = 1 THEN 1
     ELSE 0
   END AS banned
-FROM ${ACCOUNT_AUTH_DB}.account a
-LEFT JOIN ${ACCOUNT_AUTH_DB}.account_access aa ON aa.id = a.id
-LEFT JOIN ${ACCOUNT_AUTH_DB}.account_banned ab ON ab.id = a.id
+FROM ${DB_AUTH_DB}.account a
+LEFT JOIN ${DB_AUTH_DB}.account_access aa ON aa.id = a.id
+LEFT JOIN ${DB_AUTH_DB}.account_banned ab ON ab.id = a.id
 ${where_clause}
 GROUP BY a.id, a.username, a.gmlevel, a.online
 ORDER BY a.id
@@ -355,7 +325,7 @@ account_list() {
     }
 
     query=$(account_build_list_query "$online_only")
-    results=$(account_mysql_query "$ACCOUNT_AUTH_DB" "$query") || {
+    results=$(db_query "$DB_AUTH_DB" "$query") || {
         account_emit_error "DB_ERROR" "Failed to list accounts" "Check database connectivity and credentials"
         return 1
     }
@@ -432,12 +402,12 @@ account_create() {
     salt="${hash%%|*}"
     verifier="${hash##*|}"
 
-    if ! account_mysql_exec "$ACCOUNT_AUTH_DB" "
-INSERT INTO \`${ACCOUNT_AUTH_DB}\`.\`account\` (\`username\`, \`v\`, \`s\`, \`token_key\`, \`joindate\`) VALUES ('${username}', '${verifier}', '${salt}', '', NOW());
+    if ! db_exec "$DB_AUTH_DB" "
+INSERT INTO \`${DB_AUTH_DB}\`.\`account\` (\`username\`, \`v\`, \`s\`, \`token_key\`, \`joindate\`) VALUES ('${username}', '${verifier}', '${salt}', '', NOW());
 SET @account_id = LAST_INSERT_ID();
-INSERT IGNORE INTO \`${ACCOUNT_AUTH_DB}\`.\`realmcharacters\` (\`realmid\`, \`acctid\`, \`numchars\`)
+INSERT IGNORE INTO \`${DB_AUTH_DB}\`.\`realmcharacters\` (\`realmid\`, \`acctid\`, \`numchars\`)
 SELECT \`id\`, @account_id, 0
-FROM \`${ACCOUNT_AUTH_DB}\`.\`realmlist\`;
+FROM \`${DB_AUTH_DB}\`.\`realmlist\`;
 "; then
         account_emit_error "DB_ERROR" "Failed to create account" "Check database connectivity and privileges"
         return 1
@@ -476,18 +446,18 @@ account_setgm() {
     fi
 
     if [[ "$gm_level" == "0" ]]; then
-        if ! account_mysql_exec "$ACCOUNT_AUTH_DB" "
-UPDATE \`${ACCOUNT_AUTH_DB}\`.\`account\` SET \`gmlevel\` = 0 WHERE \`id\` = ${account_id};
-DELETE FROM \`${ACCOUNT_AUTH_DB}\`.\`account_access\` WHERE \`id\` = ${account_id};
+        if ! db_exec "$DB_AUTH_DB" "
+UPDATE \`${DB_AUTH_DB}\`.\`account\` SET \`gmlevel\` = 0 WHERE \`id\` = ${account_id};
+DELETE FROM \`${DB_AUTH_DB}\`.\`account_access\` WHERE \`id\` = ${account_id};
 "; then
             account_emit_error "DB_ERROR" "Failed to clear GM level for $username" "Check database connectivity and privileges"
             return 1
         fi
     else
-        if ! account_mysql_exec "$ACCOUNT_AUTH_DB" "
-UPDATE \`${ACCOUNT_AUTH_DB}\`.\`account\` SET \`gmlevel\` = ${gm_level} WHERE \`id\` = ${account_id};
-DELETE FROM \`${ACCOUNT_AUTH_DB}\`.\`account_access\` WHERE \`id\` = ${account_id};
-INSERT INTO \`${ACCOUNT_AUTH_DB}\`.\`account_access\` (\`id\`, \`gmlevel\`, \`RealmID\`) VALUES (${account_id}, ${gm_level}, -1);
+        if ! db_exec "$DB_AUTH_DB" "
+UPDATE \`${DB_AUTH_DB}\`.\`account\` SET \`gmlevel\` = ${gm_level} WHERE \`id\` = ${account_id};
+DELETE FROM \`${DB_AUTH_DB}\`.\`account_access\` WHERE \`id\` = ${account_id};
+INSERT INTO \`${DB_AUTH_DB}\`.\`account_access\` (\`id\`, \`gmlevel\`, \`RealmID\`) VALUES (${account_id}, ${gm_level}, -1);
 "; then
             account_emit_error "DB_ERROR" "Failed to set GM level for $username" "Check database connectivity and privileges"
             return 1
@@ -540,9 +510,9 @@ account_ban() {
     actor=$(printf '%s' "$actor" | tr -cd 'A-Za-z0-9 _-')
     [[ -n "$actor" ]] || actor="manager"
 
-    if ! account_mysql_exec "$ACCOUNT_AUTH_DB" "
-UPDATE \`${ACCOUNT_AUTH_DB}\`.\`account_banned\` SET \`active\` = 0 WHERE \`id\` = ${account_id};
-INSERT INTO \`${ACCOUNT_AUTH_DB}\`.\`account_banned\` (\`id\`, \`bandate\`, \`unbandate\`, \`bannedby\`, \`banreason\`, \`active\`, \`realm\`)
+    if ! db_exec "$DB_AUTH_DB" "
+UPDATE \`${DB_AUTH_DB}\`.\`account_banned\` SET \`active\` = 0 WHERE \`id\` = ${account_id};
+INSERT INTO \`${DB_AUTH_DB}\`.\`account_banned\` (\`id\`, \`bandate\`, \`unbandate\`, \`bannedby\`, \`banreason\`, \`active\`, \`realm\`)
 VALUES (${account_id}, UNIX_TIMESTAMP(), UNIX_TIMESTAMP() + ${seconds}, '${actor}', '${reason}', 1, ${realm_id});
 "; then
         account_emit_error "DB_ERROR" "Failed to ban account: $username" "Check database connectivity and privileges"
@@ -574,7 +544,7 @@ account_unban() {
         return 1
     fi
 
-    if ! account_mysql_exec "$ACCOUNT_AUTH_DB" "UPDATE \`${ACCOUNT_AUTH_DB}\`.\`account_banned\` SET \`active\` = 0 WHERE \`id\` = ${account_id}"; then
+    if ! db_exec "$DB_AUTH_DB" "UPDATE \`${DB_AUTH_DB}\`.\`account_banned\` SET \`active\` = 0 WHERE \`id\` = ${account_id}"; then
         account_emit_error "DB_ERROR" "Failed to unban account: $username" "Check database connectivity and privileges"
         return 1
     fi
@@ -616,7 +586,7 @@ account_password() {
     salt="${hash%%|*}"
     verifier="${hash##*|}"
 
-    if ! account_mysql_exec "$ACCOUNT_AUTH_DB" "UPDATE \`${ACCOUNT_AUTH_DB}\`.\`account\` SET \`v\` = '${verifier}', \`s\` = '${salt}' WHERE \`id\` = ${account_id}"; then
+    if ! db_exec "$DB_AUTH_DB" "UPDATE \`${DB_AUTH_DB}\`.\`account\` SET \`v\` = '${verifier}', \`s\` = '${salt}' WHERE \`id\` = ${account_id}"; then
         account_emit_error "DB_ERROR" "Failed to update password for $username" "Check database connectivity and privileges"
         return 1
     fi

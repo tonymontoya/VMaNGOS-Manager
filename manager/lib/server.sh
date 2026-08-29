@@ -8,6 +8,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/db.sh"
 
 # ============================================================================
 # CONFIGURATION (Loaded from config file, not hardcoded)
@@ -17,11 +18,6 @@ SERVER_CONFIG_LOADED=""
 AUTH_SERVICE=""
 WORLD_SERVICE=""
 INSTALL_ROOT=""
-DB_HOST=""
-DB_PORT=""
-DB_USER=""
-DB_PASS=""
-AUTH_DB=""
 SERVER_CRASH_LOOP_THRESHOLD="${SERVER_CRASH_LOOP_THRESHOLD:-3}"
 SERVER_CPU_WARN_PERCENT="${SERVER_CPU_WARN_PERCENT:-75}"
 SERVER_CPU_CRIT_PERCENT="${SERVER_CPU_CRIT_PERCENT:-90}"
@@ -42,7 +38,7 @@ declare -a STATUS_RECENT_EVENTS=()
 server_load_config() {
     [[ "$SERVER_CONFIG_LOADED" == "1" ]] && return 0
     
-    config_load "$CONFIG_FILE" || {
+    db_load_config || {
         log_error "Failed to load configuration"
         return 1
     }
@@ -50,43 +46,25 @@ server_load_config() {
     AUTH_SERVICE="${CONFIG_SERVER_AUTH_SERVICE:-auth}"
     WORLD_SERVICE="${CONFIG_SERVER_WORLD_SERVICE:-world}"
     INSTALL_ROOT="${CONFIG_SERVER_INSTALL_ROOT:-/opt/mangos}"
-    DB_HOST="${CONFIG_DATABASE_HOST:-127.0.0.1}"
-    DB_PORT="${CONFIG_DATABASE_PORT:-3306}"
-    DB_USER="${CONFIG_DATABASE_USER:-mangos}"
-    DB_PASS="${CONFIG_DATABASE_PASSWORD:-}"
-    AUTH_DB="${CONFIG_DATABASE_AUTH_DB:-auth}"
     
     SERVER_CONFIG_LOADED="1"
     log_debug "Server configuration loaded"
 }
 
 # ============================================================================
-# DATABASE UTILITIES (Config-driven credentials)
+# ONLINE PLAYER METRICS
 # ============================================================================
-
-db_check_connection() {
-    server_mysql_query "$AUTH_DB" "SELECT 1" >/dev/null
-}
-
-server_mysql_query() {
-    local database="$1"
-    local query="$2"
-
-    # MYSQL_PWD keeps credentials off the command line (visible via ps otherwise)
-    MYSQL_PWD="$DB_PASS" mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B -e "$query" "$database" 2>/dev/null
-}
 
 get_online_player_count_result() {
     local count
 
-    count=$(server_mysql_query "$AUTH_DB" "SELECT COUNT(*) FROM ${AUTH_DB}.account WHERE online = 1" || true)
+    count=$(db_query "$DB_AUTH_DB" "SELECT COUNT(*) FROM ${DB_AUTH_DB}.account WHERE online = 1" || true)
     if [[ "$count" =~ ^[0-9]+$ ]]; then
         printf '%s|auth.account.online\n' "$count"
         return 0
     fi
 
-    local characters_db="${CONFIG_DATABASE_CHARACTERS_DB:-characters}"
-    count=$(server_mysql_query "$characters_db" "SELECT COUNT(*) FROM ${characters_db}.characters WHERE online = 1" || true)
+    count=$(db_query "$DB_CHARACTERS_DB" "SELECT COUNT(*) FROM ${DB_CHARACTERS_DB}.characters WHERE online = 1" || true)
     if [[ "$count" =~ ^[0-9]+$ ]]; then
         printf '%s|characters.characters.online\n' "$count"
         return 0

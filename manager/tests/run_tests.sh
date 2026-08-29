@@ -730,6 +730,212 @@ EOF
     return $all_passed
 }
 
+test_db_module_invocations() {
+    # shellcheck source=../lib/db.sh
+    source "$LIB_DIR/db.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local query_args="" dump_args="" exec_file_input="" exec_file_args=""
+    local sql_tmp
+
+    DB_CONFIG_LOADED="1"
+    DB_HOST="dbhost"
+    DB_PORT="3307"
+    DB_USER="dbuser"
+    DB_PASS="sekret"
+    DB_AUTH_DB="auth"
+
+    mysql() {
+        query_args="pwd=${MYSQL_PWD:-unset}|args=$*"
+        return "${MYSQL_MOCK_STATUS:-0}"
+    }
+    mysqldump() {
+        dump_args="pwd=${MYSQL_PWD:-unset}|args=$*"
+        return "${MYSQLDUMP_MOCK_STATUS:-0}"
+    }
+
+    db_query auth "SELECT 1"
+    assert_equals "pwd=sekret|args=-h dbhost -P 3307 -u dbuser -N -B -e SELECT 1 auth" "$query_args" "db_query shapes mysql invocation" || all_passed=1
+    assert_true "[[ \$query_args != *'-p'* ]]" "db_query never puts password on command line" || all_passed=1
+
+    MYSQL_MOCK_STATUS=1
+    if db_exec auth "UPDATE t SET x = 1"; then
+        echo -e "${RED}✗${NC} db_exec propagates mysql failure"
+        all_passed=1
+    else
+        echo -e "${GREEN}✓${NC} db_exec propagates mysql failure"
+    fi
+    if db_check_connection; then
+        echo -e "${RED}✗${NC} db_check_connection fails when mysql fails"
+        all_passed=1
+    else
+        echo -e "${GREEN}✓${NC} db_check_connection fails when mysql fails"
+    fi
+    unset MYSQL_MOCK_STATUS
+
+    mysql() {
+        exec_file_args="pwd=${MYSQL_PWD:-unset}|args=$*"
+        exec_file_input=$(cat)
+        return 0
+    }
+    sql_tmp=$(mktemp)
+    printf 'UPDATE world.creature SET id = 1;\n' > "$sql_tmp"
+    db_exec_file world "$sql_tmp"
+    assert_equals "pwd=sekret|args=-h dbhost -P 3307 -u dbuser -D world" "$exec_file_args" "db_exec_file shapes mysql invocation" || all_passed=1
+    assert_equals "UPDATE world.creature SET id = 1;" "$exec_file_input" "db_exec_file streams sql file to mysql stdin" || all_passed=1
+
+    query_args=""
+    db_exec_file world "/nonexistent/file.sql" >/dev/null 2>&1 || true
+    assert_equals "" "$query_args" "db_exec_file rejects unreadable sql file before mysql" || all_passed=1
+
+    db_dump auth characters mangos logs
+    assert_equals "pwd=sekret|args=-h dbhost -P 3307 -u dbuser --single-transaction --routines --triggers --databases auth characters mangos logs" "$dump_args" "db_dump shapes mysqldump invocation" || all_passed=1
+    assert_true "[[ \$dump_args != *'-p'* ]]" "db_dump never puts password on command line" || all_passed=1
+
+    unset -f mysql mysqldump
+    unset MYSQL_MOCK_STATUS MYSQLDUMP_MOCK_STATUS
+    rm -f "$sql_tmp"
+    return $all_passed
+}
+
+test_db_restore_credentials_and_invocation() {
+    # shellcheck source=../lib/db.sh
+    source "$LIB_DIR/db.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+    local restore_args="" gunzip_input=""
+    local backup_tmp restore_defaults_tmp capture_args_file capture_input_file
+
+    DB_CONFIG_LOADED="1"
+    DB_HOST="dbhost"
+    DB_PORT="3307"
+    DB_USER="dbuser"
+    DB_PASS="sekret"
+
+    unset MYSQL_RESTORE_DEFAULTS_FILE MYSQL_RESTORE_PASSWORD MYSQL_RESTORE_USER
+
+    if db_restore_credentials >/dev/null 2>&1; then
+        echo -e "${RED}✗${NC} db_restore_credentials rejects missing privileged credentials"
+        all_passed=1
+    else
+        echo -e "${GREEN}✓${NC} db_restore_credentials rejects missing privileged credentials"
+    fi
+
+    MYSQL_RESTORE_PASSWORD="rootpw"
+    if ! db_restore_credentials >/dev/null 2>&1; then
+        echo -e "${RED}✗${NC} db_restore_credentials accepts MYSQL_RESTORE_PASSWORD"
+        all_passed=1
+    fi
+
+    unset MYSQL_RESTORE_PASSWORD
+    MYSQL_RESTORE_DEFAULTS_FILE="/nonexistent/restore.cnf"
+    if db_restore_credentials >/dev/null 2>&1; then
+        echo -e "${RED}✗${NC} db_restore_credentials rejects missing defaults file"
+        all_passed=1
+    else
+        echo -e "${GREEN}✓${NC} db_restore_credentials rejects missing defaults file"
+    fi
+
+    restore_defaults_tmp=$(mktemp)
+    chmod 644 "$restore_defaults_tmp"
+    MYSQL_RESTORE_DEFAULTS_FILE="$restore_defaults_tmp"
+    if db_restore_credentials >/dev/null 2>&1; then
+        echo -e "${RED}✗${NC} db_restore_credentials rejects world-readable defaults file"
+        all_passed=1
+    else
+        echo -e "${GREEN}✓${NC} db_restore_credentials rejects world-readable defaults file"
+    fi
+
+    chmod 600 "$restore_defaults_tmp"
+    if ! db_restore_credentials >/dev/null 2>&1; then
+        echo -e "${RED}✗${NC} db_restore_credentials accepts mode-600 defaults file"
+        all_passed=1
+    else
+        echo -e "${GREEN}✓${NC} db_restore_credentials accepts mode-600 defaults file"
+    fi
+    unset MYSQL_RESTORE_DEFAULTS_FILE
+
+    # The mysql stub runs inside a pipeline subshell, so captures must go
+    # through files to be visible after db_restore returns.
+    capture_args_file=$(mktemp)
+    capture_input_file=$(mktemp)
+    mysql() {
+        printf 'pwd=%s|args=%s\n' "${MYSQL_PWD:-unset}" "$*" > "$CAPTURE_ARGS_FILE"
+        cat > "$CAPTURE_INPUT_FILE"
+        return 0
+    }
+    gunzip() { printf 'DUMPDATA'; }
+
+    backup_tmp=$(mktemp)
+    unset MYSQL_RESTORE_DEFAULTS_FILE
+    MYSQL_RESTORE_PASSWORD="rootpw"
+    CAPTURE_ARGS_FILE="$capture_args_file"
+    CAPTURE_INPUT_FILE="$capture_input_file"
+    db_restore "$backup_tmp"
+    restore_args=$(cat "$capture_args_file")
+    gunzip_input=$(cat "$capture_input_file")
+    assert_equals "pwd=rootpw|args=-h dbhost -P 3307 -u root" "$restore_args" "db_restore uses privileged password via MYSQL_PWD as root" || all_passed=1
+    assert_equals "DUMPDATA" "$gunzip_input" "db_restore streams gunzip output into mysql" || all_passed=1
+    assert_true "[[ \$restore_args != *'-p'* ]]" "db_restore never puts password on command line" || all_passed=1
+
+    restore_defaults_tmp=$(mktemp)
+    unset MYSQL_RESTORE_PASSWORD
+    MYSQL_RESTORE_DEFAULTS_FILE="$restore_defaults_tmp"
+    db_restore "$backup_tmp"
+    restore_args=$(cat "$capture_args_file")
+    assert_equals "pwd=unset|args=--defaults-file=$restore_defaults_tmp" "$restore_args" "db_restore honors MYSQL_RESTORE_DEFAULTS_FILE" || all_passed=1
+
+    unset MYSQL_RESTORE_DEFAULTS_FILE
+    if db_restore "$backup_tmp" >/dev/null 2>&1; then
+        echo -e "${RED}✗${NC} db_restore fails without privileged credentials"
+        all_passed=1
+    else
+        echo -e "${GREEN}✓${NC} db_restore fails without privileged credentials"
+    fi
+
+    unset -f mysql gunzip
+    unset CAPTURE_ARGS_FILE CAPTURE_INPUT_FILE
+    rm -f "$backup_tmp" "$restore_defaults_tmp" "$capture_args_file" "$capture_input_file"
+    return $all_passed
+}
+
+test_db_load_config_defaults() {
+    # shellcheck source=../lib/db.sh
+    source "$LIB_DIR/db.sh"
+    SKIP_ROOT_INIT=1
+
+    local all_passed=0
+
+    unset CONFIG_DATABASE_HOST CONFIG_DATABASE_PORT CONFIG_DATABASE_USER CONFIG_DATABASE_PASSWORD
+    unset CONFIG_DATABASE_AUTH_DB CONFIG_DATABASE_CHARACTERS_DB CONFIG_DATABASE_WORLD_DB CONFIG_DATABASE_LOGS_DB
+
+    config_load() { return 0; }
+
+    db_load_config
+    assert_equals "127.0.0.1" "$DB_HOST" "db_load_config default host" || all_passed=1
+    assert_equals "3306" "$DB_PORT" "db_load_config default port" || all_passed=1
+    assert_equals "mangos" "$DB_USER" "db_load_config default user" || all_passed=1
+    assert_equals "auth" "$DB_AUTH_DB" "db_load_config default auth db" || all_passed=1
+    assert_equals "characters" "$DB_CHARACTERS_DB" "db_load_config default characters db" || all_passed=1
+    assert_equals "mangos" "$DB_WORLD_DB" "db_load_config default world db (single canonical default)" || all_passed=1
+    assert_equals "logs" "$DB_LOGS_DB" "db_load_config default logs db" || all_passed=1
+
+    CONFIG_DATABASE_HOST="10.0.0.9"
+    CONFIG_DATABASE_WORLD_DB="customworld"
+    db_load_config
+    assert_equals "127.0.0.1" "$DB_HOST" "db_load_config is idempotent (sentinel guards reload)" || all_passed=1
+
+    DB_CONFIG_LOADED=""
+    db_load_config
+    assert_equals "10.0.0.9" "$DB_HOST" "db_load_config reads CONFIG_DATABASE_* overrides" || all_passed=1
+    assert_equals "customworld" "$DB_WORLD_DB" "db_load_config reads world db override" || all_passed=1
+
+    unset -f config_load
+    return $all_passed
+}
+
 test_cli_parsing() {
     local all_passed=0
     assert_file_exists "$MANAGER_DIR/bin/vmangos-manager" "CLI binary exists" || all_passed=1
@@ -920,8 +1126,8 @@ test_account_create_blocks_injection() {
     local all_passed=0
     local mysql_called=0
 
-    account_mysql_query() { mysql_called=1; echo "1"; }
-    account_mysql_exec() { mysql_called=1; return 0; }
+    db_query() { mysql_called=1; echo "1"; }
+    db_exec() { mysql_called=1; return 0; }
 
     if ! account_create "bad'user" "env" "" >/dev/null 2>&1; then
         echo -e "${GREEN}✓${NC} account_create rejects SQL-injection username before DB access"
@@ -944,7 +1150,8 @@ test_account_operations_generate_expected_queries() {
 
     CONFIG_FILE="/tmp/test-manager.conf"
     ACCOUNT_CONFIG_LOADED=""
-    ACCOUNT_AUTH_DB=""
+    DB_CONFIG_LOADED=""
+    DB_AUTH_DB=""
     output_file=$(mktemp)
 
     config_load() {
@@ -966,36 +1173,36 @@ test_account_operations_generate_expected_queries() {
     }
     account_acquire_password() { printf 'Secret7\n'; }
     hash_password() { printf 'SALT64|VERIFIER64\n'; }
-    account_mysql_exec() { exec_query="$2"; return 0; }
+    db_exec() { exec_query="$2"; return 0; }
 
     account_create "TestUser" "env" "" > "$output_file" 2>&1
     output=$(cat "$output_file")
-    assert_equals "auth" "$ACCOUNT_AUTH_DB" "account_create loads auth DB config in parent shell" || all_passed=1
+    assert_equals "auth" "$DB_AUTH_DB" "account_create loads auth DB config in parent shell" || all_passed=1
     assert_true "[[ \$exec_query == *'INSERT INTO'* && \$exec_query == *'account'* ]]" "account_create writes auth.account insert" || all_passed=1
     assert_true "[[ \$exec_query == *'LAST_INSERT_ID()'* && \$exec_query == *'INSERT IGNORE INTO'* && \$exec_query == *'realmcharacters'* ]]" "account_create syncs realmcharacters from inserted account id" || all_passed=1
     assert_true "[[ \$output == *'AUDIT account.create'* ]]" "account_create emits audit log" || all_passed=1
 
     account_resolve_account_id() { printf '42\n'; }
-    account_mysql_exec() { exec_query="$2"; return 0; }
+    db_exec() { exec_query="$2"; return 0; }
     account_setgm "TestUser" "2" > "$output_file" 2>&1
     output=$(cat "$output_file")
     assert_true "[[ \$exec_query == *'account_access'* && \$exec_query == *'VALUES (42, 2, -1)'* ]]" "account_setgm writes global account_access row" || all_passed=1
     assert_true "[[ \$output == *'AUDIT account.setgm'* ]]" "account_setgm emits audit log" || all_passed=1
 
     account_get_default_realm_id() { printf '7\n'; }
-    account_mysql_exec() { exec_query="$2"; return 0; }
+    db_exec() { exec_query="$2"; return 0; }
     account_ban "TestUser" "1h" "Bad Actor" > "$output_file" 2>&1
     output=$(cat "$output_file")
     assert_true "[[ \$exec_query == *'account_banned'* && \$exec_query == *'UNIX_TIMESTAMP() + 3600'* && \$exec_query == *', 7);'* ]]" "account_ban inserts timed ban with resolved realm" || all_passed=1
     assert_true "[[ \$output == *'AUDIT account.ban'* ]]" "account_ban emits audit log" || all_passed=1
 
-    account_mysql_exec() { exec_query="$2"; return 0; }
+    db_exec() { exec_query="$2"; return 0; }
     account_unban "TestUser" > "$output_file" 2>&1
     output=$(cat "$output_file")
     assert_true "[[ \$exec_query == *'active'* && \$exec_query == *'= 0'* ]]" "account_unban clears active bans" || all_passed=1
     assert_true "[[ \$output == *'AUDIT account.unban'* ]]" "account_unban emits audit log" || all_passed=1
 
-    account_mysql_exec() { exec_query="$2"; return 0; }
+    db_exec() { exec_query="$2"; return 0; }
     account_password "TestUser" "env" "/unused" > "$output_file" 2>&1 <<<''
     output=$(cat "$output_file")
     assert_true "[[ \$exec_query == *\"VERIFIER64\"* && \$exec_query == *\"SALT64\"* ]]" "account_password writes verifier update query" || all_passed=1
@@ -1014,12 +1221,13 @@ test_account_password_env_not_forwarded_to_python() {
     local env_seen_file output_file output
 
     ACCOUNT_CONFIG_LOADED=1
-    ACCOUNT_AUTH_DB="auth"
+    DB_CONFIG_LOADED=1
+    DB_AUTH_DB="auth"
     env_seen_file=$(mktemp)
     output_file=$(mktemp)
 
     account_resolve_account_id() { printf '42\n'; }
-    account_mysql_exec() { return 0; }
+    db_exec() { return 0; }
     export VMANGOS_PASSWORD="Secret7"
 
     python3() {
@@ -1048,9 +1256,10 @@ test_account_list_json_output() {
     local output compact_output
 
     ACCOUNT_CONFIG_LOADED=1
-    ACCOUNT_AUTH_DB="auth"
+    DB_CONFIG_LOADED=1
+    DB_AUTH_DB="auth"
     OUTPUT_FORMAT="json"
-    account_mysql_query() {
+    db_query() {
         printf '42\tTESTUSER\t2\t1\t0\n'
         printf '43\tOTHER\t0\t0\t1\n'
     }
@@ -1515,7 +1724,7 @@ test_update_inspect_reports_supported_db_migrations() {
         return 0
     }
     update_list_current_migration_files() { return 0; }
-    update_mysql_query() {
+    db_query() {
         local database="$1"
         local query="$2"
         if [[ "$query" == "SHOW TABLES LIKE 'migrations';" ]]; then
@@ -1585,7 +1794,7 @@ test_update_plan_include_db_reports_manual_review() {
     }
     update_nproc() { printf '4\n'; }
     update_list_current_migration_files() { return 0; }
-    update_mysql_query() {
+    db_query() {
         local query="$2"
         if [[ "$query" == "SHOW TABLES LIKE 'migrations';" ]]; then
             printf 'migrations\n'
@@ -1671,7 +1880,7 @@ test_update_apply_include_db_runs_migrations() {
             printf 'sql/migrations/20260420000000_world.sql\n'
         fi
     }
-    update_mysql_query() {
+    db_query() {
         local database="$1"
         local query="$2"
         if [[ "$query" == "SHOW TABLES LIKE 'migrations';" ]]; then
@@ -1684,7 +1893,7 @@ test_update_apply_include_db_runs_migrations() {
             logs) printf '20221008210304\n' ;;
         esac
     }
-    update_mysql_exec_file() {
+    db_exec_file() {
         local database="$1"
         local sql_file="$2"
         printf 'db:%s:%s|\n' "$database" "$(basename "$sql_file")" >> "$call_log_file"
@@ -2532,12 +2741,13 @@ test_server_player_count_fallback() {
 
     local all_passed=0
 
+    DB_CONFIG_LOADED="1"
     DB_HOST="127.0.0.1"
     DB_PORT="3306"
     DB_USER="mangos"
     DB_PASS=""
-    AUTH_DB="auth"
-    CONFIG_DATABASE_CHARACTERS_DB="characters"
+    DB_AUTH_DB="auth"
+    DB_CHARACTERS_DB="characters"
 
     mysql() {
         local args="$*"
@@ -3677,10 +3887,11 @@ EOF
 {"checksum_sha256":"$checksum"}
 EOF
 
-        AUTH_DB="auth"
-        CONFIG_DATABASE_CHARACTERS_DB="characters"
-        CONFIG_DATABASE_WORLD_DB="mangos"
-        CONFIG_DATABASE_LOGS_DB="logs"
+        DB_CONFIG_LOADED="1"
+        DB_AUTH_DB="auth"
+        DB_CHARACTERS_DB="characters"
+        DB_WORLD_DB="mangos"
+        DB_LOGS_DB="logs"
 
         if verify_level_2 "$dump_file" >/dev/null 2>&1; then
                 echo -e "${GREEN}✓${NC} verify_level_2 validates required tables within the correct database sections"
@@ -3754,17 +3965,17 @@ EOF
     backup_load_config() {
         backup_loaded=1
         BACKUP_CONFIG_LOADED=1
-        CONFIG_DATABASE_AUTH_DB="auth"
-        CONFIG_DATABASE_CHARACTERS_DB="characters"
-        CONFIG_DATABASE_WORLD_DB="world"
-        CONFIG_DATABASE_LOGS_DB="logs"
+        DB_CONFIG_LOADED=1
+        DB_AUTH_DB="auth"
+        DB_CHARACTERS_DB="characters"
+        DB_WORLD_DB="world"
+        DB_LOGS_DB="logs"
         return 0
     }
 
     server_load_config() {
         server_loaded=1
         SERVER_CONFIG_LOADED=1
-        AUTH_DB="auth"
         return 0
     }
 
@@ -3773,7 +3984,7 @@ EOF
     }
 
     verify_level_2() {
-        [[ "$backup_loaded" -eq 1 && "$server_loaded" -eq 1 && "$AUTH_DB" == "auth" && "$CONFIG_DATABASE_WORLD_DB" == "world" ]]
+        [[ "$backup_loaded" -eq 1 && "$server_loaded" -eq 1 && "$DB_AUTH_DB" == "auth" && "$DB_WORLD_DB" == "world" ]]
     }
 
     if backup_verify "$dump_file" 2 >/dev/null 2>&1; then
@@ -3798,13 +4009,14 @@ test_backup_restore_requires_explicit_credentials() {
     local all_passed=0
     unset MYSQL_RESTORE_DEFAULTS_FILE MYSQL_RESTORE_PASSWORD MYSQL_RESTORE_USER MYSQL_ROOT_PASSWORD
 
+    DB_CONFIG_LOADED="1"
     DB_HOST="127.0.0.1"
     DB_PORT="3306"
 
-    if ! backup_restore_defaults_file >/dev/null 2>&1; then
-        echo -e "${GREEN}✓${NC} restore defaults helper rejects missing privileged credentials"
+    if ! backup_restore_full /dev/null >/dev/null 2>&1; then
+        echo -e "${GREEN}✓${NC} restore path rejects missing privileged credentials"
     else
-        echo -e "${RED}✗${NC} restore defaults helper accepted missing privileged credentials"
+        echo -e "${RED}✗${NC} restore path accepted missing privileged credentials"
         all_passed=1
     fi
 
@@ -3827,6 +4039,9 @@ main() {
     run_test "Config: Detect installer layout" test_config_detect_installer_layout
     run_test "Config: Detect custom path JSON" test_config_detect_custom_path_json
     run_test "Config: Detect multiple candidates" test_config_detect_reports_multiple_candidates
+    run_test "DB: Module invocations" test_db_module_invocations
+    run_test "DB: Restore credentials" test_db_restore_credentials_and_invocation
+    run_test "DB: Load config defaults" test_db_load_config_defaults
     run_test "CLI: Parsing" test_cli_parsing
     run_test "Account: Validation" test_account_validation
     run_test "Account: Hash vector" test_account_hash_known_vector

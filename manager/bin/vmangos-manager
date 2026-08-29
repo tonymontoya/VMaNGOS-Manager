@@ -120,8 +120,10 @@ parse_global_options() {
 
 # shellcheck source=lib/common.sh
 source "$LIB_DIR/common.sh"
-# shellcheck source=lib/config.sh  
+# shellcheck source=lib/config.sh
 source "$LIB_DIR/config.sh"
+# shellcheck source=lib/db.sh
+source "$LIB_DIR/db.sh"
 # shellcheck source=lib/server.sh
 source "$LIB_DIR/server.sh"
 # shellcheck source=lib/account.sh
