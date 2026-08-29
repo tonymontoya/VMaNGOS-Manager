@@ -8,7 +8,7 @@ on:
 
 jobs:
   lint:
-    name: Shellcheck
+    name: Lint
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
@@ -17,10 +17,13 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
+      - name: Install ruff
+        run: python3 -m pip install ruff
+
       - name: Run installer shellcheck
         run: shellcheck vmangos_setup.sh auto_install.sh tests/installer/run_tests.sh
 
-      - name: Run manager shellcheck
+      - name: Run manager lint
         working-directory: ./manager
         run: make lint
 

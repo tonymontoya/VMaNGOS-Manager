@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034,SC1091
+# shellcheck disable=SC2034,SC1091,SC2317,SC2318
+# (SC2317/SC2318: stubs are invoked indirectly and locals are pipe-captured by design;
+#  defined-but-unregistered test_* functions are caught by the harness itself)
 #
 # Test runner for VMANGOS Manager
 #

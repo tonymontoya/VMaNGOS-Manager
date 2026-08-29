@@ -1,7 +1,11 @@
 .PHONY: all test lint install uninstall clean help
 
-# Shell scripts to lint
-SCRIPTS := bin/vmangos-manager install_manager.sh lib/common.sh lib/config.sh lib/db.sh lib/server.sh lib/account.sh lib/update.sh lib/backup.sh lib/logs.sh lib/dashboard.sh
+# Shell scripts to lint (wildcards: new lib/ or tests/ scripts are covered automatically)
+SCRIPTS := $(wildcard bin/*) install_manager.sh $(wildcard lib/*.sh) $(wildcard tests/*.sh)
+
+# Python files to lint (syntax + undefined names)
+PYTHON_FILES := lib/dashboard.py
+RUFF_RULES := E9,F63,F7,F82
 
 PREFIX ?= /opt/mangos/manager
 DESTDIR ?=
@@ -13,13 +17,18 @@ INSTALL_TEST_DIR := $(INSTALL_ROOT)/tests
 # Default target
 all: lint test
 
-# Lint all shell scripts (enforces shellcheck compliance)
+# Lint shell scripts (shellcheck) and Python files (ruff)
 lint:
 	@echo "========================================"
 	@echo "Running shellcheck..."
 	@echo "========================================"
 	@shellcheck -x $(SCRIPTS)
 	@echo "✓ All scripts pass shellcheck"
+	@echo "========================================"
+	@echo "Running ruff ($(RUFF_RULES)) on Python files..."
+	@echo "========================================"
+	@ruff check --select $(RUFF_RULES) $(PYTHON_FILES)
+	@echo "✓ Python lint clean"
 
 # Run test suite
 test:

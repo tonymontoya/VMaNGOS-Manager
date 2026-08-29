@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1091
 # Unit tests for common.sh
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"

@@ -386,7 +386,6 @@ schedule_load_job() {
         return 1
     fi
 
-    SCHEDULE_JOB_ID=$(ini_read "$metadata_path" "job" "id" "")
     SCHEDULE_JOB_TYPE=$(ini_read "$metadata_path" "job" "job_type" "")
     SCHEDULE_JOB_SCHEDULE_TYPE=$(ini_read "$metadata_path" "job" "schedule_type" "")
     SCHEDULE_JOB_TIME=$(ini_read "$metadata_path" "job" "time" "")
