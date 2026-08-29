@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 
 STATUS_COLORS = {
@@ -123,6 +123,19 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat()
 
 
+def run_manager_subprocess(full_command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """The only subprocess.run call site in the dashboard.
+
+    Every manager CLI interaction — snapshot reads and action writes —
+    routes through here so argv construction, environment merging, and
+    capture behavior stay uniform.
+    """
+    command_env = os.environ.copy()
+    if env:
+        command_env.update(env)
+    return subprocess.run(full_command, capture_output=True, text=True, check=False, env=command_env)
+
+
 def parse_manager_json(stdout: str) -> dict[str, Any]:
     payload = json.loads(stdout)
     if not payload.get("success"):
@@ -138,12 +151,13 @@ def run_manager_command(
     *,
     parser_mode: str = "envelope",
     use_global_json: bool = False,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     full_command = [manager_bin, "-c", config_path]
     if use_global_json:
         full_command.extend(["-f", "json"])
     full_command.extend(command)
-    completed = subprocess.run(full_command, capture_output=True, text=True, check=False)
+    completed = run_manager_subprocess(full_command, env=env)
 
     if completed.returncode != 0:
         stderr = (completed.stderr or completed.stdout).strip()
@@ -161,6 +175,8 @@ def run_manager_command(
             data = parse_manager_json(completed.stdout)
         elif parser_mode == "json":
             data = json.loads(completed.stdout)
+        elif parser_mode == "raw":
+            data = completed.stdout
         else:
             raise ValueError(f"Unsupported parser mode: {parser_mode}")
     except (json.JSONDecodeError, RuntimeError, ValueError) as exc:
@@ -511,13 +527,17 @@ def find_selected_account(snapshot: dict[str, Any], selected_account_id: str) ->
     return accounts[0] if accounts else None
 
 
+def latest_backup_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return max(entries, key=lambda item: str(item.get("timestamp", ""))) if entries else None
+
+
 def find_selected_backup(snapshot: dict[str, Any], selected_backup_file: str) -> dict[str, Any] | None:
     entries = snapshot.get("backups", {}).get("entries", [])
     if selected_backup_file:
         for entry in entries:
             if str(entry.get("file", "")) == selected_backup_file:
                 return entry
-    return max(entries, key=lambda item: str(item.get("timestamp", ""))) if entries else None
+    return latest_backup_entry(entries)
 
 
 def find_selected_schedule(snapshot: dict[str, Any], selected_schedule_id: str) -> dict[str, Any] | None:
@@ -546,6 +566,46 @@ def find_selected_log_entry(snapshot: dict[str, Any], selected_log_key: str) -> 
             if log_entry_key(entry) == selected_log_key:
                 return entry
     return entries[0] if entries else None
+
+
+class SelectionTable:
+    """Single implementation of the select-a-row DataTable pattern.
+
+    rebuild() re-renders rows, preserves the current selection by key when
+    it still exists, moves the cursor without animation, and returns the
+    selected entry so the caller can refresh its detail pane. Callers
+    pre-sort entries; the controller never reorders them.
+    """
+
+    def __init__(self, table: Any) -> None:
+        self.table = table
+
+    def rebuild(
+        self,
+        entries: list[dict[str, Any]],
+        *,
+        key_fn: Callable[[dict[str, Any]], str],
+        row_fn: Callable[[dict[str, Any]], list[str]],
+        current_key: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        self.table.clear(columns=False)
+
+        selected_index = 0
+        selected: dict[str, Any] | None = None
+        for index, entry in enumerate(entries):
+            key_value = key_fn(entry)
+            if current_key and key_value == current_key:
+                selected_index = index
+                selected = entry
+            self.table.add_row(*row_fn(entry), key=key_value)
+
+        if not entries:
+            return "", None
+
+        if selected is None:
+            selected = entries[selected_index]
+        self.table.move_cursor(row=selected_index, column=0, animate=False)
+        return key_fn(selected), selected
 
 
 def format_command_tokens(tokens: list[tuple[str, str]]) -> str:
@@ -927,7 +987,10 @@ def summarize_backups(entries: list[dict[str, Any]], backup_dir: str) -> dict[st
     if not entries:
         return summary
 
-    latest = max(entries, key=lambda item: str(item.get("timestamp", "")))
+    latest = latest_backup_entry(entries)
+    if latest is None:
+        return summary
+
     latest_file = str(latest.get("file", ""))
     summary.update(
         {
@@ -2282,25 +2345,18 @@ def create_app(
             self.set_focus(table)
 
         def refresh_roster(self) -> None:
-            table = self.query_one("#roster-table", DataTable)
-            table.clear(columns=False)
-
-            selected_index = 0
-            for index, player in enumerate(self.players):
-                player_id = str(player.get("id", ""))
-                if self.selected_player_id and player_id == self.selected_player_id:
-                    selected_index = index
-                table.add_row(
+            self.selected_player_id, selected_player = SelectionTable(
+                self.query_one("#roster-table", DataTable)
+            ).rebuild(
+                self.players,
+                key_fn=lambda player: str(player.get("id", "")),
+                row_fn=lambda player: [
                     str(player.get("id", "")),
                     escape_markup(player.get("username", "")),
                     str(player.get("gm_level", 0)),
-                    key=player_id,
-                )
-
-            selected_player = self.players[selected_index] if self.players else None
-            self.selected_player_id = str(selected_player.get("id", "")) if selected_player else ""
-            if self.players:
-                table.move_cursor(row=selected_index, column=0, animate=False)
+                ],
+                current_key=self.selected_player_id,
+            )
             self.query_one("#roster-details", Static).update(render_player_details(selected_player, len(self.players)))
 
         def selected_player(self) -> dict[str, Any] | None:
@@ -2337,7 +2393,948 @@ def create_app(
                 self.action_open_accounts()
 
     class VMangosDashboard(App[None]):
-        CSS = """
+        CSS = DASHBOARD_CSS
+
+        BINDINGS = [
+            ("q", "quit", "Quit"),
+            ("r", "manual_refresh", "Refresh"),
+            ("s", "start_server", "Start"),
+            ("x", "stop_server", "Stop"),
+            ("R", "restart_server", "Restart"),
+            ("o", "open_online_roster", "Roster"),
+            ("b", "backup_now", "Backup"),
+            ("v", "verify_selected_backup", "Verify"),
+            ("c", "create_account", "Create"),
+            ("p", "reset_account_password", "Password"),
+            ("g", "set_account_gm", "Set GM"),
+            ("n", "ban_account", "Ban"),
+            ("u", "unban_account", "Unban"),
+            ("l", "rotate_logs", "Rotate Logs"),
+            ("T", "test_logs_config", "Test Config"),
+            ("h", "create_honor_schedule", "Schedule Maintenance"),
+            ("m", "create_restart_schedule", "Schedule Restart"),
+            ("P", "refresh_update_plan", "Update Plan"),
+            ("d", "restore_selected_backup_dry_run", "Dry Run"),
+            ("y", "schedule_daily_backup", "Daily"),
+            ("w", "schedule_weekly_backup", "Weekly"),
+            ("j", "cancel_selected_schedule", "Remove Task"),
+            ("k", "validate_config", "Validate"),
+            ("f", "filter_logs", "Filters"),
+            ("1", "show_overview", "Overview"),
+            ("2", "show_monitor", "Monitor"),
+            ("3", "show_accounts", "Accounts"),
+            ("4", "show_backups", "Backups"),
+            ("5", "show_config", "Config"),
+            ("6", "show_logs", "Logs"),
+            ("7", "show_operations", "Ops"),
+            ("t", "toggle_theme", "Theme"),
+        ]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.manager_bin = manager_bin
+            self.config_path = config_path
+            self.refresh_interval = refresh
+            self.theme_name = theme
+            self.screenshot_path = screenshot_path
+            self.snapshot_file = snapshot_file
+            self.screenshot_taken = False
+            self.screenshot_pending = False
+            self.active_view = initial_view if initial_view in VIEW_TITLES else "overview"
+            self.last_action = "loading dashboard data..."
+            self.last_action_receipt = ""
+            self.last_action_next_step = ""
+            self.last_action_view = self.active_view
+            self.action_tone = "info"
+            self.snapshot = empty_snapshot("waiting for first refresh")
+            self.metric_history: list[dict[str, Any]] = []
+            self.selected_account_id = ""
+            self.selected_backup_file = ""
+            self.selected_log_key = ""
+            self.selected_schedule_id = ""
+            self.logs_query = normalize_logs_query()
+            self.update_plan_data: dict[str, Any] | None = None
+            self.refresh_inflight = False
+            self.action_inflight = False
+
+        def compose(self) -> ComposeResult:
+            yield Header(show_clock=True)
+            with Horizontal(id="shell"):
+                yield Static("", id="sidebar")
+                with Container(id="content"):
+                    yield Static("", id="action-banner")
+                    with Container(id="view-stack"):
+                        with Container(id="overview-view", classes="view"):
+                            with Container(id="overview-grid"):
+                                yield Static("", id="service-pane", classes="panel hero-panel")
+                                yield Static("", id="metrics-pane", classes="panel accent-panel")
+                                yield Static("", id="player-pulse-pane", classes="panel hero-panel")
+                                yield Static("", id="alerts-pane", classes="panel accent-panel")
+                        with Container(id="monitor-view", classes="view hidden"):
+                            with Container(id="monitor-grid"):
+                                yield Static("", id="monitor-pressure-pane", classes="panel hero-panel")
+                                yield Static("", id="monitor-process-pane", classes="panel accent-panel")
+                                yield Static("", id="monitor-trends-pane", classes="panel hero-panel")
+                                yield Static("", id="monitor-storage-pane", classes="panel accent-panel")
+                        with Container(id="accounts-view", classes="view hidden"):
+                            with Horizontal(id="accounts-layout"):
+                                with Vertical(classes="panel table-panel", id="accounts-table-layout"):
+                                    yield Static("[b]Account Inventory[/b]", classes="table-detail-title")
+                                    yield DataTable(id="accounts-table", classes="detail-table")
+                                yield Static("", id="account-details", classes="panel hero-panel")
+                        with Container(id="backups-view", classes="view hidden"):
+                            with Horizontal(id="backups-layout"):
+                                yield Static("", id="backup-summary", classes="panel hero-panel")
+                                with Vertical(classes="panel table-panel", id="backups-table-layout"):
+                                    yield Static("[b]Backup Inventory[/b]", classes="table-detail-title")
+                                    yield DataTable(id="backups-table", classes="detail-table")
+                        with Container(id="config-view", classes="view hidden"):
+                            yield Static("", id="config-pane", classes="panel hero-panel")
+                        with Container(id="logs-view", classes="view hidden"):
+                            with Vertical(id="realm-logs-layout"):
+                                yield Static("", id="realm-logs-summary", classes="panel hero-panel")
+                                with Horizontal(id="realm-logs-body"):
+                                    with Vertical(classes="panel table-panel", id="realm-logs-table-layout"):
+                                        yield Static("[b]Recent Events[/b]", classes="table-detail-title")
+                                        yield DataTable(id="realm-logs-table", classes="detail-table")
+                                    yield Static("", id="realm-log-details", classes="panel accent-panel")
+                        with Container(id="operations-view", classes="view hidden"):
+                            with Vertical(id="operations-layout"):
+                                with Horizontal(id="operations-summary"):
+                                    yield Static("", id="logs-pane", classes="panel accent-panel")
+                                    yield Static("", id="update-pane", classes="panel hero-panel")
+                                with Vertical(classes="panel table-panel table-detail", id="schedules-layout"):
+                                    yield Static("[b]Scheduled Tasks[/b]", classes="table-detail-title")
+                                    yield Static("", id="schedule-intro")
+                                    with Horizontal(classes="table-detail-body"):
+                                        yield DataTable(id="schedules-table", classes="detail-table")
+                                        yield Static("", id="schedule-details", classes="detail-pane")
+                    yield Static("", id="command-rail")
+
+        def on_mount(self) -> None:
+            accounts_table = self.query_one("#accounts-table", DataTable)
+            accounts_table.cursor_type = "row"
+            accounts_table.zebra_stripes = True
+            accounts_table.add_columns("ID", "Username", "GM", "Online", "Banned")
+
+            backups_table = self.query_one("#backups-table", DataTable)
+            backups_table.cursor_type = "row"
+            backups_table.zebra_stripes = True
+            backups_table.add_columns("Timestamp", "Size", "File", "Created By")
+
+            realm_logs_table = self.query_one("#realm-logs-table", DataTable)
+            realm_logs_table.cursor_type = "row"
+            realm_logs_table.zebra_stripes = True
+            realm_logs_table.add_columns("Time", "Source", "Severity", "Message")
+
+            schedules_table = self.query_one("#schedules-table", DataTable)
+            schedules_table.cursor_type = "row"
+            schedules_table.zebra_stripes = True
+            schedules_table.add_columns("Type", "Schedule", "Next Run", "ID")
+
+            self.apply_theme()
+            self.apply_view_state()
+            self.request_snapshot_refresh()
+            self.set_interval(self.refresh_interval, self.request_snapshot_refresh)
+
+        def apply_theme(self) -> None:
+            self.theme = "tokyo-night" if self.theme_name == "dark" else "catppuccin-latte"
+            self.remove_class("theme-light")
+            self.remove_class("theme-dark")
+            self.add_class(f"theme-{self.theme_name}")
+
+        def apply_view_state(self) -> None:
+            for view_name in ("overview", "monitor", "accounts", "backups", "config", "logs", "operations"):
+                widget = self.query_one(f"#{view_name}-view", Container)
+                if view_name == self.active_view:
+                    widget.remove_class("hidden")
+                else:
+                    widget.add_class("hidden")
+
+            self.refresh_chrome()
+            if self.active_view == "accounts":
+                self.set_focus(self.query_one("#accounts-table", DataTable))
+            elif self.active_view == "backups":
+                self.set_focus(self.query_one("#backups-table", DataTable))
+            elif self.active_view == "logs":
+                self.set_focus(self.query_one("#realm-logs-table", DataTable))
+            elif self.active_view == "operations":
+                self.set_focus(self.query_one("#schedules-table", DataTable))
+
+        def refresh_chrome(self) -> None:
+            self.query_one("#sidebar", Static).update(
+                render_sidebar(self.active_view, self.last_action, self.snapshot, self.refresh_interval)
+            )
+            self.query_one("#action-banner", Static).update(
+                render_action_banner(
+                    self.active_view,
+                    self.snapshot,
+                    self.last_action,
+                    self.action_tone,
+                    self.refresh_interval,
+                    self.last_action_receipt,
+                    self.last_action_next_step,
+                    self.last_action_view,
+                )
+            )
+            self.query_one("#command-rail", Static).update(render_command_rail(self.active_view))
+
+        def request_snapshot_refresh(self) -> None:
+            if self.refresh_inflight:
+                return
+            self.refresh_inflight = True
+            threading.Thread(target=self.refresh_snapshot_worker, daemon=True).start()
+
+        def refresh_snapshot_worker(self) -> None:
+            try:
+                if self.snapshot_file:
+                    snapshot = load_snapshot_fixture(self.snapshot_file)
+                else:
+                    snapshot = build_snapshot(self.manager_bin, self.config_path, self.logs_query)
+            except Exception as exc:
+                snapshot = empty_snapshot(f"snapshot refresh failed: {exc}")
+            self.call_from_thread(self.apply_snapshot, snapshot)
+
+        def apply_snapshot(self, snapshot: dict[str, Any]) -> None:
+            self.snapshot = snapshot
+            if self.last_action == "loading dashboard data...":
+                self.last_action = "latest data loaded"
+                self.action_tone = "info"
+            if not self.metric_history:
+                self.metric_history = extract_seed_metric_history(snapshot)
+            self.metric_history = append_monitoring_sample(self.metric_history, snapshot)
+            self.refresh_inflight = False
+            self.query_one("#service-pane", Static).update(render_service_panel(snapshot, self.active_view))
+            self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot, self.metric_history, self.refresh_interval))
+            self.query_one("#player-pulse-pane", Static).update(render_player_pulse(snapshot, self.metric_history, self.refresh_interval))
+            self.query_one("#alerts-pane", Static).update(render_alerts_panel(snapshot))
+            self.query_one("#monitor-pressure-pane", Static).update(render_monitor_pressure(snapshot, self.metric_history, self.refresh_interval))
+            self.query_one("#monitor-process-pane", Static).update(render_monitor_processes(snapshot))
+            self.query_one("#monitor-trends-pane", Static).update(render_monitor_trends(snapshot, self.metric_history, self.refresh_interval))
+            self.query_one("#monitor-storage-pane", Static).update(render_monitor_storage(snapshot))
+            self.query_one("#config-pane", Static).update(render_config_panel(snapshot))
+            self.query_one("#realm-logs-summary", Static).update(render_realm_logs_summary(snapshot))
+            self.query_one("#logs-pane", Static).update(render_logs_panel(snapshot))
+            self.query_one("#update-pane", Static).update(render_update_panel(snapshot, self.update_plan_data))
+            self.refresh_accounts(snapshot.get("all_accounts", []))
+            self.refresh_backups(snapshot.get("backups", {}).get("entries", []))
+            self.refresh_logs(snapshot.get("log_events", []))
+            self.refresh_schedules(snapshot.get("schedules", []))
+            self.refresh_chrome()
+            if self.screenshot_path and not self.screenshot_taken and not self.screenshot_pending:
+                self.screenshot_pending = True
+                self.set_timer(0.5, self.capture_screenshot_and_exit)
+
+        def capture_screenshot_and_exit(self) -> None:
+            self.screenshot_taken = True
+            self.save_screenshot(self.screenshot_path)
+            self.exit()
+
+        def selected_account(self) -> dict[str, Any] | None:
+            return find_selected_account(self.snapshot, self.selected_account_id)
+
+        def selected_backup(self) -> dict[str, Any] | None:
+            return find_selected_backup(self.snapshot, self.selected_backup_file)
+
+        def selected_log_entry(self) -> dict[str, Any] | None:
+            return find_selected_log_entry(self.snapshot, self.selected_log_key)
+
+        def selected_schedule(self) -> dict[str, Any] | None:
+            return find_selected_schedule(self.snapshot, self.selected_schedule_id)
+
+        def refresh_accounts(self, accounts: list[dict[str, Any]]) -> None:
+            self.selected_account_id, account = SelectionTable(
+                self.query_one("#accounts-table", DataTable)
+            ).rebuild(
+                accounts,
+                key_fn=lambda account: str(account.get("id", "")),
+                row_fn=lambda account: [
+                    str(account.get("id", "")),
+                    escape_markup(account.get("username", "")),
+                    str(account.get("gm_level", 0)),
+                    "yes" if account.get("online") else "no",
+                    "yes" if account.get("banned") else "no",
+                ],
+                current_key=self.selected_account_id,
+            )
+            self.query_one("#account-details", Static).update(render_account_details(account, len(accounts)))
+
+        def refresh_backups(self, entries: list[dict[str, Any]]) -> None:
+            ordered = sorted(entries, key=lambda item: str(item.get("timestamp", "")), reverse=True)
+            self.selected_backup_file, selected_entry = SelectionTable(
+                self.query_one("#backups-table", DataTable)
+            ).rebuild(
+                ordered,
+                key_fn=lambda entry: str(entry.get("file", "")),
+                row_fn=lambda entry: [
+                    escape_markup(iso_to_display(entry.get("timestamp"))),
+                    escape_markup(format_bytes(entry.get("size_bytes", 0))),
+                    escape_markup(str(entry.get("file", ""))),
+                    escape_markup(str(entry.get("created_by", "n/a"))),
+                ],
+                current_key=self.selected_backup_file,
+            )
+            self.query_one("#backup-summary", Static).update(
+                render_backups_summary(snapshot=self.snapshot, selected_backup=selected_entry)
+            )
+
+        def refresh_logs(self, entries: list[dict[str, Any]]) -> None:
+            self.selected_log_key, selected_entry = SelectionTable(
+                self.query_one("#realm-logs-table", DataTable)
+            ).rebuild(
+                entries,
+                key_fn=log_entry_key,
+                row_fn=lambda entry: [
+                    escape_markup(iso_to_display(entry.get("timestamp"))),
+                    escape_markup(str(entry.get("source", ""))),
+                    escape_markup(str(entry.get("severity", ""))),
+                    escape_markup(truncate_text(entry.get("message", ""), 84)),
+                ],
+                current_key=self.selected_log_key,
+            )
+            self.query_one("#realm-log-details", Static).update(
+                render_log_event_details(selected_entry, len(entries))
+            )
+
+        def refresh_schedules(self, schedules: list[dict[str, Any]]) -> None:
+            self.query_one("#schedule-intro", Static).update(render_schedule_intro(schedules))
+            ordered = sorted(
+                schedules, key=lambda item: (str(item.get("next_run", "")), str(item.get("id", "")))
+            )
+            self.selected_schedule_id, selected_schedule = SelectionTable(
+                self.query_one("#schedules-table", DataTable)
+            ).rebuild(
+                ordered,
+                key_fn=lambda schedule: str(schedule.get("id", "")),
+                row_fn=lambda schedule: [
+                    escape_markup(schedule_job_type_label(schedule.get("job_type", ""))),
+                    escape_markup(schedule_label(schedule)),
+                    escape_markup(str(schedule.get("next_run", "") or "n/a")),
+                    escape_markup(str(schedule.get("id", ""))),
+                ],
+                current_key=self.selected_schedule_id,
+            )
+            self.query_one("#schedule-details", Static).update(
+                render_schedule_details(selected_schedule, len(schedules))
+            )
+
+        def update_selected_account(self, row_key: Any) -> None:
+            account = find_selected_account(self.snapshot, player_key_value(row_key))
+            self.selected_account_id = str(account.get("id", "")) if account else ""
+            self.query_one("#account-details", Static).update(
+                render_account_details(account, len(self.snapshot.get("all_accounts", [])))
+            )
+
+        def update_selected_backup(self, row_key: Any) -> None:
+            entry = find_selected_backup(self.snapshot, player_key_value(row_key))
+            self.selected_backup_file = str(entry.get("file", "")) if entry else ""
+            self.query_one("#backup-summary", Static).update(
+                render_backups_summary(snapshot=self.snapshot, selected_backup=entry)
+            )
+
+        def update_selected_log(self, row_key: Any) -> None:
+            entry = find_selected_log_entry(self.snapshot, player_key_value(row_key))
+            self.selected_log_key = log_entry_key(entry) if entry else ""
+            self.query_one("#realm-log-details", Static).update(
+                render_log_event_details(entry, len(self.snapshot.get("log_events", [])))
+            )
+
+        def update_selected_schedule(self, row_key: Any) -> None:
+            schedule = find_selected_schedule(self.snapshot, player_key_value(row_key))
+            self.selected_schedule_id = str(schedule.get("id", "")) if schedule else ""
+            self.query_one("#schedule-details", Static).update(
+                render_schedule_details(schedule, len(self.snapshot.get("schedules", [])))
+            )
+
+        def table_row_handlers(self) -> dict[str, Any]:
+            return {
+                "accounts-table": self.update_selected_account,
+                "backups-table": self.update_selected_backup,
+                "realm-logs-table": self.update_selected_log,
+                "schedules-table": self.update_selected_schedule,
+            }
+
+        def open_command_form(
+            self,
+            action_name: str,
+            title: str,
+            submit_label: str,
+            fields: list[dict[str, Any]],
+            intro: str = "",
+        ) -> None:
+            self.push_screen(
+                CommandFormScreen(title=title, submit_label=submit_label, fields=fields, intro=intro),
+                lambda result, action_name=action_name: self.handle_command_form_result(action_name, result),
+            )
+
+        def handle_command_form_result(self, action_name: str, result: dict[str, str] | None) -> None:
+            if result is None:
+                return
+            self.dispatch_dashboard_action(action_name, result)
+
+        def dispatch_dashboard_action(self, action_name: str, form_values: dict[str, Any] | None = None) -> None:
+            request = build_dashboard_action_request(
+                self.snapshot,
+                self.selected_account_id,
+                self.selected_backup_file,
+                self.selected_schedule_id,
+                action_name,
+                form_values,
+            )
+            error = str(request.get("error", ""))
+            if error:
+                self.set_action_result(error, tone="warning")
+                return
+
+            target_view = str(request.get("view", "") or "")
+            if target_view and target_view != self.active_view:
+                self.active_view = target_view
+                self.apply_view_state()
+
+            self.request_command_action(
+                str(request["label"]),
+                list(request["command"]),
+                refresh_after=bool(request.get("refresh_after", True)),
+                env=dict(request.get("env", {})),
+                feedback=dict(request.get("feedback", {})),
+            )
+
+        def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+            handler = self.table_row_handlers().get(str(event.data_table.id))
+            if handler:
+                handler(event.row_key)
+
+        def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+            handler = self.table_row_handlers().get(str(event.data_table.id))
+            if handler:
+                handler(event.row_key)
+
+        def action_show_overview(self) -> None:
+            self.active_view = "overview"
+            self.apply_view_state()
+
+        def action_show_monitor(self) -> None:
+            self.active_view = "monitor"
+            self.apply_view_state()
+
+        def action_show_accounts(self) -> None:
+            self.active_view = "accounts"
+            self.apply_view_state()
+
+        def action_show_backups(self) -> None:
+            self.active_view = "backups"
+            self.apply_view_state()
+
+        def action_show_config(self) -> None:
+            self.active_view = "config"
+            self.apply_view_state()
+
+        def action_show_logs(self) -> None:
+            self.active_view = "logs"
+            self.apply_view_state()
+
+        def action_show_operations(self) -> None:
+            self.active_view = "operations"
+            self.apply_view_state()
+
+        def action_manual_refresh(self) -> None:
+            self.set_action_result(
+                f"manual refresh requested at {datetime.now().strftime('%H:%M:%S')}",
+                tone="info",
+                receipt="Requested a fresh dashboard snapshot from Manager.",
+            )
+            self.request_snapshot_refresh()
+
+        def action_toggle_theme(self) -> None:
+            self.theme_name = "light" if self.theme_name == "dark" else "dark"
+            self.apply_theme()
+            self.set_action_result(
+                f"theme set to {self.theme_name}",
+                tone="success",
+                receipt=f"Switched the dashboard theme to {self.theme_name}.",
+            )
+            self.apply_view_state()
+            self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view))
+
+        def action_start_server(self) -> None:
+            self.request_command_action(
+                "start",
+                ["server", "start", "--wait", "--timeout", "60"],
+                feedback={
+                    "success_receipt": "Requested a realm start.",
+                    "success_next": "Stay in Overview or Logs until auth and world both settle healthy.",
+                    "failure_next": "Inspect service health and recent logs, then retry the start when the host is ready.",
+                },
+            )
+
+        def action_stop_server(self) -> None:
+            self.request_command_action(
+                "stop",
+                ["server", "stop", "--timeout", "60"],
+                feedback={
+                    "success_receipt": "Requested a realm stop.",
+                    "success_next": "Confirm auth and world settle inactive before backups, updates, or maintenance work.",
+                    "failure_next": "Inspect service health and logs, then retry the stop when the host is ready.",
+                },
+            )
+
+        def action_restart_server(self) -> None:
+            self.request_command_action(
+                "restart",
+                ["server", "restart", "--timeout", "60"],
+                feedback={
+                    "success_receipt": "Requested a realm restart.",
+                    "success_next": "Use Overview and Logs to confirm the realm settles cleanly after the restart.",
+                    "failure_next": "Inspect service health and recent logs, then retry the restart when the host is ready.",
+                },
+            )
+
+        def handle_online_roster_result(self, account_id: str | None) -> None:
+            if not account_id:
+                return
+            self.selected_account_id = account_id
+            self.active_view = "accounts"
+            self.apply_view_state()
+            self.refresh_accounts(self.snapshot.get("all_accounts", []))
+
+        def action_open_online_roster(self) -> None:
+            players = self.snapshot.get("players", [])
+            if not players:
+                self.set_action_result("online roster is empty", tone="warning")
+                return
+            self.push_screen(OnlineRosterScreen(players), self.handle_online_roster_result)
+
+        def action_backup_now(self) -> None:
+            self.active_view = "backups"
+            self.apply_view_state()
+            self.request_command_action(
+                "backup",
+                ["backup", "now", "--verify"],
+                feedback={
+                    "success_receipt": "Started a fresh backup with verification enabled.",
+                    "success_next": "Stay in Backups after refresh to review the new archive and protection posture.",
+                    "failure_next": "Review backup directory access and DB connectivity, then retry from Backups.",
+                },
+            )
+
+        def action_verify_selected_backup(self) -> None:
+            backups = self.snapshot.get("backups", {})
+            summary = backups.get("summary", {})
+            backup_dir = str(summary.get("backup_dir", ""))
+            if not self.selected_backup_file or not backup_dir:
+                self.set_action_result("backup verify skipped: no backup selected", tone="warning")
+                return
+
+            backup_path = f"{backup_dir.rstrip('/')}/{self.selected_backup_file}"
+            self.request_command_action(
+                "verify",
+                ["backup", "verify", backup_path, "--level", "1"],
+                refresh_after=False,
+                feedback={
+                    "success_receipt": f"Verified backup {self.selected_backup_file}.",
+                    "success_next": "If you need recovery planning, use restore dry-run here; live restore stays in the CLI.",
+                    "failure_next": "Inspect the selected archive and retry verification from Backups.",
+                },
+            )
+
+        def action_create_account(self) -> None:
+            self.active_view = "accounts"
+            self.apply_view_state()
+            self.open_command_form(
+                "account_create",
+                "Create Account",
+                "Create",
+                [
+                    {"name": "username", "label": "Username", "placeholder": "PLAYERONE"},
+                    {"name": "password", "label": "Password", "password": True},
+                    {"name": "confirm_password", "label": "Confirm Password", "password": True},
+                ],
+                "Create a new VMaNGOS account from the dashboard account workflow.",
+            )
+
+        def action_reset_account_password(self) -> None:
+            account = self.selected_account()
+            if account is None:
+                self.set_action_result("password reset skipped: no account selected")
+                return
+            username = str(account.get("username", "selected account")).strip()
+            self.active_view = "accounts"
+            self.apply_view_state()
+            self.open_command_form(
+                "account_password",
+                "Reset Account Password",
+                "Reset",
+                [
+                    {"name": "password", "label": "New Password", "password": True},
+                    {"name": "confirm_password", "label": "Confirm Password", "password": True},
+                ],
+                f"Reset the password for {username}.",
+            )
+
+        def action_set_account_gm(self) -> None:
+            account = self.selected_account()
+            if account is None:
+                self.set_action_result("set GM skipped: no account selected")
+                return
+            username = str(account.get("username", "selected account")).strip()
+            self.active_view = "accounts"
+            self.apply_view_state()
+            self.open_command_form(
+                "account_setgm",
+                "Set GM Level",
+                "Apply",
+                [
+                    {
+                        "name": "gm_level",
+                        "label": "GM Level (0-3)",
+                        "value": str(account.get("gm_level", 0)),
+                        "placeholder": "0",
+                    }
+                ],
+                f"Adjust GM access for {username}.",
+            )
+
+        def action_ban_account(self) -> None:
+            account = self.selected_account()
+            if account is None:
+                self.set_action_result("account ban skipped: no account selected")
+                return
+            username = str(account.get("username", "selected account")).strip()
+            self.active_view = "accounts"
+            self.apply_view_state()
+            self.open_command_form(
+                "account_ban",
+                "Ban Account",
+                "Ban",
+                [
+                    {"name": "duration", "label": "Duration", "placeholder": "7d"},
+                    {"name": "reason", "label": "Reason", "placeholder": "Abuse"},
+                ],
+                f"Ban {username} from the dashboard moderation workflow.",
+            )
+
+        def action_unban_account(self) -> None:
+            self.dispatch_dashboard_action("account_unban")
+
+        def action_restore_selected_backup_dry_run(self) -> None:
+            backup = self.selected_backup()
+            if backup is None:
+                self.set_action_result("backup restore skipped: no backup selected")
+                return
+            backup_file = str(backup.get("file", "selected backup")).strip()
+            self.active_view = "backups"
+            self.apply_view_state()
+            self.open_command_form(
+                "backup_restore_dry_run",
+                "Restore Dry Run",
+                "Run Dry Run",
+                [],
+                f"Run a dry-run restore check for {backup_file}.",
+            )
+
+        def action_schedule_daily_backup(self) -> None:
+            self.active_view = "backups"
+            self.apply_view_state()
+            self.open_command_form(
+                "backup_schedule_daily",
+                "Schedule Daily Backup",
+                "Schedule",
+                [{"name": "time", "label": "Daily Time (HH:MM)", "value": "04:00", "placeholder": "04:00"}],
+                "Install or update the daily backup timer.",
+            )
+
+        def action_schedule_weekly_backup(self) -> None:
+            self.active_view = "backups"
+            self.apply_view_state()
+            self.open_command_form(
+                "backup_schedule_weekly",
+                "Schedule Weekly Backup",
+                "Schedule",
+                [{"name": "schedule", "label": "Weekly Schedule", "value": "Sun 04:00", "placeholder": "Sun 04:00"}],
+                "Install or update the weekly backup timer.",
+            )
+
+        def action_validate_config(self) -> None:
+            self.dispatch_dashboard_action("config_validate")
+
+        def handle_logs_filter_result(self, result: dict[str, str] | None) -> None:
+            if result is None:
+                return
+
+            query = normalize_logs_query(result)
+            if not LOG_SOURCE_PATTERN.fullmatch(query["source"]):
+                self.set_action_result("logs filter skipped: source must be all, auth, or world", tone="warning")
+                return
+            if not LOG_WINDOW_PATTERN.fullmatch(query["window"]):
+                self.set_action_result("logs filter skipped: window must look like 15m, 1h, or 1d", tone="warning")
+                return
+            if not LOG_SEVERITY_PATTERN.fullmatch(query["severity"]):
+                self.set_action_result("logs filter skipped: severity must be all, debug, info, notice, warning, error, critical, or alert", tone="warning")
+                return
+            if not LOG_LIMIT_PATTERN.fullmatch(query["limit"]) or int(query["limit"]) > 200:
+                self.set_action_result("logs filter skipped: limit must be between 1 and 200", tone="warning")
+                return
+
+            self.logs_query = query
+            self.selected_log_key = ""
+            self.active_view = "logs"
+            self.apply_view_state()
+            self.set_action_result(
+                f"logs filters set: {query['source']} {query['window']} {query['severity']} limit {query['limit']}",
+                tone="info",
+                receipt=f"Focused the realm event feed on source={query['source']}, window={query['window']}, severity={query['severity']}, limit={query['limit']}.",
+                next_step="Inspect Selected Event here, then move to Operations only if the incident becomes maintenance or change-window work.",
+            )
+            self.request_snapshot_refresh()
+
+        def action_filter_logs(self) -> None:
+            self.active_view = "logs"
+            self.apply_view_state()
+            self.push_screen(
+                CommandFormScreen(
+                    title="Log Filters",
+                    submit_label="Apply",
+                    fields=[
+                        {"name": "source", "label": "Source (all|auth|world)", "value": self.logs_query["source"], "placeholder": "all"},
+                        {"name": "window", "label": "Window (15m|1h|1d)", "value": self.logs_query["window"], "placeholder": "15m"},
+                        {"name": "severity", "label": "Severity", "value": self.logs_query["severity"], "placeholder": "all"},
+                        {"name": "limit", "label": "Limit", "value": self.logs_query["limit"], "placeholder": "25"},
+                    ],
+                    intro="Tune the realm log feed shown in this module. The dashboard will keep following the current filters on each refresh.",
+                ),
+                self.handle_logs_filter_result,
+            )
+
+        def action_rotate_logs(self) -> None:
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.dispatch_dashboard_action("logs_rotate")
+
+        def action_test_logs_config(self) -> None:
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.dispatch_dashboard_action("logs_test_config")
+
+        def action_create_honor_schedule(self) -> None:
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.open_command_form(
+                "schedule_honor_create",
+                "Schedule Maintenance",
+                "Schedule",
+                [
+                    {"name": "schedule_type", "label": "Cadence (daily|weekly)", "value": "daily", "placeholder": "daily"},
+                    {"name": "day", "label": "Weekly Day", "value": "Sun", "placeholder": "Sun"},
+                    {"name": "time", "label": "Time (HH:MM)", "value": "06:00", "placeholder": "06:00"},
+                    {"name": "timezone", "label": "Timezone", "value": "UTC", "placeholder": "UTC"},
+                ],
+                "Create a scheduled maintenance task using Manager's configured maintenance command.",
+            )
+
+        def action_create_restart_schedule(self) -> None:
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.open_command_form(
+                "schedule_restart_create",
+                "Schedule Restart",
+                "Schedule",
+                [
+                    {"name": "schedule_type", "label": "Cadence (daily|weekly)", "value": "weekly", "placeholder": "weekly"},
+                    {"name": "day", "label": "Weekly Day", "value": "Sun", "placeholder": "Sun"},
+                    {"name": "time", "label": "Time (HH:MM)", "value": "04:00", "placeholder": "04:00"},
+                    {"name": "timezone", "label": "Timezone", "value": "UTC", "placeholder": "UTC"},
+                    {"name": "warnings", "label": "Warnings", "value": "30,15,5,1", "placeholder": "30,15,5,1"},
+                    {"name": "announce", "label": "Announcement", "value": "Weekly maintenance", "placeholder": "Weekly maintenance"},
+                ],
+                "Create a scheduled restart window with warning timers.",
+            )
+
+        def action_refresh_update_plan(self) -> None:
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.request_update_plan_refresh()
+
+        def action_cancel_selected_schedule(self) -> None:
+            schedule = self.selected_schedule()
+            if schedule is None:
+                self.set_action_result("task removal skipped: no task selected", tone="warning")
+                return
+            schedule_id = str(schedule.get("id", "selected schedule")).strip()
+            self.active_view = "operations"
+            self.apply_view_state()
+            self.open_command_form(
+                "schedule_cancel",
+                "Remove Scheduled Task",
+                "Remove Task",
+                [],
+                f"Remove scheduled task {schedule_id} from Manager and systemd.",
+            )
+
+        def request_update_plan_refresh(self) -> None:
+            if self.action_inflight:
+                self.set_action_result("another dashboard action is already running", tone="warning")
+                return
+            self.action_inflight = True
+            view_context = self.active_view
+            self.set_action_result(
+                "update plan running...",
+                tone="running",
+                receipt="Checking repo drift and DB impact for the next change window.",
+                view_context=view_context,
+            )
+            threading.Thread(target=self.run_update_plan_action, args=(view_context,), daemon=True).start()
+
+        def run_update_plan_action(self, view_context: str) -> None:
+            try:
+                result = run_manager_command(
+                    self.manager_bin,
+                    self.config_path,
+                    ["update", "plan", "--include-db"],
+                    use_global_json=True,
+                )
+                if not result["ok"]:
+                    message = result["error"].strip().splitlines()[-1] if result["error"].strip() else f"update plan exited with code {result['exit_code']}"
+                    self.call_from_thread(self.set_action_result, f"update plan failed: {message}", "error", "", "", view_context)
+                    return
+
+                self.call_from_thread(self.apply_update_plan_data, result["data"], view_context)
+            except Exception as exc:  # noqa: BLE001 - daemon thread: never die silently
+                self.call_from_thread(
+                    self.set_action_result,
+                    f"update plan failed: {exc}",
+                    "error",
+                    "",
+                    "",
+                    view_context,
+                )
+            finally:
+                self.action_inflight = False
+
+        def apply_update_plan_data(self, data: dict[str, Any], view_context: str | None = None) -> None:
+            self.update_plan_data = data
+            warning_text = str(data.get("warning", "") or "")
+            if warning_text:
+                self.set_action_result(
+                    f"update plan refreshed: {warning_text}",
+                    tone="warning",
+                    receipt="Generated a change-window plan and flagged follow-up work before code changes.",
+                    next_step="Review Change Window Readiness, then confirm backups and maintenance timing before any CLI update apply step.",
+                    view_context=view_context,
+                )
+            else:
+                self.set_action_result(
+                    "update plan refreshed",
+                    tone="success",
+                    receipt="Generated a fresh change-window plan with current repo and DB impact.",
+                    next_step="Review the plan snapshot here, then continue the actual update workflow from the CLI after backup and maintenance prep.",
+                    view_context=view_context,
+                )
+            self.query_one("#update-pane", Static).update(render_update_panel(self.snapshot, self.update_plan_data))
+
+        def request_command_action(
+            self,
+            label: str,
+            command: list[str],
+            *,
+            refresh_after: bool = True,
+            env: dict[str, str] | None = None,
+            feedback: dict[str, str] | None = None,
+        ) -> None:
+            if self.action_inflight:
+                self.set_action_result("another dashboard action is already running", tone="warning")
+                return
+            self.action_inflight = True
+            view_context = self.active_view
+            running_receipt = ""
+            if feedback:
+                running_receipt = feedback.get("success_receipt", "")
+            self.set_action_result(f"{label} running...", tone="running", receipt=running_receipt, view_context=view_context)
+            threading.Thread(
+                target=self.run_command_action,
+                args=(label, command, refresh_after, env or {}, feedback or {}, view_context),
+                daemon=True,
+            ).start()
+
+        def run_command_action(
+            self,
+            label: str,
+            command: list[str],
+            refresh_after: bool,
+            env: dict[str, str],
+            feedback: dict[str, str],
+            view_context: str,
+        ) -> None:
+            try:
+                result = run_manager_command(
+                    self.manager_bin,
+                    self.config_path,
+                    command,
+                    parser_mode="raw",
+                    env=env,
+                )
+                output = (result["data"] or result["error"] or "").strip().splitlines()
+                message = output[-1] if output else f"{label} exited with code {result['exit_code']}"
+                if result["ok"]:
+                    receipt = feedback.get("success_receipt", "")
+                    next_step = feedback.get("success_next", "")
+                    self.call_from_thread(
+                        self.set_action_result,
+                        f"{label}: {message}",
+                        "success",
+                        receipt,
+                        next_step,
+                        view_context,
+                    )
+                    if refresh_after:
+                        self.call_from_thread(self.request_snapshot_refresh)
+                else:
+                    receipt = feedback.get("failure_receipt", "")
+                    next_step = feedback.get("failure_next", "")
+                    self.call_from_thread(
+                        self.set_action_result,
+                        f"{label} failed: {message}",
+                        "error",
+                        receipt,
+                        next_step,
+                        view_context,
+                    )
+            except Exception as exc:  # noqa: BLE001 - daemon thread: never die silently
+                self.call_from_thread(
+                    self.set_action_result,
+                    f"{label} failed: {exc}",
+                    "error",
+                    "",
+                    "",
+                    view_context,
+                )
+            finally:
+                self.action_inflight = False
+
+        def set_action_result(
+            self,
+            message: str,
+            tone: str = "info",
+            receipt: str = "",
+            next_step: str = "",
+            view_context: str | None = None,
+        ) -> None:
+            self.last_action = message
+            self.last_action_receipt = receipt
+            self.last_action_next_step = next_step
+            self.last_action_view = view_context or self.active_view
+            self.action_tone = tone
+            self.refresh_chrome()
+            self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view))
+            if self.active_view == "operations":
+                self.query_one("#schedule-details", Static).update(
+                    render_schedule_details(self.selected_schedule(), len(self.snapshot.get("schedules", [])))
+                )
+                self.query_one("#update-pane", Static).update(render_update_panel(self.snapshot, self.update_plan_data))
+
+    return VMangosDashboard()
+
+
+DASHBOARD_CSS = """
         Screen {
             background: #071522;
             color: #e6edf7;
@@ -2778,990 +3775,7 @@ def create_app(
         #roster-open {
             margin-left: 1;
         }
-        """
-
-        BINDINGS = [
-            ("q", "quit", "Quit"),
-            ("r", "manual_refresh", "Refresh"),
-            ("s", "start_server", "Start"),
-            ("x", "stop_server", "Stop"),
-            ("R", "restart_server", "Restart"),
-            ("o", "open_online_roster", "Roster"),
-            ("b", "backup_now", "Backup"),
-            ("v", "verify_selected_backup", "Verify"),
-            ("c", "create_account", "Create"),
-            ("p", "reset_account_password", "Password"),
-            ("g", "set_account_gm", "Set GM"),
-            ("n", "ban_account", "Ban"),
-            ("u", "unban_account", "Unban"),
-            ("l", "rotate_logs", "Rotate Logs"),
-            ("T", "test_logs_config", "Test Config"),
-            ("h", "create_honor_schedule", "Schedule Maintenance"),
-            ("m", "create_restart_schedule", "Schedule Restart"),
-            ("P", "refresh_update_plan", "Update Plan"),
-            ("d", "restore_selected_backup_dry_run", "Dry Run"),
-            ("y", "schedule_daily_backup", "Daily"),
-            ("w", "schedule_weekly_backup", "Weekly"),
-            ("j", "cancel_selected_schedule", "Remove Task"),
-            ("k", "validate_config", "Validate"),
-            ("f", "filter_logs", "Filters"),
-            ("1", "show_overview", "Overview"),
-            ("2", "show_monitor", "Monitor"),
-            ("3", "show_accounts", "Accounts"),
-            ("4", "show_backups", "Backups"),
-            ("5", "show_config", "Config"),
-            ("6", "show_logs", "Logs"),
-            ("7", "show_operations", "Ops"),
-            ("t", "toggle_theme", "Theme"),
-        ]
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.manager_bin = manager_bin
-            self.config_path = config_path
-            self.refresh_interval = refresh
-            self.theme_name = theme
-            self.screenshot_path = screenshot_path
-            self.snapshot_file = snapshot_file
-            self.screenshot_taken = False
-            self.screenshot_pending = False
-            self.active_view = initial_view if initial_view in VIEW_TITLES else "overview"
-            self.last_action = "loading dashboard data..."
-            self.last_action_receipt = ""
-            self.last_action_next_step = ""
-            self.last_action_view = self.active_view
-            self.action_tone = "info"
-            self.snapshot = empty_snapshot("waiting for first refresh")
-            self.metric_history: list[dict[str, Any]] = []
-            self.selected_account_id = ""
-            self.selected_backup_file = ""
-            self.selected_log_key = ""
-            self.selected_schedule_id = ""
-            self.logs_query = normalize_logs_query()
-            self.update_plan_data: dict[str, Any] | None = None
-            self.refresh_inflight = False
-            self.action_inflight = False
-
-        def compose(self) -> ComposeResult:
-            yield Header(show_clock=True)
-            with Horizontal(id="shell"):
-                yield Static("", id="sidebar")
-                with Container(id="content"):
-                    yield Static("", id="action-banner")
-                    with Container(id="view-stack"):
-                        with Container(id="overview-view", classes="view"):
-                            with Container(id="overview-grid"):
-                                yield Static("", id="service-pane", classes="panel hero-panel")
-                                yield Static("", id="metrics-pane", classes="panel accent-panel")
-                                yield Static("", id="player-pulse-pane", classes="panel hero-panel")
-                                yield Static("", id="alerts-pane", classes="panel accent-panel")
-                        with Container(id="monitor-view", classes="view hidden"):
-                            with Container(id="monitor-grid"):
-                                yield Static("", id="monitor-pressure-pane", classes="panel hero-panel")
-                                yield Static("", id="monitor-process-pane", classes="panel accent-panel")
-                                yield Static("", id="monitor-trends-pane", classes="panel hero-panel")
-                                yield Static("", id="monitor-storage-pane", classes="panel accent-panel")
-                        with Container(id="accounts-view", classes="view hidden"):
-                            with Horizontal(id="accounts-layout"):
-                                with Vertical(classes="panel table-panel", id="accounts-table-layout"):
-                                    yield Static("[b]Account Inventory[/b]", classes="table-detail-title")
-                                    yield DataTable(id="accounts-table", classes="detail-table")
-                                yield Static("", id="account-details", classes="panel hero-panel")
-                        with Container(id="backups-view", classes="view hidden"):
-                            with Horizontal(id="backups-layout"):
-                                yield Static("", id="backup-summary", classes="panel hero-panel")
-                                with Vertical(classes="panel table-panel", id="backups-table-layout"):
-                                    yield Static("[b]Backup Inventory[/b]", classes="table-detail-title")
-                                    yield DataTable(id="backups-table", classes="detail-table")
-                        with Container(id="config-view", classes="view hidden"):
-                            yield Static("", id="config-pane", classes="panel hero-panel")
-                        with Container(id="logs-view", classes="view hidden"):
-                            with Vertical(id="realm-logs-layout"):
-                                yield Static("", id="realm-logs-summary", classes="panel hero-panel")
-                                with Horizontal(id="realm-logs-body"):
-                                    with Vertical(classes="panel table-panel", id="realm-logs-table-layout"):
-                                        yield Static("[b]Recent Events[/b]", classes="table-detail-title")
-                                        yield DataTable(id="realm-logs-table", classes="detail-table")
-                                    yield Static("", id="realm-log-details", classes="panel accent-panel")
-                        with Container(id="operations-view", classes="view hidden"):
-                            with Vertical(id="operations-layout"):
-                                with Horizontal(id="operations-summary"):
-                                    yield Static("", id="logs-pane", classes="panel accent-panel")
-                                    yield Static("", id="update-pane", classes="panel hero-panel")
-                                with Vertical(classes="panel table-panel table-detail", id="schedules-layout"):
-                                    yield Static("[b]Scheduled Tasks[/b]", classes="table-detail-title")
-                                    yield Static("", id="schedule-intro")
-                                    with Horizontal(classes="table-detail-body"):
-                                        yield DataTable(id="schedules-table", classes="detail-table")
-                                        yield Static("", id="schedule-details", classes="detail-pane")
-                    yield Static("", id="command-rail")
-
-        def on_mount(self) -> None:
-            accounts_table = self.query_one("#accounts-table", DataTable)
-            accounts_table.cursor_type = "row"
-            accounts_table.zebra_stripes = True
-            accounts_table.add_columns("ID", "Username", "GM", "Online", "Banned")
-
-            backups_table = self.query_one("#backups-table", DataTable)
-            backups_table.cursor_type = "row"
-            backups_table.zebra_stripes = True
-            backups_table.add_columns("Timestamp", "Size", "File", "Created By")
-
-            realm_logs_table = self.query_one("#realm-logs-table", DataTable)
-            realm_logs_table.cursor_type = "row"
-            realm_logs_table.zebra_stripes = True
-            realm_logs_table.add_columns("Time", "Source", "Severity", "Message")
-
-            schedules_table = self.query_one("#schedules-table", DataTable)
-            schedules_table.cursor_type = "row"
-            schedules_table.zebra_stripes = True
-            schedules_table.add_columns("Type", "Schedule", "Next Run", "ID")
-
-            self.apply_theme()
-            self.apply_view_state()
-            self.request_snapshot_refresh()
-            self.set_interval(self.refresh_interval, self.request_snapshot_refresh)
-
-        def apply_theme(self) -> None:
-            self.theme = "tokyo-night" if self.theme_name == "dark" else "catppuccin-latte"
-            self.remove_class("theme-light")
-            self.remove_class("theme-dark")
-            self.add_class(f"theme-{self.theme_name}")
-
-        def apply_view_state(self) -> None:
-            for view_name in ("overview", "monitor", "accounts", "backups", "config", "logs", "operations"):
-                widget = self.query_one(f"#{view_name}-view", Container)
-                if view_name == self.active_view:
-                    widget.remove_class("hidden")
-                else:
-                    widget.add_class("hidden")
-
-            self.refresh_chrome()
-            if self.active_view == "accounts":
-                self.set_focus(self.query_one("#accounts-table", DataTable))
-            elif self.active_view == "backups":
-                self.set_focus(self.query_one("#backups-table", DataTable))
-            elif self.active_view == "logs":
-                self.set_focus(self.query_one("#realm-logs-table", DataTable))
-            elif self.active_view == "operations":
-                self.set_focus(self.query_one("#schedules-table", DataTable))
-
-        def refresh_chrome(self) -> None:
-            self.query_one("#sidebar", Static).update(
-                render_sidebar(self.active_view, self.last_action, self.snapshot, self.refresh_interval)
-            )
-            self.query_one("#action-banner", Static).update(
-                render_action_banner(
-                    self.active_view,
-                    self.snapshot,
-                    self.last_action,
-                    self.action_tone,
-                    self.refresh_interval,
-                    self.last_action_receipt,
-                    self.last_action_next_step,
-                    self.last_action_view,
-                )
-            )
-            self.query_one("#command-rail", Static).update(render_command_rail(self.active_view))
-
-        def request_snapshot_refresh(self) -> None:
-            if self.refresh_inflight:
-                return
-            self.refresh_inflight = True
-            threading.Thread(target=self.refresh_snapshot_worker, daemon=True).start()
-
-        def refresh_snapshot_worker(self) -> None:
-            try:
-                if self.snapshot_file:
-                    snapshot = load_snapshot_fixture(self.snapshot_file)
-                else:
-                    snapshot = build_snapshot(self.manager_bin, self.config_path, self.logs_query)
-            except Exception as exc:
-                snapshot = empty_snapshot(f"snapshot refresh failed: {exc}")
-            self.call_from_thread(self.apply_snapshot, snapshot)
-
-        def apply_snapshot(self, snapshot: dict[str, Any]) -> None:
-            self.snapshot = snapshot
-            if self.last_action == "loading dashboard data...":
-                self.last_action = "latest data loaded"
-                self.action_tone = "info"
-            if not self.metric_history:
-                self.metric_history = extract_seed_metric_history(snapshot)
-            self.metric_history = append_monitoring_sample(self.metric_history, snapshot)
-            self.refresh_inflight = False
-            self.query_one("#service-pane", Static).update(render_service_panel(snapshot, self.active_view))
-            self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot, self.metric_history, self.refresh_interval))
-            self.query_one("#player-pulse-pane", Static).update(render_player_pulse(snapshot, self.metric_history, self.refresh_interval))
-            self.query_one("#alerts-pane", Static).update(render_alerts_panel(snapshot))
-            self.query_one("#monitor-pressure-pane", Static).update(render_monitor_pressure(snapshot, self.metric_history, self.refresh_interval))
-            self.query_one("#monitor-process-pane", Static).update(render_monitor_processes(snapshot))
-            self.query_one("#monitor-trends-pane", Static).update(render_monitor_trends(snapshot, self.metric_history, self.refresh_interval))
-            self.query_one("#monitor-storage-pane", Static).update(render_monitor_storage(snapshot))
-            self.query_one("#config-pane", Static).update(render_config_panel(snapshot))
-            self.query_one("#realm-logs-summary", Static).update(render_realm_logs_summary(snapshot))
-            self.query_one("#logs-pane", Static).update(render_logs_panel(snapshot))
-            self.query_one("#update-pane", Static).update(render_update_panel(snapshot, self.update_plan_data))
-            self.refresh_accounts(snapshot.get("all_accounts", []))
-            self.refresh_backups(snapshot.get("backups", {}).get("entries", []))
-            self.refresh_logs(snapshot.get("log_events", []))
-            self.refresh_schedules(snapshot.get("schedules", []))
-            self.refresh_chrome()
-            if self.screenshot_path and not self.screenshot_taken and not self.screenshot_pending:
-                self.screenshot_pending = True
-                self.set_timer(0.5, self.capture_screenshot_and_exit)
-
-        def capture_screenshot_and_exit(self) -> None:
-            self.screenshot_taken = True
-            self.save_screenshot(self.screenshot_path)
-            self.exit()
-
-        def selected_account(self) -> dict[str, Any] | None:
-            return find_selected_account(self.snapshot, self.selected_account_id)
-
-        def selected_backup(self) -> dict[str, Any] | None:
-            return find_selected_backup(self.snapshot, self.selected_backup_file)
-
-        def selected_log_entry(self) -> dict[str, Any] | None:
-            return find_selected_log_entry(self.snapshot, self.selected_log_key)
-
-        def selected_schedule(self) -> dict[str, Any] | None:
-            return find_selected_schedule(self.snapshot, self.selected_schedule_id)
-
-        def refresh_accounts(self, accounts: list[dict[str, Any]]) -> None:
-            table = self.query_one("#accounts-table", DataTable)
-            table.clear(columns=False)
-
-            selected_index = 0
-            for index, account in enumerate(accounts):
-                account_id = str(account.get("id", ""))
-                if self.selected_account_id and account_id == self.selected_account_id:
-                    selected_index = index
-                table.add_row(
-                    str(account.get("id", "")),
-                    escape_markup(account.get("username", "")),
-                    str(account.get("gm_level", 0)),
-                    "yes" if account.get("online") else "no",
-                    "yes" if account.get("banned") else "no",
-                    key=account_id,
-                )
-
-            if accounts:
-                current_account = accounts[selected_index]
-                self.selected_account_id = str(current_account.get("id", ""))
-                table.move_cursor(row=selected_index, column=0, animate=False)
-                self.query_one("#account-details", Static).update(render_account_details(current_account, len(accounts)))
-            else:
-                self.selected_account_id = ""
-                self.query_one("#account-details", Static).update(render_account_details(None, len(accounts)))
-
-        def refresh_backups(self, entries: list[dict[str, Any]]) -> None:
-            table = self.query_one("#backups-table", DataTable)
-            table.clear(columns=False)
-
-            selected_entry: dict[str, Any] | None = None
-            selected_index = 0
-            for index, entry in enumerate(sorted(entries, key=lambda item: str(item.get("timestamp", "")), reverse=True)):
-                backup_file = str(entry.get("file", ""))
-                if self.selected_backup_file and backup_file == self.selected_backup_file:
-                    selected_index = index
-                    selected_entry = entry
-                table.add_row(
-                    escape_markup(iso_to_display(entry.get("timestamp"))),
-                    escape_markup(format_bytes(entry.get("size_bytes", 0))),
-                    escape_markup(backup_file),
-                    escape_markup(str(entry.get("created_by", "n/a"))),
-                    key=backup_file,
-                )
-
-            if entries:
-                if selected_entry is None:
-                    selected_entry = sorted(entries, key=lambda item: str(item.get("timestamp", "")), reverse=True)[selected_index]
-                self.selected_backup_file = str(selected_entry.get("file", ""))
-                table.move_cursor(row=selected_index, column=0, animate=False)
-            else:
-                self.selected_backup_file = ""
-
-            self.query_one("#backup-summary", Static).update(
-                render_backups_summary(snapshot=self.snapshot, selected_backup=selected_entry)
-            )
-
-        def refresh_logs(self, entries: list[dict[str, Any]]) -> None:
-            table = self.query_one("#realm-logs-table", DataTable)
-            table.clear(columns=False)
-
-            selected_entry: dict[str, Any] | None = None
-            selected_index = 0
-            for index, entry in enumerate(entries):
-                entry_key = log_entry_key(entry)
-                if self.selected_log_key and entry_key == self.selected_log_key:
-                    selected_index = index
-                    selected_entry = entry
-                table.add_row(
-                    escape_markup(iso_to_display(entry.get("timestamp"))),
-                    escape_markup(str(entry.get("source", ""))),
-                    escape_markup(str(entry.get("severity", ""))),
-                    escape_markup(truncate_text(entry.get("message", ""), 84)),
-                    key=entry_key,
-                )
-
-            if entries:
-                if selected_entry is None:
-                    selected_entry = entries[selected_index]
-                self.selected_log_key = log_entry_key(selected_entry)
-                table.move_cursor(row=selected_index, column=0, animate=False)
-            else:
-                self.selected_log_key = ""
-
-            self.query_one("#realm-log-details", Static).update(
-                render_log_event_details(selected_entry, len(entries))
-            )
-
-        def refresh_schedules(self, schedules: list[dict[str, Any]]) -> None:
-            table = self.query_one("#schedules-table", DataTable)
-            table.clear(columns=False)
-            self.query_one("#schedule-intro", Static).update(render_schedule_intro(schedules))
-
-            selected_index = 0
-            selected_schedule: dict[str, Any] | None = None
-            for index, schedule in enumerate(
-                sorted(schedules, key=lambda item: (str(item.get("next_run", "")), str(item.get("id", ""))))
-            ):
-                schedule_id = str(schedule.get("id", ""))
-                if self.selected_schedule_id and schedule_id == self.selected_schedule_id:
-                    selected_index = index
-                    selected_schedule = schedule
-                table.add_row(
-                    escape_markup(schedule_job_type_label(schedule.get("job_type", ""))),
-                    escape_markup(schedule_label(schedule)),
-                    escape_markup(str(schedule.get("next_run", "") or "n/a")),
-                    escape_markup(schedule_id),
-                    key=schedule_id,
-                )
-
-            if schedules:
-                if selected_schedule is None:
-                    selected_schedule = sorted(
-                        schedules, key=lambda item: (str(item.get("next_run", "")), str(item.get("id", "")))
-                    )[selected_index]
-                self.selected_schedule_id = str(selected_schedule.get("id", ""))
-                table.move_cursor(row=selected_index, column=0, animate=False)
-            else:
-                self.selected_schedule_id = ""
-
-            self.query_one("#schedule-details", Static).update(
-                render_schedule_details(selected_schedule, len(schedules))
-            )
-
-        def update_selected_account(self, row_key: Any) -> None:
-            key_value = player_key_value(row_key)
-            accounts = self.snapshot.get("all_accounts", [])
-            account = next((candidate for candidate in accounts if str(candidate.get("id", "")) == key_value), None)
-            if account is None and accounts:
-                account = accounts[0]
-            self.selected_account_id = str(account.get("id", "")) if account else ""
-            self.query_one("#account-details", Static).update(render_account_details(account, len(accounts)))
-
-        def update_selected_backup(self, row_key: Any) -> None:
-            key_value = player_key_value(row_key)
-            entries = self.snapshot.get("backups", {}).get("entries", [])
-            entry = next((candidate for candidate in entries if str(candidate.get("file", "")) == key_value), None)
-            if entry is None and entries:
-                entry = max(entries, key=lambda item: str(item.get("timestamp", "")))
-            self.selected_backup_file = str(entry.get("file", "")) if entry else ""
-            self.query_one("#backup-summary", Static).update(
-                render_backups_summary(snapshot=self.snapshot, selected_backup=entry)
-            )
-
-        def update_selected_log(self, row_key: Any) -> None:
-            key_value = player_key_value(row_key)
-            entries = self.snapshot.get("log_events", [])
-            entry = next((candidate for candidate in entries if log_entry_key(candidate) == key_value), None)
-            if entry is None and entries:
-                entry = entries[0]
-            self.selected_log_key = log_entry_key(entry) if entry else ""
-            self.query_one("#realm-log-details", Static).update(render_log_event_details(entry, len(entries)))
-
-        def update_selected_schedule(self, row_key: Any) -> None:
-            key_value = player_key_value(row_key)
-            schedules = self.snapshot.get("schedules", [])
-            schedule = next((candidate for candidate in schedules if str(candidate.get("id", "")) == key_value), None)
-            if schedule is None and schedules:
-                schedule = schedules[0]
-            self.selected_schedule_id = str(schedule.get("id", "")) if schedule else ""
-            self.query_one("#schedule-details", Static).update(
-                render_schedule_details(schedule, len(schedules))
-            )
-
-        def open_command_form(
-            self,
-            action_name: str,
-            title: str,
-            submit_label: str,
-            fields: list[dict[str, Any]],
-            intro: str = "",
-        ) -> None:
-            self.push_screen(
-                CommandFormScreen(title=title, submit_label=submit_label, fields=fields, intro=intro),
-                lambda result, action_name=action_name: self.handle_command_form_result(action_name, result),
-            )
-
-        def handle_command_form_result(self, action_name: str, result: dict[str, str] | None) -> None:
-            if result is None:
-                return
-            self.dispatch_dashboard_action(action_name, result)
-
-        def dispatch_dashboard_action(self, action_name: str, form_values: dict[str, Any] | None = None) -> None:
-            request = build_dashboard_action_request(
-                self.snapshot,
-                self.selected_account_id,
-                self.selected_backup_file,
-                self.selected_schedule_id,
-                action_name,
-                form_values,
-            )
-            error = str(request.get("error", ""))
-            if error:
-                self.set_action_result(error, tone="warning")
-                return
-
-            target_view = str(request.get("view", "") or "")
-            if target_view and target_view != self.active_view:
-                self.active_view = target_view
-                self.apply_view_state()
-
-            self.request_command_action(
-                str(request["label"]),
-                list(request["command"]),
-                refresh_after=bool(request.get("refresh_after", True)),
-                env=dict(request.get("env", {})),
-                feedback=dict(request.get("feedback", {})),
-            )
-
-        def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-            if event.data_table.id == "accounts-table":
-                self.update_selected_account(event.row_key)
-            elif event.data_table.id == "backups-table":
-                self.update_selected_backup(event.row_key)
-            elif event.data_table.id == "realm-logs-table":
-                self.update_selected_log(event.row_key)
-            elif event.data_table.id == "schedules-table":
-                self.update_selected_schedule(event.row_key)
-
-        def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-            if event.data_table.id == "accounts-table":
-                self.update_selected_account(event.row_key)
-            elif event.data_table.id == "backups-table":
-                self.update_selected_backup(event.row_key)
-            elif event.data_table.id == "realm-logs-table":
-                self.update_selected_log(event.row_key)
-            elif event.data_table.id == "schedules-table":
-                self.update_selected_schedule(event.row_key)
-
-        def action_show_overview(self) -> None:
-            self.active_view = "overview"
-            self.apply_view_state()
-
-        def action_show_monitor(self) -> None:
-            self.active_view = "monitor"
-            self.apply_view_state()
-
-        def action_show_accounts(self) -> None:
-            self.active_view = "accounts"
-            self.apply_view_state()
-
-        def action_show_backups(self) -> None:
-            self.active_view = "backups"
-            self.apply_view_state()
-
-        def action_show_config(self) -> None:
-            self.active_view = "config"
-            self.apply_view_state()
-
-        def action_show_logs(self) -> None:
-            self.active_view = "logs"
-            self.apply_view_state()
-
-        def action_show_operations(self) -> None:
-            self.active_view = "operations"
-            self.apply_view_state()
-
-        def action_manual_refresh(self) -> None:
-            self.set_action_result(
-                f"manual refresh requested at {datetime.now().strftime('%H:%M:%S')}",
-                tone="info",
-                receipt="Requested a fresh dashboard snapshot from Manager.",
-            )
-            self.request_snapshot_refresh()
-
-        def action_toggle_theme(self) -> None:
-            self.theme_name = "light" if self.theme_name == "dark" else "dark"
-            self.apply_theme()
-            self.set_action_result(
-                f"theme set to {self.theme_name}",
-                tone="success",
-                receipt=f"Switched the dashboard theme to {self.theme_name}.",
-            )
-            self.apply_view_state()
-            self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view))
-
-        def action_start_server(self) -> None:
-            self.request_command_action(
-                "start",
-                ["server", "start", "--wait", "--timeout", "60"],
-                feedback={
-                    "success_receipt": "Requested a realm start.",
-                    "success_next": "Stay in Overview or Logs until auth and world both settle healthy.",
-                    "failure_next": "Inspect service health and recent logs, then retry the start when the host is ready.",
-                },
-            )
-
-        def action_stop_server(self) -> None:
-            self.request_command_action(
-                "stop",
-                ["server", "stop", "--timeout", "60"],
-                feedback={
-                    "success_receipt": "Requested a realm stop.",
-                    "success_next": "Confirm auth and world settle inactive before backups, updates, or maintenance work.",
-                    "failure_next": "Inspect service health and logs, then retry the stop when the host is ready.",
-                },
-            )
-
-        def action_restart_server(self) -> None:
-            self.request_command_action(
-                "restart",
-                ["server", "restart", "--timeout", "60"],
-                feedback={
-                    "success_receipt": "Requested a realm restart.",
-                    "success_next": "Use Overview and Logs to confirm the realm settles cleanly after the restart.",
-                    "failure_next": "Inspect service health and recent logs, then retry the restart when the host is ready.",
-                },
-            )
-
-        def handle_online_roster_result(self, account_id: str | None) -> None:
-            if not account_id:
-                return
-            self.selected_account_id = account_id
-            self.active_view = "accounts"
-            self.apply_view_state()
-            self.refresh_accounts(self.snapshot.get("all_accounts", []))
-
-        def action_open_online_roster(self) -> None:
-            players = self.snapshot.get("players", [])
-            if not players:
-                self.set_action_result("online roster is empty", tone="warning")
-                return
-            self.push_screen(OnlineRosterScreen(players), self.handle_online_roster_result)
-
-        def action_backup_now(self) -> None:
-            self.active_view = "backups"
-            self.apply_view_state()
-            self.request_command_action(
-                "backup",
-                ["backup", "now", "--verify"],
-                feedback={
-                    "success_receipt": "Started a fresh backup with verification enabled.",
-                    "success_next": "Stay in Backups after refresh to review the new archive and protection posture.",
-                    "failure_next": "Review backup directory access and DB connectivity, then retry from Backups.",
-                },
-            )
-
-        def action_verify_selected_backup(self) -> None:
-            backups = self.snapshot.get("backups", {})
-            summary = backups.get("summary", {})
-            backup_dir = str(summary.get("backup_dir", ""))
-            if not self.selected_backup_file or not backup_dir:
-                self.set_action_result("backup verify skipped: no backup selected", tone="warning")
-                return
-
-            backup_path = f"{backup_dir.rstrip('/')}/{self.selected_backup_file}"
-            self.request_command_action(
-                "verify",
-                ["backup", "verify", backup_path, "--level", "1"],
-                refresh_after=False,
-                feedback={
-                    "success_receipt": f"Verified backup {self.selected_backup_file}.",
-                    "success_next": "If you need recovery planning, use restore dry-run here; live restore stays in the CLI.",
-                    "failure_next": "Inspect the selected archive and retry verification from Backups.",
-                },
-            )
-
-        def action_create_account(self) -> None:
-            self.active_view = "accounts"
-            self.apply_view_state()
-            self.open_command_form(
-                "account_create",
-                "Create Account",
-                "Create",
-                [
-                    {"name": "username", "label": "Username", "placeholder": "PLAYERONE"},
-                    {"name": "password", "label": "Password", "password": True},
-                    {"name": "confirm_password", "label": "Confirm Password", "password": True},
-                ],
-                "Create a new VMaNGOS account from the dashboard account workflow.",
-            )
-
-        def action_reset_account_password(self) -> None:
-            account = self.selected_account()
-            if account is None:
-                self.set_action_result("password reset skipped: no account selected")
-                return
-            username = str(account.get("username", "selected account")).strip()
-            self.active_view = "accounts"
-            self.apply_view_state()
-            self.open_command_form(
-                "account_password",
-                "Reset Account Password",
-                "Reset",
-                [
-                    {"name": "password", "label": "New Password", "password": True},
-                    {"name": "confirm_password", "label": "Confirm Password", "password": True},
-                ],
-                f"Reset the password for {username}.",
-            )
-
-        def action_set_account_gm(self) -> None:
-            account = self.selected_account()
-            if account is None:
-                self.set_action_result("set GM skipped: no account selected")
-                return
-            username = str(account.get("username", "selected account")).strip()
-            self.active_view = "accounts"
-            self.apply_view_state()
-            self.open_command_form(
-                "account_setgm",
-                "Set GM Level",
-                "Apply",
-                [
-                    {
-                        "name": "gm_level",
-                        "label": "GM Level (0-3)",
-                        "value": str(account.get("gm_level", 0)),
-                        "placeholder": "0",
-                    }
-                ],
-                f"Adjust GM access for {username}.",
-            )
-
-        def action_ban_account(self) -> None:
-            account = self.selected_account()
-            if account is None:
-                self.set_action_result("account ban skipped: no account selected")
-                return
-            username = str(account.get("username", "selected account")).strip()
-            self.active_view = "accounts"
-            self.apply_view_state()
-            self.open_command_form(
-                "account_ban",
-                "Ban Account",
-                "Ban",
-                [
-                    {"name": "duration", "label": "Duration", "placeholder": "7d"},
-                    {"name": "reason", "label": "Reason", "placeholder": "Abuse"},
-                ],
-                f"Ban {username} from the dashboard moderation workflow.",
-            )
-
-        def action_unban_account(self) -> None:
-            self.dispatch_dashboard_action("account_unban")
-
-        def action_restore_selected_backup_dry_run(self) -> None:
-            backup = self.selected_backup()
-            if backup is None:
-                self.set_action_result("backup restore skipped: no backup selected")
-                return
-            backup_file = str(backup.get("file", "selected backup")).strip()
-            self.active_view = "backups"
-            self.apply_view_state()
-            self.open_command_form(
-                "backup_restore_dry_run",
-                "Restore Dry Run",
-                "Run Dry Run",
-                [],
-                f"Run a dry-run restore check for {backup_file}.",
-            )
-
-        def action_schedule_daily_backup(self) -> None:
-            self.active_view = "backups"
-            self.apply_view_state()
-            self.open_command_form(
-                "backup_schedule_daily",
-                "Schedule Daily Backup",
-                "Schedule",
-                [{"name": "time", "label": "Daily Time (HH:MM)", "value": "04:00", "placeholder": "04:00"}],
-                "Install or update the daily backup timer.",
-            )
-
-        def action_schedule_weekly_backup(self) -> None:
-            self.active_view = "backups"
-            self.apply_view_state()
-            self.open_command_form(
-                "backup_schedule_weekly",
-                "Schedule Weekly Backup",
-                "Schedule",
-                [{"name": "schedule", "label": "Weekly Schedule", "value": "Sun 04:00", "placeholder": "Sun 04:00"}],
-                "Install or update the weekly backup timer.",
-            )
-
-        def action_validate_config(self) -> None:
-            self.dispatch_dashboard_action("config_validate")
-
-        def handle_logs_filter_result(self, result: dict[str, str] | None) -> None:
-            if result is None:
-                return
-
-            query = normalize_logs_query(result)
-            if not LOG_SOURCE_PATTERN.fullmatch(query["source"]):
-                self.set_action_result("logs filter skipped: source must be all, auth, or world", tone="warning")
-                return
-            if not LOG_WINDOW_PATTERN.fullmatch(query["window"]):
-                self.set_action_result("logs filter skipped: window must look like 15m, 1h, or 1d", tone="warning")
-                return
-            if not LOG_SEVERITY_PATTERN.fullmatch(query["severity"]):
-                self.set_action_result("logs filter skipped: severity must be all, debug, info, notice, warning, error, critical, or alert", tone="warning")
-                return
-            if not LOG_LIMIT_PATTERN.fullmatch(query["limit"]) or int(query["limit"]) > 200:
-                self.set_action_result("logs filter skipped: limit must be between 1 and 200", tone="warning")
-                return
-
-            self.logs_query = query
-            self.selected_log_key = ""
-            self.active_view = "logs"
-            self.apply_view_state()
-            self.set_action_result(
-                f"logs filters set: {query['source']} {query['window']} {query['severity']} limit {query['limit']}",
-                tone="info",
-                receipt=f"Focused the realm event feed on source={query['source']}, window={query['window']}, severity={query['severity']}, limit={query['limit']}.",
-                next_step="Inspect Selected Event here, then move to Operations only if the incident becomes maintenance or change-window work.",
-            )
-            self.request_snapshot_refresh()
-
-        def action_filter_logs(self) -> None:
-            self.active_view = "logs"
-            self.apply_view_state()
-            self.push_screen(
-                CommandFormScreen(
-                    title="Log Filters",
-                    submit_label="Apply",
-                    fields=[
-                        {"name": "source", "label": "Source (all|auth|world)", "value": self.logs_query["source"], "placeholder": "all"},
-                        {"name": "window", "label": "Window (15m|1h|1d)", "value": self.logs_query["window"], "placeholder": "15m"},
-                        {"name": "severity", "label": "Severity", "value": self.logs_query["severity"], "placeholder": "all"},
-                        {"name": "limit", "label": "Limit", "value": self.logs_query["limit"], "placeholder": "25"},
-                    ],
-                    intro="Tune the realm log feed shown in this module. The dashboard will keep following the current filters on each refresh.",
-                ),
-                self.handle_logs_filter_result,
-            )
-
-        def action_rotate_logs(self) -> None:
-            self.active_view = "operations"
-            self.apply_view_state()
-            self.dispatch_dashboard_action("logs_rotate")
-
-        def action_test_logs_config(self) -> None:
-            self.active_view = "operations"
-            self.apply_view_state()
-            self.dispatch_dashboard_action("logs_test_config")
-
-        def action_create_honor_schedule(self) -> None:
-            self.active_view = "operations"
-            self.apply_view_state()
-            self.open_command_form(
-                "schedule_honor_create",
-                "Schedule Maintenance",
-                "Schedule",
-                [
-                    {"name": "schedule_type", "label": "Cadence (daily|weekly)", "value": "daily", "placeholder": "daily"},
-                    {"name": "day", "label": "Weekly Day", "value": "Sun", "placeholder": "Sun"},
-                    {"name": "time", "label": "Time (HH:MM)", "value": "06:00", "placeholder": "06:00"},
-                    {"name": "timezone", "label": "Timezone", "value": "UTC", "placeholder": "UTC"},
-                ],
-                "Create a scheduled maintenance task using Manager's configured maintenance command.",
-            )
-
-        def action_create_restart_schedule(self) -> None:
-            self.active_view = "operations"
-            self.apply_view_state()
-            self.open_command_form(
-                "schedule_restart_create",
-                "Schedule Restart",
-                "Schedule",
-                [
-                    {"name": "schedule_type", "label": "Cadence (daily|weekly)", "value": "weekly", "placeholder": "weekly"},
-                    {"name": "day", "label": "Weekly Day", "value": "Sun", "placeholder": "Sun"},
-                    {"name": "time", "label": "Time (HH:MM)", "value": "04:00", "placeholder": "04:00"},
-                    {"name": "timezone", "label": "Timezone", "value": "UTC", "placeholder": "UTC"},
-                    {"name": "warnings", "label": "Warnings", "value": "30,15,5,1", "placeholder": "30,15,5,1"},
-                    {"name": "announce", "label": "Announcement", "value": "Weekly maintenance", "placeholder": "Weekly maintenance"},
-                ],
-                "Create a scheduled restart window with warning timers.",
-            )
-
-        def action_refresh_update_plan(self) -> None:
-            self.active_view = "operations"
-            self.apply_view_state()
-            self.request_update_plan_refresh()
-
-        def action_cancel_selected_schedule(self) -> None:
-            schedule = self.selected_schedule()
-            if schedule is None:
-                self.set_action_result("task removal skipped: no task selected", tone="warning")
-                return
-            schedule_id = str(schedule.get("id", "selected schedule")).strip()
-            self.active_view = "operations"
-            self.apply_view_state()
-            self.open_command_form(
-                "schedule_cancel",
-                "Remove Scheduled Task",
-                "Remove Task",
-                [],
-                f"Remove scheduled task {schedule_id} from Manager and systemd.",
-            )
-
-        def request_update_plan_refresh(self) -> None:
-            if self.action_inflight:
-                self.set_action_result("another dashboard action is already running", tone="warning")
-                return
-            self.action_inflight = True
-            view_context = self.active_view
-            self.set_action_result(
-                "update plan running...",
-                tone="running",
-                receipt="Checking repo drift and DB impact for the next change window.",
-                view_context=view_context,
-            )
-            threading.Thread(target=self.run_update_plan_action, args=(view_context,), daemon=True).start()
-
-        def run_update_plan_action(self, view_context: str) -> None:
-            try:
-                full_command = [self.manager_bin, "-c", self.config_path, "-f", "json", "update", "plan", "--include-db"]
-                completed = subprocess.run(full_command, capture_output=True, text=True, check=False)
-                if completed.returncode != 0:
-                    output = (completed.stderr or completed.stdout or "").strip().splitlines()
-                    message = output[-1] if output else f"update plan exited with code {completed.returncode}"
-                    self.call_from_thread(self.set_action_result, f"update plan failed: {message}", "error", "", "", view_context)
-                    return
-
-                try:
-                    data = parse_manager_json(completed.stdout)
-                except (json.JSONDecodeError, RuntimeError) as exc:
-                    self.call_from_thread(self.set_action_result, f"update plan failed: {exc}", "error", "", "", view_context)
-                    return
-
-                self.call_from_thread(self.apply_update_plan_data, data, view_context)
-            finally:
-                self.action_inflight = False
-
-        def apply_update_plan_data(self, data: dict[str, Any], view_context: str | None = None) -> None:
-            self.update_plan_data = data
-            warning_text = str(data.get("warning", "") or "")
-            if warning_text:
-                self.set_action_result(
-                    f"update plan refreshed: {warning_text}",
-                    tone="warning",
-                    receipt="Generated a change-window plan and flagged follow-up work before code changes.",
-                    next_step="Review Change Window Readiness, then confirm backups and maintenance timing before any CLI update apply step.",
-                    view_context=view_context,
-                )
-            else:
-                self.set_action_result(
-                    "update plan refreshed",
-                    tone="success",
-                    receipt="Generated a fresh change-window plan with current repo and DB impact.",
-                    next_step="Review the plan snapshot here, then continue the actual update workflow from the CLI after backup and maintenance prep.",
-                    view_context=view_context,
-                )
-            self.query_one("#update-pane", Static).update(render_update_panel(self.snapshot, self.update_plan_data))
-
-        def request_command_action(
-            self,
-            label: str,
-            command: list[str],
-            *,
-            refresh_after: bool = True,
-            env: dict[str, str] | None = None,
-            feedback: dict[str, str] | None = None,
-        ) -> None:
-            if self.action_inflight:
-                self.set_action_result("another dashboard action is already running", tone="warning")
-                return
-            self.action_inflight = True
-            view_context = self.active_view
-            running_receipt = ""
-            if feedback:
-                running_receipt = feedback.get("success_receipt", "")
-            self.set_action_result(f"{label} running...", tone="running", receipt=running_receipt, view_context=view_context)
-            threading.Thread(
-                target=self.run_command_action,
-                args=(label, command, refresh_after, env or {}, feedback or {}, view_context),
-                daemon=True,
-            ).start()
-
-        def run_command_action(
-            self,
-            label: str,
-            command: list[str],
-            refresh_after: bool,
-            env: dict[str, str],
-            feedback: dict[str, str],
-            view_context: str,
-        ) -> None:
-            try:
-                full_command = [self.manager_bin, "-c", self.config_path, *command]
-                command_env = os.environ.copy()
-                command_env.update(env)
-                completed = subprocess.run(full_command, capture_output=True, text=True, check=False, env=command_env)
-                output = (completed.stdout or completed.stderr or "").strip().splitlines()
-                message = output[-1] if output else f"{label} exited with code {completed.returncode}"
-                if completed.returncode == 0:
-                    receipt = feedback.get("success_receipt", "")
-                    next_step = feedback.get("success_next", "")
-                    self.call_from_thread(
-                        self.set_action_result,
-                        f"{label}: {message}",
-                        "success",
-                        receipt,
-                        next_step,
-                        view_context,
-                    )
-                    if refresh_after:
-                        self.call_from_thread(self.request_snapshot_refresh)
-                else:
-                    receipt = feedback.get("failure_receipt", "")
-                    next_step = feedback.get("failure_next", "")
-                    self.call_from_thread(
-                        self.set_action_result,
-                        f"{label} failed: {message}",
-                        "error",
-                        receipt,
-                        next_step,
-                        view_context,
-                    )
-            finally:
-                self.action_inflight = False
-
-        def set_action_result(
-            self,
-            message: str,
-            tone: str = "info",
-            receipt: str = "",
-            next_step: str = "",
-            view_context: str | None = None,
-        ) -> None:
-            self.last_action = message
-            self.last_action_receipt = receipt
-            self.last_action_next_step = next_step
-            self.last_action_view = view_context or self.active_view
-            self.action_tone = tone
-            self.refresh_chrome()
-            self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view))
-            if self.active_view == "operations":
-                self.query_one("#schedule-details", Static).update(
-                    render_schedule_details(self.selected_schedule(), len(self.snapshot.get("schedules", [])))
-                )
-                self.query_one("#update-pane", Static).update(render_update_panel(self.snapshot, self.update_plan_data))
-
-    return VMangosDashboard()
+"""
 
 
 def main(argv: list[str] | None = None) -> int:
