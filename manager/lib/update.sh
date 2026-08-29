@@ -1449,5 +1449,5 @@ update_apply() {
     log_info "✓ Update applied successfully"
     log_info "Current source commit: $(update_git -C "$repo_root" rev-parse HEAD)"
     log_info "Post-update status:"
-    server_status "text"
+    server_status_text
 }

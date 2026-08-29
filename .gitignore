@@ -21,6 +21,7 @@ PRD.md
 *.bak
 *.swp
 *~
+__pycache__/
 
 # OS files
 .DS_Store

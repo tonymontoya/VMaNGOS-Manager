@@ -14,6 +14,7 @@ LIB_DIR="$MANAGER_DIR/lib"
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
+REGISTERED_TESTS=()
 
 # Colors
 RED='\033[0;31m'
@@ -59,17 +60,43 @@ assert_file_exists() {
 
 run_test() {
     local name="$1" func="$2"
-    local result=0
     echo ""
     echo "Running: $name"
     TESTS_RUN=$((TESTS_RUN + 1))
+    REGISTERED_TESTS+=("$func")
     if $func; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))
-        result=1
     fi
-    return $result
+    # Never propagate failure to the caller: the suite must run to completion
+    # so every failure is reported in the summary.
+    return 0
+}
+
+report_unregistered_tests() {
+    local defined_tests unregistered=()
+    defined_tests=$(compgen -A function test_ || true)
+    if [[ -z "$defined_tests" ]]; then
+        return 0
+    fi
+    local fn
+    while IFS= read -r fn; do
+        [[ -n "$fn" ]] || continue
+        if [[ ! " ${REGISTERED_TESTS[*]:-} " == *" $fn "* ]]; then
+            unregistered+=("$fn")
+        fi
+    done <<< "$defined_tests"
+    if [[ ${#unregistered[@]} -gt 0 ]]; then
+        echo ""
+        echo -e "${RED}Unregistered test functions (defined but never run):${NC}"
+        local fn2
+        for fn2 in "${unregistered[@]}"; do
+            echo "  - $fn2"
+        done
+        return 1
+    fi
+    return 0
 }
 
 create_test_config() {
@@ -1382,7 +1409,7 @@ test_update_apply_runs_backup_and_rebuild_workflow() {
     update_run_make_build() { printf 'makebuild|\n' >> "$call_log_file"; }
     update_run_make_install() { printf 'makeinstall|\n' >> "$call_log_file"; }
     update_post_apply_verify() { printf 'verify|\n' >> "$call_log_file"; }
-    server_status() { printf 'status|\n' >> "$call_log_file"; }
+    server_status_text() { printf 'status|\n' >> "$call_log_file"; }
     update_nproc() { printf '4\n'; }
     update_git() {
         local args="$*"
@@ -1603,17 +1630,22 @@ test_update_apply_include_db_runs_migrations() {
     SKIP_ROOT_INIT=1
 
     local all_passed=0
-    local output call_log_file pulled=0 repo_root migration_path
+    local output call_log_file pulled=0 install_root repo_root migration_path
     call_log_file=$(mktemp)
-    repo_root=$(mktemp -d)
+    install_root=$(mktemp -d)
+    repo_root="$install_root/source"
     migration_path="$repo_root/sql/migrations/20260420000000_world.sql"
     mkdir -p "$repo_root/sql/migrations"
     printf '%s\n' '-- migration' > "$migration_path"
 
     OUTPUT_FORMAT="text"
     check_root() { :; }
+    # The git stub cannot reference the repo_root local: update_apply declares
+    # its own (initially unassigned) repo_root local, which shadows the test's
+    # under dynamic scoping and trips set -u inside the stub. Use a global.
+    TEST_DB_APPLY_REPO_ROOT="$repo_root"
     config_load() {
-        CONFIG_SERVER_INSTALL_ROOT="/opt/mangos"
+        CONFIG_SERVER_INSTALL_ROOT="$install_root"
         CONFIG_DATABASE_HOST="127.0.0.1"
         CONFIG_DATABASE_PORT="3306"
         CONFIG_DATABASE_USER="mangos"
@@ -1632,7 +1664,7 @@ test_update_apply_include_db_runs_migrations() {
     update_run_make_build() { printf 'makebuild|\n' >> "$call_log_file"; }
     update_run_make_install() { printf 'makeinstall|\n' >> "$call_log_file"; }
     update_post_apply_verify() { printf 'verify|\n' >> "$call_log_file"; }
-    server_status() { printf 'status|\n' >> "$call_log_file"; }
+    server_status_text() { printf 'status|\n' >> "$call_log_file"; }
     update_nproc() { printf '4\n'; }
     update_list_current_migration_files() {
         if [[ "$pulled" -eq 1 ]]; then
@@ -1660,24 +1692,24 @@ test_update_apply_include_db_runs_migrations() {
     update_git() {
         local args="$*"
         case "$args" in
-            *"$repo_root rev-parse --show-toplevel"*) printf '%s\n' "$repo_root" ;;
-            *"$repo_root rev-parse --abbrev-ref --symbolic-full-name @{upstream}"*) printf 'origin/development\n' ;;
-            *"$repo_root rev-parse --abbrev-ref HEAD"*) printf 'development\n' ;;
-            *"$repo_root fetch --quiet origin"*) return 0 ;;
-            *"$repo_root rev-parse origin/development^{commit}"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
-            *"$repo_root rev-parse origin/development"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
-            *"$repo_root rev-list --count HEAD..origin/development"*) printf '1\n' ;;
-            *"$repo_root rev-list --count origin/development..HEAD"*) printf '0\n' ;;
-            *"$repo_root status --porcelain"*) return 0 ;;
-            *"$repo_root diff --name-status --find-renames HEAD..origin/development -- sql"*)
+            *"$TEST_DB_APPLY_REPO_ROOT rev-parse --show-toplevel"*) printf '%s\n' "$TEST_DB_APPLY_REPO_ROOT" ;;
+            *"$TEST_DB_APPLY_REPO_ROOT rev-parse --abbrev-ref --symbolic-full-name @{upstream}"*) printf 'origin/development\n' ;;
+            *"$TEST_DB_APPLY_REPO_ROOT rev-parse --abbrev-ref HEAD"*) printf 'development\n' ;;
+            *"$TEST_DB_APPLY_REPO_ROOT fetch --quiet origin"*) return 0 ;;
+            *"$TEST_DB_APPLY_REPO_ROOT rev-parse origin/development^{commit}"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"$TEST_DB_APPLY_REPO_ROOT rev-parse origin/development"*) printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' ;;
+            *"$TEST_DB_APPLY_REPO_ROOT rev-list --count HEAD..origin/development"*) printf '1\n' ;;
+            *"$TEST_DB_APPLY_REPO_ROOT rev-list --count origin/development..HEAD"*) printf '0\n' ;;
+            *"$TEST_DB_APPLY_REPO_ROOT status --porcelain"*) return 0 ;;
+            *"$TEST_DB_APPLY_REPO_ROOT diff --name-status --find-renames HEAD..origin/development -- sql"*)
                 printf 'A\tsql/migrations/20260420000000_world.sql\n'
                 ;;
-            *"$repo_root pull --ff-only origin development"*)
+            *"$TEST_DB_APPLY_REPO_ROOT pull --ff-only origin development"*)
                 pulled=1
                 printf 'pull|\n' >> "$call_log_file"
                 return 0
                 ;;
-            *"$repo_root rev-parse HEAD"*)
+            *"$TEST_DB_APPLY_REPO_ROOT rev-parse HEAD"*)
                 if [[ "$pulled" -eq 1 ]]; then
                     printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
                 else
@@ -1696,7 +1728,8 @@ test_update_apply_include_db_runs_migrations() {
     assert_true "[[ \$output == *'Applying world migration 20260420000000 to world'* ]]" "update_apply --include-db logs world migration application" || all_passed=1
 
     rm -f "$call_log_file"
-    rm -rf "$repo_root"
+    rm -rf "$install_root"
+    TEST_DB_APPLY_REPO_ROOT=""
     OUTPUT_FORMAT="text"
     return $all_passed
 }
@@ -3540,12 +3573,13 @@ test_backup_clean_age_retention() {
     BACKUP_DIR="$temp_dir"
     BACKUP_RETENTION_DAYS=30
 
-    cat > "$temp_dir/old.json" << 'EOF'
-{"timestamp":"2026-01-01T00:00:00+00:00","basename":"old"}
-EOF
-    cat > "$temp_dir/recent.json" << 'EOF'
-{"timestamp":"2026-04-10T00:00:00+00:00","basename":"recent"}
-EOF
+    # Timestamps are computed relative to now so this test never rots (#83).
+    local old_ts recent_ts
+    old_ts=$(date -u -d "-45 days" +%Y-%m-%dT00:00:00+00:00)
+    recent_ts=$(date -u -d "-2 days" +%Y-%m-%dT00:00:00+00:00)
+
+    printf '{"timestamp":"%s","basename":"old"}\n' "$old_ts" > "$temp_dir/old.json"
+    printf '{"timestamp":"%s","basename":"recent"}\n' "$recent_ts" > "$temp_dir/recent.json"
     : > "$temp_dir/old.sql.gz"
     : > "$temp_dir/recent.sql.gz"
 
@@ -3813,8 +3847,11 @@ main() {
     run_test "Update: Unsafe source repo" test_update_check_reports_unsafe_source_repo
     run_test "Update: Plan text output" test_update_plan_text_output
     run_test "Update: Plan JSON output" test_update_plan_json_output
+    run_test "Update: Inspect DB migrations" test_update_inspect_reports_supported_db_migrations
+    run_test "Update: Plan include-db manual review" test_update_plan_include_db_reports_manual_review
     run_test "Update: Apply workflow" test_update_apply_runs_backup_and_rebuild_workflow
     run_test "Update: Apply rejects dirty tree" test_update_apply_rejects_dirty_source_tree
+    run_test "Update: Apply include-db migrations" test_update_apply_include_db_runs_migrations
     run_test "Packaging: Install and uninstall" test_make_install_and_uninstall_targets
     run_test "Dashboard: Bootstrap and launch" test_dashboard_bootstrap_and_run
     run_test "Dashboard: Snapshot aggregation" test_dashboard_snapshot_json_aggregates_backend
@@ -3861,6 +3898,11 @@ main() {
     run_test "Backup: Restore dry-run non-mutating" test_backup_restore_dry_run_non_mutating
     run_test "Backup: Restore requires explicit creds" test_backup_restore_requires_explicit_credentials
     
+    local unregistered_failed=0
+    if ! report_unregistered_tests; then
+        unregistered_failed=1
+    fi
+
     echo ""
     echo "========================================"
     echo "Test Summary"
@@ -3869,8 +3911,8 @@ main() {
     echo -e "${GREEN}Passed:${NC} $TESTS_PASSED"
     echo -e "${RED}Failed:${NC} $TESTS_FAILED"
     echo ""
-    
-    if [[ $TESTS_FAILED -eq 0 ]]; then
+
+    if [[ $TESTS_FAILED -eq 0 && $unregistered_failed -eq 0 ]]; then
         echo -e "${GREEN}All tests passed!${NC}"
         return 0
     else

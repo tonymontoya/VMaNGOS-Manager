@@ -294,40 +294,24 @@ backup_preflight_check() {
 backup_estimate_size() {
     # Estimate backup size based on database sizes
     # Query information_schema for rough estimate
-    local opts total_size=0
-    opts=$(backup_mysql_opts)
-    
+    local total_size=0
+
     for db in "${BACKUP_DATABASES[@]}"; do
         local size
-        size=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" ${DB_PASS:+-p$DB_PASS} -N -B -e "
+        # MYSQL_PWD keeps credentials off the command line (visible via ps otherwise)
+        size=$(MYSQL_PWD="$DB_PASS" mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B -e "
             SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024)
             FROM information_schema.tables
             WHERE table_schema = '$db'
         " 2>/dev/null || echo "0")
-        
+
         if [[ "$size" =~ ^[0-9]+$ ]]; then
             total_size=$((total_size + size))
         fi
     done
-    
+
     # Add 20% overhead for mysqldump text format
     echo $((total_size * 12 / 10))
-}
-
-# ============================================================================
-# MYSQL HELPERS
-# ============================================================================
-
-backup_mysql_opts() {
-    local opts="-h $DB_HOST -P $DB_PORT -u $DB_USER"
-    [[ -n "$DB_PASS" ]] && opts="$opts -p'$DB_PASS'"
-    echo "$opts"
-}
-
-db_check_connection() {
-    local opts
-    opts=$(backup_mysql_opts)
-    mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" ${DB_PASS:+-p$DB_PASS} -e "SELECT 1" "$AUTH_DB" >/dev/null 2>&1
 }
 
 # ============================================================================
@@ -445,11 +429,10 @@ backup_now() {
     
     # Perform backup
     log_info "Dumping databases..."
-    local opts
-    opts=$(backup_mysql_opts)
-    
+
     # Dump all required databases
-    if ! mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" ${DB_PASS:+-p$DB_PASS} \
+    # MYSQL_PWD keeps credentials off the command line (visible via ps otherwise)
+    if ! MYSQL_PWD="$DB_PASS" mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" \
         --single-transaction \
         --routines \
         --triggers \

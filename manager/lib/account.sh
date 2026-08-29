@@ -250,11 +250,8 @@ account_mysql_query() {
 
     account_load_config || return 1
 
-    if [[ -n "$ACCOUNT_DB_PASS" ]]; then
-        mysql -h "$ACCOUNT_DB_HOST" -P "$ACCOUNT_DB_PORT" -u "$ACCOUNT_DB_USER" -p"$ACCOUNT_DB_PASS" -N -B -e "$query" "$database" 2>/dev/null
-    else
-        mysql -h "$ACCOUNT_DB_HOST" -P "$ACCOUNT_DB_PORT" -u "$ACCOUNT_DB_USER" -N -B -e "$query" "$database" 2>/dev/null
-    fi
+    # MYSQL_PWD keeps credentials off the command line (visible via ps otherwise)
+    MYSQL_PWD="$ACCOUNT_DB_PASS" mysql -h "$ACCOUNT_DB_HOST" -P "$ACCOUNT_DB_PORT" -u "$ACCOUNT_DB_USER" -N -B -e "$query" "$database" 2>/dev/null
 }
 
 account_mysql_exec() {
@@ -263,11 +260,8 @@ account_mysql_exec() {
 
     account_load_config || return 1
 
-    if [[ -n "$ACCOUNT_DB_PASS" ]]; then
-        mysql -h "$ACCOUNT_DB_HOST" -P "$ACCOUNT_DB_PORT" -u "$ACCOUNT_DB_USER" -p"$ACCOUNT_DB_PASS" -N -B -e "$query" "$database" >/dev/null 2>&1
-    else
-        mysql -h "$ACCOUNT_DB_HOST" -P "$ACCOUNT_DB_PORT" -u "$ACCOUNT_DB_USER" -N -B -e "$query" "$database" >/dev/null 2>&1
-    fi
+    # MYSQL_PWD keeps credentials off the command line (visible via ps otherwise)
+    MYSQL_PWD="$ACCOUNT_DB_PASS" mysql -h "$ACCOUNT_DB_HOST" -P "$ACCOUNT_DB_PORT" -u "$ACCOUNT_DB_USER" -N -B -e "$query" "$database" >/dev/null 2>&1
 }
 
 account_resolve_account_id() {

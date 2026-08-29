@@ -72,11 +72,8 @@ server_mysql_query() {
     local database="$1"
     local query="$2"
 
-    if [[ -n "$DB_PASS" ]]; then
-        mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -N -B -e "$query" "$database" 2>/dev/null
-    else
-        mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B -e "$query" "$database" 2>/dev/null
-    fi
+    # MYSQL_PWD keeps credentials off the command line (visible via ps otherwise)
+    MYSQL_PWD="$DB_PASS" mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -N -B -e "$query" "$database" 2>/dev/null
 }
 
 get_online_player_count_result() {
