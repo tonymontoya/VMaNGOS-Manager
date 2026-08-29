@@ -9,7 +9,7 @@ set -euo pipefail
 # GLOBALS
 # ============================================================================
 
-readonly VERSION="0.2.0"
+readonly VERSION="0.2.2"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -28,7 +28,7 @@ CONFIG_FILE="${MANAGER_CONFIG:-/opt/mangos/manager/config/manager.conf}"
 show_help() {
     cat << 'EOF'
 VMANGOS Manager - Server Management Tool
-Version: 0.2.0
+Version: 0.2.2
 
 USAGE:
     vmangos-manager [GLOBAL_OPTIONS] <COMMAND> [SUBCOMMAND_OPTIONS]
