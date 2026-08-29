@@ -2616,6 +2616,158 @@ PY
     return $all_passed
 }
 
+test_dashboard_render_markup_safety() {
+    local all_passed=0 output
+
+    output=$(python3 - "$MANAGER_DIR/lib/dashboard.py" <<'PY'
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("dashboard_module", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+HOSTILE = "[Warning] [$ecret] [/root] access denied for 'root'@localhost"
+MARKERS = ("[Warning]", "[$ecret]", "[/root]")
+
+error_snapshot = {
+    "captured_at": "2026-04-13T21:45:00+00:00",
+    "players": [],
+    "backups": {"summary": {"count": 0, "backup_dir": "/opt/mangos/backups"}},
+    "backup_schedule_status": {"ok": False, "error": HOSTILE},
+    "logs": {"ok": False, "error": HOSTILE},
+    "realm_logs": {"ok": False, "error": HOSTILE},
+    "update_check": {"ok": False, "error": HOSTILE},
+    "update_inspect": {"ok": False, "error": HOSTILE},
+    "server": {"ok": False, "error": HOSTILE},
+    "config_validate": {"ok": False, "error": HOSTILE},
+    "config_summary": {},
+    "config_path": "/opt/mangos/manager/config/manager.conf",
+    "log_events": [],
+    "schedules": [],
+}
+
+data_snapshot = {
+    "captured_at": "2026-04-13T21:45:00+00:00",
+    "players": [{"id": 8, "username": HOSTILE, "gm_level": 1, "online": True, "banned": False}],
+    "backups": {"summary": {"count": 1, "backup_dir": HOSTILE, "latest_file": HOSTILE, "latest_timestamp": HOSTILE, "latest_size_bytes": 52428800}},
+    "backup_schedule_status": {
+        "ok": True,
+        "data": {
+            "schedules": [{"id": HOSTILE, "present": True, "enabled": True, "active": True, "configured": HOSTILE, "next_run": HOSTILE}],
+        },
+    },
+    "logs": {
+        "ok": True,
+        "data": {
+            "status": "healthy",
+            "config": {"present": True, "in_sync": True},
+            "logs": {"active_files": 4, "rotated_files": 2, "sensitive_permissions_ok": True},
+            "disk": {"used_percent": 18, "available_kb": 2097152},
+            "policy": {"max_size": HOSTILE, "min_size": HOSTILE},
+        },
+    },
+    "realm_logs": {
+        "ok": True,
+        "data": {
+            "filters": {"source": HOSTILE, "window": HOSTILE, "severity": HOSTILE, "limit": 25},
+            "summary": {"backing": "journald", "events_returned": 1, "sources_available": 2, "sources_requested": 2},
+            "capabilities": {"severity_filter_supported": True, "time_window_supported": True, "follow_via_refresh": True},
+        },
+    },
+    "update_check": {"ok": True, "data": {"branch": "development", "commits_behind": 2, "update_available": True, "worktree_dirty": False}},
+    "update_inspect": {"ok": True, "data": {"db_assessment": "no_changes", "db_automation_supported": True}},
+    "server": {
+        "ok": True,
+        "data": {
+            "services": {},
+            "checks": {"database_connectivity": {"ok": True, "message": "ok"}, "disk_space": {"used_percent": 24, "status": "ok", "available_kb": 6291456}},
+            "players": {"online": 1, "source": "auth.account.online"},
+            "host": {"cpu": {"usage_percent": 31.5, "status": "ok", "cores": 8}, "memory": {"used_percent": 48.0, "status": "ok"}, "load": {"load_1": 0.62, "status": "ok"}},
+            "storage_io": {"available": True, "util_percent": 33.0, "status": "ok"},
+            "alerts": {
+                "status": "warning",
+                "active": [{"severity": "critical", "source": HOSTILE, "message": HOSTILE}],
+                "recent_events": [{"timestamp": HOSTILE, "service": HOSTILE, "message": HOSTILE}],
+            },
+        },
+    },
+    "config_validate": {"ok": True, "data": {"valid": True}},
+    "config_summary": {
+        "install_root": HOSTILE,
+        "auth_service": HOSTILE,
+        "world_service": HOSTILE,
+        "backup_dir": HOSTILE,
+        "db_host": HOSTILE,
+        "db_user": HOSTILE,
+        "auth_db": HOSTILE,
+        "world_db": HOSTILE,
+        "characters_db": HOSTILE,
+        "logs_db": HOSTILE,
+        "db_secret_source": "inline",
+    },
+    "config_path": "/opt/mangos/manager/config/manager.conf",
+    "log_events": [{"timestamp": HOSTILE, "source": HOSTILE, "service": HOSTILE, "unit": HOSTILE, "identifier": HOSTILE, "severity": "error", "message": HOSTILE}],
+    "schedules": [{"id": HOSTILE, "job_type": "restart", "schedule_type": "weekly", "time": "04:00", "day": "Sun", "timezone": "UTC", "warnings": HOSTILE, "announce_message": HOSTILE, "next_run": HOSTILE}],
+}
+
+history = []
+outputs = {}
+
+for name, snapshot in (("error", error_snapshot), ("data", data_snapshot)):
+    outputs[f"{name}:service"] = module.render_service_panel(snapshot, "overview")
+    outputs[f"{name}:metrics"] = module.render_metrics_panel(snapshot, history, 2)
+    outputs[f"{name}:pressure"] = module.render_monitor_pressure(snapshot, history, 2)
+    outputs[f"{name}:processes"] = module.render_monitor_processes(snapshot)
+    outputs[f"{name}:trends"] = module.render_monitor_trends(snapshot, history, 2)
+    outputs[f"{name}:storage"] = module.render_monitor_storage(snapshot)
+    outputs[f"{name}:player_pulse"] = module.render_player_pulse(snapshot, history, 2)
+    outputs[f"{name}:alerts"] = module.render_alerts_panel(snapshot)
+    outputs[f"{name}:backups"] = module.render_backups_summary(snapshot, None)
+    outputs[f"{name}:config"] = module.render_config_panel(snapshot)
+    outputs[f"{name}:realm_logs"] = module.render_realm_logs_summary(snapshot)
+    outputs[f"{name}:logs"] = module.render_logs_panel(snapshot)
+    outputs[f"{name}:update"] = module.render_update_panel(snapshot, {"warning": HOSTILE, "steps": [HOSTILE]})
+    outputs[f"{name}:sidebar"] = module.render_sidebar("operations", HOSTILE, snapshot, 2)
+    outputs[f"{name}:banner"] = module.render_action_banner("operations", snapshot, HOSTILE, "error", 2, HOSTILE, HOSTILE)
+    outputs[f"{name}:schedule_intro"] = module.render_schedule_intro(snapshot["schedules"])
+
+outputs["data:player"] = module.render_player_details(data_snapshot["players"][0], 1)
+outputs["data:account"] = module.render_account_details({"id": 8, "username": HOSTILE, "gm_level": 1, "online": True, "banned": False}, 1)
+outputs["data:log_detail"] = module.render_log_event_details(data_snapshot["log_events"][0], 1)
+outputs["data:schedule"] = module.render_schedule_details(data_snapshot["schedules"][0], 1)
+
+failures = []
+for name, text in outputs.items():
+    for marker in MARKERS:
+        if marker in text:
+            failures.append(f"{name} leaked raw markup {marker!r}")
+
+if r"\[Warning\]" not in outputs["error:alerts"]:
+    failures.append("error:alerts does not carry the escaped error text")
+if r"\[Warning\]" not in outputs["error:config"]:
+    failures.append("error:config does not carry the escaped error text")
+if r"\[Warning\]" not in outputs["data:alerts"]:
+    failures.append("data:alerts does not carry escaped alert/event fields")
+if r"\[Warning\]" not in outputs["data:config"]:
+    failures.append("data:config does not carry escaped wiring fields")
+
+if failures:
+    for failure in failures:
+        print(failure, file=sys.stderr)
+    raise SystemExit(1)
+
+print(json.dumps({"panels_checked": len(outputs)}, sort_keys=True))
+print("MARKUP-SAFE")
+PY
+    ) || all_passed=1
+
+    assert_true "[[ \$all_passed -eq 0 && \$output == *'MARKUP-SAFE'* ]]" "dashboard renders bracket-hostile errors and fields through markup escaping in every panel" || all_passed=1
+
+    return $all_passed
+}
+
 test_dashboard_monitoring_history_helpers() {
     local all_passed=0 output compact_output
 
@@ -4240,6 +4392,7 @@ main() {
     run_test "Dashboard: Snapshot aggregation" test_dashboard_snapshot_json_aggregates_backend
     run_test "Dashboard: Action requests" test_dashboard_action_request_builder
     run_test "Dashboard: Render helpers" test_dashboard_render_helpers
+    run_test "Dashboard: Render markup safety" test_dashboard_render_markup_safety
     run_test "Dashboard: Monitoring history" test_dashboard_monitoring_history_helpers
     run_test "Dashboard: Snapshot fixture helpers" test_dashboard_snapshot_fixture_helpers
     run_test "Dashboard: Parse args demo capture" test_dashboard_parse_args_supports_demo_capture

@@ -1195,7 +1195,7 @@ def render_action_banner(
     action_view_context: str | None = None,
 ) -> str:
     tone_label, tone_color = ACTION_STYLES.get(action_tone, ACTION_STYLES["info"])
-    captured_at = iso_to_display(snapshot.get("captured_at"))
+    captured_at = escape_markup(iso_to_display(snapshot.get("captured_at")))
     message = escape_markup(truncate_text(last_action or "dashboard started", 140))
     receipt = escape_markup(truncate_text(action_receipt or "", 140))
     next_step = escape_markup(truncate_text(action_next_step or "", 140))
@@ -1251,7 +1251,7 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
         [
             "",
             f"[bold {ACCENT_SKY}]Realm Pulse[/]",
-            f"[{ACCENT_MUTED}]Updated[/]  {iso_to_clock(snapshot.get('captured_at'))}",
+            f"[{ACCENT_MUTED}]Updated[/]  {escape_markup(iso_to_clock(snapshot.get('captured_at')))}",
             f"[{ACCENT_MUTED}]Refresh[/]  {refresh_interval}s",
             f"[{ACCENT_MUTED}]Players[/]  {players.get('online_count', 0)} online",
             f"[{ACCENT_MUTED}]Backups[/]  {backups.get('count', 0)} known",
@@ -1709,7 +1709,7 @@ def render_alerts_panel(snapshot: dict[str, Any]) -> str:
     lines = [f"[bold {ACCENT_GOLD}]Alerts and Events[/]", f"[{ACCENT_MUTED}]Active risk signals plus recent realm-side events worth noticing.[/]", ""]
 
     if not server["ok"]:
-        lines.append(f"[bold {ACCENT_ROSE}]Alerts unavailable:[/] {server['error']}")
+        lines.append(f"[bold {ACCENT_ROSE}]Alerts unavailable:[/] {format_error_text(server['error'])}")
         return "\n".join(lines)
 
     data = server["data"]
@@ -1723,7 +1723,7 @@ def render_alerts_panel(snapshot: dict[str, Any]) -> str:
     if active_alerts:
         for alert in active_alerts[:3]:
             lines.append(
-                f"{format_state(alert.get('severity', 'warning'))} {alert.get('source', 'unknown')}: {alert.get('message', '')}"
+                f"{format_state(alert.get('severity', 'warning'))} {escape_markup(alert.get('source', 'unknown'))}: {escape_markup(truncate_text(alert.get('message', ''), 64))}"
             )
     else:
         lines.append(f"[bold {STATUS_COLORS['healthy']}]No active alerts[/]")
@@ -1732,7 +1732,7 @@ def render_alerts_panel(snapshot: dict[str, Any]) -> str:
     lines.append(f"[bold {ACCENT_SKY}]Recent Events[/]")
     if recent_events:
         for event in recent_events[:4]:
-            lines.append(f"{truncate_text(event.get('timestamp', ''), 19)} {event.get('service', 'unknown')}: {truncate_text(event.get('message', ''), 48)}")
+            lines.append(f"{escape_markup(truncate_text(event.get('timestamp', ''), 19))} {escape_markup(event.get('service', 'unknown'))}: {escape_markup(truncate_text(event.get('message', ''), 48))}")
     else:
         lines.append("No recent events in the last 30 minutes.")
 
@@ -1752,7 +1752,7 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
         "",
         f"[{ACCENT_MUTED}]Protection[/]  {format_state(protection_state)}",
         f"[{ACCENT_MUTED}]Count[/]       {summary.get('count', 0)}",
-        f"[{ACCENT_MUTED}]Directory[/]   {summary.get('backup_dir', 'n/a') or 'n/a'}",
+        f"[{ACCENT_MUTED}]Directory[/]   {escape_markup(summary.get('backup_dir', 'n/a') or 'n/a')}",
     ]
 
     latest_file = summary.get("latest_file", "")
@@ -1760,7 +1760,7 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
         lines.extend(
             [
                 f"[{ACCENT_MUTED}]Latest[/]      {escape_markup(latest_file)}",
-                f"[{ACCENT_MUTED}]When[/]        {iso_to_display(summary.get('latest_timestamp'))}",
+                f"[{ACCENT_MUTED}]When[/]        {escape_markup(iso_to_display(summary.get('latest_timestamp')))}",
                 f"[{ACCENT_MUTED}]Size[/]        {format_bytes(summary.get('latest_size_bytes', 0))}",
             ]
         )
@@ -1771,7 +1771,7 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
     if backup_schedule_status.get("ok"):
         if configured_schedules:
             for entry in configured_schedules:
-                schedule_name = str(entry.get("id", "backup")).title()
+                schedule_name = escape_markup(str(entry.get("id", "backup")).title())
                 schedule_health = "healthy" if entry.get("enabled") and entry.get("active") else "warning"
                 lines.append(
                     f"[{ACCENT_MUTED}]{schedule_name}[/]       {format_state(schedule_health)}  {escape_markup(entry.get('configured', 'n/a'))}"
@@ -1789,7 +1789,7 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
                 "",
                 f"[bold {ACCENT_SKY}]Selected Backup[/]",
                 f"[{ACCENT_MUTED}]File[/]        {escape_markup(selected_backup.get('file', 'n/a'))}",
-                f"[{ACCENT_MUTED}]When[/]        {iso_to_display(selected_backup.get('timestamp'))}",
+                f"[{ACCENT_MUTED}]When[/]        {escape_markup(iso_to_display(selected_backup.get('timestamp')))}",
                 f"[{ACCENT_MUTED}]Size[/]        {format_bytes(selected_backup.get('size_bytes', 0))}",
                 f"[{ACCENT_MUTED}]DBs[/]         {escape_markup(', '.join(selected_backup.get('databases', [])) or 'n/a')}",
                 f"[{ACCENT_MUTED}]Created By[/]  {escape_markup(selected_backup.get('created_by', 'n/a'))}",
@@ -1827,7 +1827,7 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
         valid = validate["data"].get("valid", True)
         lines.append(f"Validation  {format_state('healthy' if valid else 'critical')}")
     else:
-        lines.append(f"[bold {ACCENT_ROSE}]Validation failed:[/] {validate['error']}")
+        lines.append(f"[bold {ACCENT_ROSE}]Validation failed:[/] {format_error_text(validate['error'])}")
 
     lines.extend(
         [
@@ -1835,16 +1835,16 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
             f"[{ACCENT_MUTED}]Config Path[/]   {escape_markup(config_path)}",
             "",
             f"[bold {ACCENT_SKY}]Realm Wiring[/]",
-            f"[{ACCENT_MUTED}]Install Root[/]  {summary.get('install_root', 'n/a') or 'n/a'}",
-            f"[{ACCENT_MUTED}]Auth Service[/]  {summary.get('auth_service', 'n/a') or 'n/a'}",
-            f"[{ACCENT_MUTED}]World Service[/] {summary.get('world_service', 'n/a') or 'n/a'}",
-            f"[{ACCENT_MUTED}]Backup Dir[/]    {summary.get('backup_dir', 'n/a') or 'n/a'}",
+            f"[{ACCENT_MUTED}]Install Root[/]  {escape_markup(summary.get('install_root', 'n/a') or 'n/a')}",
+            f"[{ACCENT_MUTED}]Auth Service[/]  {escape_markup(summary.get('auth_service', 'n/a') or 'n/a')}",
+            f"[{ACCENT_MUTED}]World Service[/] {escape_markup(summary.get('world_service', 'n/a') or 'n/a')}",
+            f"[{ACCENT_MUTED}]Backup Dir[/]    {escape_markup(summary.get('backup_dir', 'n/a') or 'n/a')}",
             "",
             f"[bold {ACCENT_SKY}]Database Wiring[/]",
-            f"[{ACCENT_MUTED}]DB Host[/]       {summary.get('db_host', 'n/a') or 'n/a'}",
-            f"[{ACCENT_MUTED}]DB User[/]       {summary.get('db_user', 'n/a') or 'n/a'}",
+            f"[{ACCENT_MUTED}]DB Host[/]       {escape_markup(summary.get('db_host', 'n/a') or 'n/a')}",
+            f"[{ACCENT_MUTED}]DB User[/]       {escape_markup(summary.get('db_user', 'n/a') or 'n/a')}",
             f"[{ACCENT_MUTED}]DB Secret[/]     {escape_markup(secret_label)}",
-            f"[{ACCENT_MUTED}]DB Names[/]      auth={summary.get('auth_db', 'n/a')} world={summary.get('world_db', 'n/a')} chars={summary.get('characters_db', 'n/a')} logs={summary.get('logs_db', 'n/a')}",
+            f"[{ACCENT_MUTED}]DB Names[/]      auth={escape_markup(summary.get('auth_db', 'n/a'))} world={escape_markup(summary.get('world_db', 'n/a'))} chars={escape_markup(summary.get('characters_db', 'n/a'))} logs={escape_markup(summary.get('logs_db', 'n/a'))}",
             "",
             f"[bold {ACCENT_SKY}]Boundary[/]",
             f"[{ACCENT_MUTED}]Read-only[/]     inspect and validate wiring here; edit manager.conf and .dbpass in the shell.",
@@ -1952,7 +1952,7 @@ def render_realm_logs_summary(snapshot: dict[str, Any]) -> str:
 
     lines.extend(
         [
-            f"[{ACCENT_MUTED}]Filters[/]      source={filters.get('source', 'all')}  window={filters.get('window', '15m')}  severity={filters.get('severity', 'all')}  limit={filters.get('limit', 25)}",
+            f"[{ACCENT_MUTED}]Filters[/]      source={escape_markup(str(filters.get('source', 'all')))}  window={escape_markup(str(filters.get('window', '15m')))}  severity={escape_markup(str(filters.get('severity', 'all')))}  limit={filters.get('limit', 25)}",
             f"[{ACCENT_MUTED}]Events[/]       {events_returned} visible  [{ACCENT_MUTED}]latest[/] {escape_markup(latest_summary)}",
             f"[{ACCENT_MUTED}]Hot Path[/]     {escape_markup(top_severity)}",
             f"[{ACCENT_MUTED}]Source Mix[/]   {escape_markup(source_counts)}",
@@ -1988,7 +1988,7 @@ def render_log_event_details(entry: dict[str, Any] | None, total_count: int) -> 
     lines.extend(
         [
             "",
-            f"[{ACCENT_MUTED}]Time[/]       {iso_to_display(entry.get('timestamp'))}",
+            f"[{ACCENT_MUTED}]Time[/]       {escape_markup(iso_to_display(entry.get('timestamp')))}",
             f"[{ACCENT_MUTED}]Source[/]     {escape_markup(str(entry.get('source', 'unknown')))}",
             f"[{ACCENT_MUTED}]Severity[/]   {format_state(entry.get('severity', 'info'))}",
             f"[{ACCENT_MUTED}]Service[/]    {escape_markup(str(entry.get('service', 'n/a')))}",
@@ -2034,7 +2034,7 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
             f"[{ACCENT_MUTED}]Sensitive[/]     {format_state(sensitive_state)}  perms_ok={log_counts.get('sensitive_permissions_ok', False)}",
             f"[{ACCENT_MUTED}]Files[/]         active={log_counts.get('active_files', 0)}  rotated={log_counts.get('rotated_files', 0)}",
             f"[{ACCENT_MUTED}]Headroom[/]      {disk.get('used_percent', 0)}% used  free {format_gb_from_kb(disk.get('available_kb', 0))}",
-            f"[{ACCENT_MUTED}]Retention[/]     max={policy.get('max_size', 'n/a')}  min={policy.get('min_size', 'n/a')}",
+            f"[{ACCENT_MUTED}]Retention[/]     max={escape_markup(str(policy.get('max_size', 'n/a')))}  min={escape_markup(str(policy.get('min_size', 'n/a')))}",
             "",
             f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
             f"[{ACCENT_MUTED}]Support[/]       [bold {ACCENT_GOLD}]T[/] test log config  [bold {ACCENT_GOLD}]l[/] rotate logs",
@@ -2324,7 +2324,7 @@ def create_app(
                     selected_index = index
                 table.add_row(
                     str(player.get("id", "")),
-                    str(player.get("username", "")),
+                    escape_markup(player.get("username", "")),
                     str(player.get("gm_level", 0)),
                     key=player_id,
                 )
@@ -3085,7 +3085,7 @@ def create_app(
                     selected_index = index
                 table.add_row(
                     str(account.get("id", "")),
-                    str(account.get("username", "")),
+                    escape_markup(account.get("username", "")),
                     str(account.get("gm_level", 0)),
                     "yes" if account.get("online") else "no",
                     "yes" if account.get("banned") else "no",
@@ -3113,10 +3113,10 @@ def create_app(
                     selected_index = index
                     selected_entry = entry
                 table.add_row(
-                    iso_to_display(entry.get("timestamp")),
-                    format_bytes(entry.get("size_bytes", 0)),
-                    backup_file,
-                    str(entry.get("created_by", "n/a")),
+                    escape_markup(iso_to_display(entry.get("timestamp"))),
+                    escape_markup(format_bytes(entry.get("size_bytes", 0))),
+                    escape_markup(backup_file),
+                    escape_markup(str(entry.get("created_by", "n/a"))),
                     key=backup_file,
                 )
 
@@ -3144,10 +3144,10 @@ def create_app(
                     selected_index = index
                     selected_entry = entry
                 table.add_row(
-                    iso_to_display(entry.get("timestamp")),
-                    str(entry.get("source", "")),
-                    str(entry.get("severity", "")),
-                    truncate_text(entry.get("message", ""), 84),
+                    escape_markup(iso_to_display(entry.get("timestamp"))),
+                    escape_markup(str(entry.get("source", ""))),
+                    escape_markup(str(entry.get("severity", ""))),
+                    escape_markup(truncate_text(entry.get("message", ""), 84)),
                     key=entry_key,
                 )
 
@@ -3178,10 +3178,10 @@ def create_app(
                     selected_index = index
                     selected_schedule = schedule
                 table.add_row(
-                    schedule_job_type_label(schedule.get("job_type", "")),
-                    schedule_label(schedule),
-                    str(schedule.get("next_run", "") or "n/a"),
-                    schedule_id,
+                    escape_markup(schedule_job_type_label(schedule.get("job_type", ""))),
+                    escape_markup(schedule_label(schedule)),
+                    escape_markup(str(schedule.get("next_run", "") or "n/a")),
+                    escape_markup(schedule_id),
                     key=schedule_id,
                 )
 
