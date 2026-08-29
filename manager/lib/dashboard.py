@@ -579,6 +579,7 @@ class SelectionTable:
 
     def __init__(self, table: Any) -> None:
         self.table = table
+        self._rendered: tuple[tuple[str, tuple[str, ...]], ...] | None = None
 
     def rebuild(
         self,
@@ -588,16 +589,26 @@ class SelectionTable:
         row_fn: Callable[[dict[str, Any]], list[str]],
         current_key: str,
     ) -> tuple[str, dict[str, Any] | None]:
+        rendered = tuple((key_fn(entry), tuple(row_fn(entry))) for entry in entries)
+
+        if self._rendered is not None and rendered == self._rendered:
+            # Data unchanged: leave the table (and the user's cursor) alone.
+            # Detail panes still refresh from the returned entry.
+            selected = next((entry for entry in entries if key_fn(entry) == current_key), None)
+            return (current_key if selected is not None else "", selected)
+
+        self._rendered = rendered
         self.table.clear(columns=False)
 
         selected_index = 0
         selected: dict[str, Any] | None = None
         for index, entry in enumerate(entries):
-            key_value = key_fn(entry)
+            key_value = rendered[index][0]
+            row_values = rendered[index][1]
             if current_key and key_value == current_key:
                 selected_index = index
                 selected = entry
-            self.table.add_row(*row_fn(entry), key=key_value)
+            self.table.add_row(*row_values, key=key_value)
 
         if not entries:
             return "", None
@@ -1062,102 +1073,119 @@ def extract_seed_metric_history(snapshot: dict[str, Any]) -> list[dict[str, Any]
     return history[-TREND_HISTORY_LIMIT:]
 
 
-def build_snapshot(manager_bin: str, config_path: str, logs_query: dict[str, Any] | None = None) -> dict[str, Any]:
-    query = normalize_logs_query(logs_query)
-    server = run_manager_command(
-        manager_bin,
-        config_path,
-        ["server", "status"],
-        parser_mode="envelope",
-        use_global_json=True,
-    )
-    logs = run_manager_command(
-        manager_bin,
-        config_path,
-        ["logs", "status"],
-        parser_mode="envelope",
-        use_global_json=True,
-    )
-    realm_logs = run_manager_command(
-        manager_bin,
-        config_path,
-        [
+# Which snapshot result keys each view keeps fresh; unlisted keys are
+# carried over from the previous snapshot (or error-defaults on first
+# load). None means "fetch everything" (first load, manual refresh,
+# --snapshot-json fixture capture).
+VIEW_SNAPSHOT_KEYS: dict[str | None, frozenset[str]] = {
+    None: frozenset(
+        {
+            "server",
             "logs",
-            "recent",
-            "--source",
-            query["source"],
-            "--window",
-            query["window"],
-            "--severity",
-            query["severity"],
-            "--limit",
-            query["limit"],
-        ],
-        parser_mode="envelope",
-        use_global_json=True,
+            "realm_logs",
+            "accounts_online",
+            "accounts",
+            "schedule_list",
+            "update_check",
+            "update_inspect",
+            "backup_list",
+            "backup_schedule_status",
+            "config_validate",
+            "config_show",
+        }
+    ),
+    "overview": frozenset({"server", "accounts_online"}),
+    "monitor": frozenset({"server"}),
+    "accounts": frozenset({"accounts_online", "accounts"}),
+    "backups": frozenset({"backup_list", "backup_schedule_status", "config_show"}),
+    "config": frozenset({"config_validate", "config_show"}),
+    "logs": frozenset({"logs", "realm_logs", "schedule_list"}),
+    "operations": frozenset({"server", "logs", "schedule_list", "update_check", "update_inspect"}),
+}
+
+
+def not_fetched_result(key: str) -> dict[str, Any]:
+    return {"ok": False, "data": {}, "error": f"{key} not fetched for this view", "command": "", "exit_code": -1}
+
+
+def carry_snapshot_result(
+    previous: dict[str, Any] | None,
+    key: str,
+    needed: bool,
+    run_fn: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    if needed:
+        return run_fn()
+    carried = (previous or {}).get(key)
+    if isinstance(carried, dict) and carried.get("ok"):
+        return carried
+    return not_fetched_result(key)
+
+
+def build_snapshot(
+    manager_bin: str,
+    config_path: str,
+    logs_query: dict[str, Any] | None = None,
+    view: str | None = None,
+    previous: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    query = normalize_logs_query(logs_query)
+    needed = VIEW_SNAPSHOT_KEYS.get(view, VIEW_SNAPSHOT_KEYS[None])
+
+    def run(command: list[str], *, use_global_json: bool = True) -> dict[str, Any]:
+        return run_manager_command(
+            manager_bin,
+            config_path,
+            command,
+            parser_mode="envelope",
+            use_global_json=use_global_json,
+        )
+
+    server = carry_snapshot_result(previous, "server", "server" in needed, lambda: run(["server", "status"]))
+    logs = carry_snapshot_result(previous, "logs", "logs" in needed, lambda: run(["logs", "status"]))
+    realm_logs = carry_snapshot_result(
+        previous,
+        "realm_logs",
+        "realm_logs" in needed,
+        lambda: run(
+            [
+                "logs",
+                "recent",
+                "--source",
+                query["source"],
+                "--window",
+                query["window"],
+                "--severity",
+                query["severity"],
+                "--limit",
+                query["limit"],
+            ]
+        ),
     )
-    online_accounts = run_manager_command(
-        manager_bin,
-        config_path,
-        ["account", "list", "--online"],
-        parser_mode="envelope",
-        use_global_json=True,
+    online_accounts = carry_snapshot_result(
+        previous, "accounts_online", "accounts_online" in needed, lambda: run(["account", "list", "--online"])
     )
-    accounts = run_manager_command(
-        manager_bin,
-        config_path,
-        ["account", "list"],
-        parser_mode="envelope",
-        use_global_json=True,
+    accounts = carry_snapshot_result(previous, "accounts", "accounts" in needed, lambda: run(["account", "list"]))
+    schedules = carry_snapshot_result(previous, "schedule_list", "schedule_list" in needed, lambda: run(["schedule", "list"]))
+    update_check = carry_snapshot_result(previous, "update_check", "update_check" in needed, lambda: run(["update", "check"]))
+    update_inspect = carry_snapshot_result(previous, "update_inspect", "update_inspect" in needed, lambda: run(["update", "inspect"]))
+    backups = carry_snapshot_result(
+        previous, "backup_list", "backup_list" in needed, lambda: run(["backup", "list", "--format", "json"], use_global_json=False)
     )
-    schedules = run_manager_command(
-        manager_bin,
-        config_path,
-        ["schedule", "list"],
-        parser_mode="envelope",
-        use_global_json=True,
+    backup_schedule_status = carry_snapshot_result(
+        previous,
+        "backup_schedule_status",
+        "backup_schedule_status" in needed,
+        lambda: run(["backup", "schedule", "status", "--format", "json"], use_global_json=False),
     )
-    update_check = run_manager_command(
-        manager_bin,
-        config_path,
-        ["update", "check"],
-        parser_mode="envelope",
-        use_global_json=True,
+    config_validate = carry_snapshot_result(
+        previous,
+        "config_validate",
+        "config_validate" in needed,
+        lambda: run(["config", "validate", "--format", "json"], use_global_json=False),
     )
-    update_inspect = run_manager_command(
-        manager_bin,
-        config_path,
-        ["update", "inspect"],
-        parser_mode="envelope",
-        use_global_json=True,
-    )
-    backups = run_manager_command(
-        manager_bin,
-        config_path,
-        ["backup", "list", "--format", "json"],
-        parser_mode="envelope",
-        use_global_json=False,
-    )
-    backup_schedule_status = run_manager_command(
-        manager_bin,
-        config_path,
-        ["backup", "schedule", "status", "--format", "json"],
-        parser_mode="envelope",
-        use_global_json=False,
-    )
-    config_validate = run_manager_command(
-        manager_bin,
-        config_path,
-        ["config", "validate", "--format", "json"],
-        parser_mode="envelope",
-        use_global_json=False,
-    )
-    config_show = run_manager_command(
-        manager_bin,
-        config_path,
-        ["config", "show", "--format", "json"],
-        parser_mode="envelope",
-        use_global_json=False,
+    config_show = carry_snapshot_result(
+        previous, "config_show", "config_show" in needed, lambda: run(["config", "show", "--format", "json"], use_global_json=False)
     )
 
     config_content = ""
@@ -2341,13 +2369,12 @@ def create_app(
             table.cursor_type = "row"
             table.zebra_stripes = True
             table.add_columns("ID", "Username", "GM")
+            self.roster_table = SelectionTable(table)
             self.refresh_roster()
             self.set_focus(table)
 
         def refresh_roster(self) -> None:
-            self.selected_player_id, selected_player = SelectionTable(
-                self.query_one("#roster-table", DataTable)
-            ).rebuild(
+            self.selected_player_id, selected_player = self.roster_table.rebuild(
                 self.players,
                 key_fn=lambda player: str(player.get("id", "")),
                 row_fn=lambda player: [
@@ -2455,6 +2482,9 @@ def create_app(
             self.logs_query = normalize_logs_query()
             self.update_plan_data: dict[str, Any] | None = None
             self.refresh_inflight = False
+            self.refresh_pending = False
+            self.refresh_force_full = False
+            self.snapshot_loaded = False
             self.action_inflight = False
 
         def compose(self) -> ComposeResult:
@@ -2532,9 +2562,16 @@ def create_app(
             schedules_table.zebra_stripes = True
             schedules_table.add_columns("Type", "Schedule", "Next Run", "ID")
 
+            # Long-lived controllers so unchanged data can skip table churn.
+            self.selection_tables = {
+                "accounts": SelectionTable(accounts_table),
+                "backups": SelectionTable(backups_table),
+                "logs": SelectionTable(realm_logs_table),
+                "schedules": SelectionTable(schedules_table),
+            }
+
             self.apply_theme()
             self.apply_view_state()
-            self.request_snapshot_refresh()
             self.set_interval(self.refresh_interval, self.request_snapshot_refresh)
 
         def apply_theme(self) -> None:
@@ -2552,6 +2589,9 @@ def create_app(
                     widget.add_class("hidden")
 
             self.refresh_chrome()
+            # The newly visible view's data buckets may be stale — fetch
+            # them fresh (coalesced with any inflight refresh).
+            self.request_snapshot_refresh()
             if self.active_view == "accounts":
                 self.set_focus(self.query_one("#accounts-table", DataTable))
             elif self.active_view == "backups":
@@ -2579,8 +2619,14 @@ def create_app(
             )
             self.query_one("#command-rail", Static).update(render_command_rail(self.active_view))
 
-        def request_snapshot_refresh(self) -> None:
+        def request_snapshot_refresh(self, *, full: bool = False) -> None:
+            # Coalesce instead of dropping: if a refresh is already running,
+            # remember that another one is wanted and run it when the
+            # current worker finishes (see apply_snapshot).
+            if full:
+                self.refresh_force_full = True
             if self.refresh_inflight:
+                self.refresh_pending = True
                 return
             self.refresh_inflight = True
             threading.Thread(target=self.refresh_snapshot_worker, daemon=True).start()
@@ -2589,6 +2635,16 @@ def create_app(
             try:
                 if self.snapshot_file:
                     snapshot = load_snapshot_fixture(self.snapshot_file)
+                elif self.snapshot_loaded and not self.refresh_force_full:
+                    # Only the active view's buckets are fetched fresh; the
+                    # rest carry over from the previous snapshot.
+                    snapshot = build_snapshot(
+                        self.manager_bin,
+                        self.config_path,
+                        self.logs_query,
+                        view=self.active_view,
+                        previous=self.snapshot,
+                    )
                 else:
                     snapshot = build_snapshot(self.manager_bin, self.config_path, self.logs_query)
             except Exception as exc:
@@ -2597,6 +2653,7 @@ def create_app(
 
         def apply_snapshot(self, snapshot: dict[str, Any]) -> None:
             self.snapshot = snapshot
+            self.snapshot_loaded = True
             if self.last_action == "loading dashboard data...":
                 self.last_action = "latest data loaded"
                 self.action_tone = "info"
@@ -2604,6 +2661,7 @@ def create_app(
                 self.metric_history = extract_seed_metric_history(snapshot)
             self.metric_history = append_monitoring_sample(self.metric_history, snapshot)
             self.refresh_inflight = False
+            self.refresh_force_full = False
             self.query_one("#service-pane", Static).update(render_service_panel(snapshot, self.active_view))
             self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot, self.metric_history, self.refresh_interval))
             self.query_one("#player-pulse-pane", Static).update(render_player_pulse(snapshot, self.metric_history, self.refresh_interval))
@@ -2624,6 +2682,11 @@ def create_app(
             if self.screenshot_path and not self.screenshot_taken and not self.screenshot_pending:
                 self.screenshot_pending = True
                 self.set_timer(0.5, self.capture_screenshot_and_exit)
+            # A refresh requested while this one was running must not be
+            # dropped — run it now that the UI thread is free again.
+            if self.refresh_pending:
+                self.refresh_pending = False
+                self.request_snapshot_refresh()
 
         def capture_screenshot_and_exit(self) -> None:
             self.screenshot_taken = True
@@ -2643,9 +2706,7 @@ def create_app(
             return find_selected_schedule(self.snapshot, self.selected_schedule_id)
 
         def refresh_accounts(self, accounts: list[dict[str, Any]]) -> None:
-            self.selected_account_id, account = SelectionTable(
-                self.query_one("#accounts-table", DataTable)
-            ).rebuild(
+            self.selected_account_id, account = self.selection_tables["accounts"].rebuild(
                 accounts,
                 key_fn=lambda account: str(account.get("id", "")),
                 row_fn=lambda account: [
@@ -2661,9 +2722,7 @@ def create_app(
 
         def refresh_backups(self, entries: list[dict[str, Any]]) -> None:
             ordered = sorted(entries, key=lambda item: str(item.get("timestamp", "")), reverse=True)
-            self.selected_backup_file, selected_entry = SelectionTable(
-                self.query_one("#backups-table", DataTable)
-            ).rebuild(
+            self.selected_backup_file, selected_entry = self.selection_tables["backups"].rebuild(
                 ordered,
                 key_fn=lambda entry: str(entry.get("file", "")),
                 row_fn=lambda entry: [
@@ -2679,9 +2738,7 @@ def create_app(
             )
 
         def refresh_logs(self, entries: list[dict[str, Any]]) -> None:
-            self.selected_log_key, selected_entry = SelectionTable(
-                self.query_one("#realm-logs-table", DataTable)
-            ).rebuild(
+            self.selected_log_key, selected_entry = self.selection_tables["logs"].rebuild(
                 entries,
                 key_fn=log_entry_key,
                 row_fn=lambda entry: [
@@ -2701,9 +2758,7 @@ def create_app(
             ordered = sorted(
                 schedules, key=lambda item: (str(item.get("next_run", "")), str(item.get("id", "")))
             )
-            self.selected_schedule_id, selected_schedule = SelectionTable(
-                self.query_one("#schedules-table", DataTable)
-            ).rebuild(
+            self.selected_schedule_id, selected_schedule = self.selection_tables["schedules"].rebuild(
                 ordered,
                 key_fn=lambda schedule: str(schedule.get("id", "")),
                 row_fn=lambda schedule: [
@@ -2841,9 +2896,9 @@ def create_app(
             self.set_action_result(
                 f"manual refresh requested at {datetime.now().strftime('%H:%M:%S')}",
                 tone="info",
-                receipt="Requested a fresh dashboard snapshot from Manager.",
+                receipt="Requested a fresh full dashboard snapshot from Manager.",
             )
-            self.request_snapshot_refresh()
+            self.request_snapshot_refresh(full=True)
 
         def action_toggle_theme(self) -> None:
             self.theme_name = "light" if self.theme_name == "dark" else "dark"

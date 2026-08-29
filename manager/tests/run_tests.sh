@@ -2189,6 +2189,139 @@ EOF
     return $all_passed
 }
 
+test_dashboard_view_scoped_snapshot() {
+    local all_passed=0
+    local temp_dir mock_manager mock_log output
+    temp_dir=$(mktemp -d)
+    mock_manager="$temp_dir/mock-manager"
+    mock_log="$temp_dir/invocations.log"
+
+    cat > "$mock_manager" << 'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${MOCK_LOG:?}"
+case "$*" in
+    *"server status"*) echo '{"success":true,"data":{"players":{"online":1}},"error":null}' ;;
+    *"config validate"*) echo '{"success":true,"data":{"valid":true},"error":null}' ;;
+    *"config show"*) echo '{"success":true,"data":{"content":"[server]\ninstall_root = /opt/mangos\n"},"error":null}' ;;
+    *"update check"*) echo '{"success":true,"data":{"commits_behind":2,"update_available":true},"error":null}' ;;
+    *"backup list"*) echo '{"success":true,"data":{"backups":[{"timestamp":"2026-04-13T21:30:00+00:00","file":"b.tar.gz","size_bytes":1}]},"error":null}' ;;
+    *) echo '{"success":true,"data":{},"error":null}' ;;
+esac
+EOF
+    chmod +x "$mock_manager"
+
+    output=$(MOCK_LOG="$mock_log" python3 - "$MANAGER_DIR/lib/dashboard.py" "$mock_manager" "$mock_log" <<'PY'
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("dashboard_module", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+mock_manager, mock_log = sys.argv[2], sys.argv[3]
+
+full = module.build_snapshot(mock_manager, "/dev/null")
+full_invocations = open(mock_log).read().splitlines()
+open(mock_log, "w").close()
+
+scoped = module.build_snapshot(mock_manager, "/dev/null", view="config", previous=full)
+scoped_invocations = open(mock_log).read().splitlines()
+
+print(json.dumps({
+    "full_count": len(full_invocations),
+    "scoped": scoped_invocations,
+    "carried_update_ok": scoped["update_check"]["ok"],
+    "carried_update_behind": scoped["update_check"]["data"].get("commits_behind"),
+    "carried_backup_entries": len(scoped["backups"]["entries"]),
+}, sort_keys=True))
+PY
+    )
+
+    assert_true "[[ \$(printf '%s' \"\$output\" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"full_count\"])') -eq 12 ]]" "full snapshot still fans out to all 12 manager commands" || all_passed=1
+    assert_true "[[ \$(printf '%s' \"\$output\" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)[\"scoped\"]))') -eq 2 ]]" "config-view refresh issues exactly two subprocesses (config validate + show)" || all_passed=1
+    assert_true "[[ \$(printf '%s' \"\$output\" | python3 -c 'import json,sys; print(\" \".join(json.load(sys.stdin)[\"scoped\"]))') != *'update'* && \$(printf '%s' \"\$output\" | python3 -c 'import json,sys; print(\" \".join(json.load(sys.stdin)[\"scoped\"]))') != *'backup'* ]]" "idling on config view spawns no update check or backup list subprocess" || all_passed=1
+    assert_true "[[ \$(printf '%s' \"\$output\" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"carried_update_behind\"])') == 2 && \$(printf '%s' \"\$output\" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"carried_backup_entries\"])') == 1 ]]" "unneeded buckets carry over from the previous snapshot instead of erroring" || all_passed=1
+
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
+test_dashboard_selection_table_skips_unchanged() {
+    local all_passed=0 output
+
+    output=$(python3 - "$MANAGER_DIR/lib/dashboard.py" <<'PY'
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("dashboard_module", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+
+class FakeTable:
+    def __init__(self):
+        self.clears = 0
+        self.rows = []
+        self.cursor_moves = 0
+
+    def clear(self, columns=False):
+        self.clears += 1
+        self.rows = []
+
+    def add_row(self, *values, key=None):
+        self.rows.append((key, values))
+
+    def move_cursor(self, **kwargs):
+        self.cursor_moves += 1
+
+
+entries = [
+    {"id": "7", "username": "PLAYERONE", "gm_level": 0},
+    {"id": "8", "username": "GMADMIN", "gm_level": 3},
+]
+
+def key_fn(entry):
+    return str(entry.get("id", ""))
+
+def row_fn(entry):
+    return [str(entry.get("id", "")), str(entry.get("username", ""))]
+
+table = FakeTable()
+controller = module.SelectionTable(table)
+
+key1, first = controller.rebuild(entries, key_fn=key_fn, row_fn=row_fn, current_key="")
+first_ops = (table.clears, len(table.rows), table.cursor_moves)
+
+key2, second = controller.rebuild(entries, key_fn=key_fn, row_fn=row_fn, current_key=key1)
+unchanged_ops = (table.clears, len(table.rows), table.cursor_moves)
+
+entries_changed = [{**entries[0], "username": "RENAMED"}, entries[1]]
+key3, third = controller.rebuild(entries_changed, key_fn=key_fn, row_fn=row_fn, current_key=key1)
+changed_ops = (table.clears, len(table.rows), table.cursor_moves)
+
+print(json.dumps({
+    "first": {"key": key1, "username": first["username"], "ops": first_ops},
+    "unchanged": {"key": key2, "username": second["username"], "ops": unchanged_ops},
+    "changed": {"key": key3, "username": third["username"], "ops": changed_ops},
+}, sort_keys=True))
+PY
+    )
+
+    local first_ops unchanged_ops changed_ops unchanged_username changed_username
+    first_ops=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["first"]["ops"])')
+    unchanged_ops=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["unchanged"]["ops"])')
+    unchanged_username=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["unchanged"]["username"])')
+    changed_ops=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["changed"]["ops"])')
+    changed_username=$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["changed"]["username"])')
+
+    assert_true "[[ \"\$first_ops\" == '[1, 2, 1]' ]]" "initial rebuild clears, adds both rows, and moves the cursor once" || all_passed=1
+    assert_true "[[ \"\$unchanged_ops\" == '[1, 2, 1]' && \$unchanged_username == 'PLAYERONE' ]]" "identical data performs no table operations but still resolves the selection" || all_passed=1
+    assert_true "[[ \"\$changed_ops\" == '[2, 2, 2]' && \$changed_username == 'RENAMED' ]]" "changed data rebuilds and preserves the selected row key" || all_passed=1
+
+    return $all_passed
+}
+
 test_dashboard_action_request_builder() {
     local all_passed=0 output compact_output
 
@@ -4402,6 +4535,8 @@ main() {
     run_test "Packaging: Install and uninstall" test_make_install_and_uninstall_targets
     run_test "Dashboard: Bootstrap and launch" test_dashboard_bootstrap_and_run
     run_test "Dashboard: Snapshot aggregation" test_dashboard_snapshot_json_aggregates_backend
+    run_test "Dashboard: View-scoped snapshot" test_dashboard_view_scoped_snapshot
+    run_test "Dashboard: Selection table churn" test_dashboard_selection_table_skips_unchanged
     run_test "Dashboard: Action requests" test_dashboard_action_request_builder
     run_test "Dashboard: Render helpers" test_dashboard_render_helpers
     run_test "Dashboard: Render markup safety" test_dashboard_render_markup_safety
