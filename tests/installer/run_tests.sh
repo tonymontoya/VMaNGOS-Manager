@@ -394,34 +394,215 @@ EOF
     ' > "$tmp_dir/phase.out" 2>/dev/null
     output="$(cat "$tmp_dir/phase.out")"
 
-    local capture
+    local capture failed=0
     capture="$(cat "$tmp_dir/capture" 2>/dev/null)"
 
     assert_equals "mapextractor:--silent -i $root/client-data" \
         "$(printf '%s\n' "$capture" | grep '^mapextractor:')" \
-        "mapextractor runs silent against the staged extraction root"
+        "mapextractor runs silent against the staged extraction root" || failed=1
     assert_equals "vmapextractor:--silent -d $root/client-data" \
         "$(printf '%s\n' "$capture" | grep '^vmapextractor:')" \
-        "vmapextractor runs silent with its -d input flag"
+        "vmapextractor runs silent with its -d input flag" || failed=1
     assert_equals "vmap_assembler:--silent $root/Buildings $root/vmaps" \
         "$(printf '%s\n' "$capture" | grep '^vmap_assembler:')" \
-        "vmap_assembler assembles Buildings into vmaps, silently"
+        "vmap_assembler assembles Buildings into vmaps, silently" || failed=1
     assert_equals "MoveMapGen:--silent --offMeshInput offmesh.txt" \
         "$(printf '%s\n' "$capture" | grep '^MoveMapGen:')" \
-        "MoveMapGen runs silent with the offmesh file"
+        "MoveMapGen runs silent with the offmesh file" || failed=1
     assert_equals "1" \
         "$(printf '%s\n' "$output" | grep -c 'Using previously staged client data')" \
-        "extraction phase prepares its root on demand (resume safety)"
+        "extraction phase prepares its root on demand (resume safety)" || failed=1
     assert_equals "0" \
         "$(printf '%s\n' "$output" | grep -c 'Copying client data')" \
-        "staged client data is reused instead of re-copied"
+        "staged client data is reused instead of re-copied" || failed=1
     assert_equals "DATA_DONE" "$(cat "$root/.install-checkpoints/checkpoint")" \
-        "extraction phase completes and checkpoints"
+        "extraction phase completes and checkpoints" || failed=1
     assert_equals "1" \
         "$(if [[ -L "$root/5875/dbc" && -L "$root/5875/maps" && -L "$root/5875/vmaps" && -L "$root/5875/mmaps" ]]; then echo 1; else echo 0; fi)" \
-        "versioned 5875 data symlinks are created on success"
+        "versioned 5875 data symlinks are created on success" || failed=1
 
     rm -rf "$tmp_dir"
+    return "$failed"
+}
+
+test_download_retry_honesty() {
+    local tmp_dir rc
+    tmp_dir="$(mktemp -d)"
+    mkdir -p "$tmp_dir/bin"
+
+    cat > "$tmp_dir/bin/wget" <<'EOF'
+#!/usr/bin/env bash
+out=""
+for a in "$@"; do
+    if [[ "$prev" == "-O" ]]; then out="$a"; fi
+    prev="$a"
+done
+if [[ "${WGET_MODE:-fail}" == "fail" ]]; then
+    : > "${out:-/dev/null}"
+    exit 8
+fi
+if [[ "${WGET_MODE:-}" == "empty" ]]; then
+    : > "${out:?}"
+    exit 0
+fi
+printf 'database-bytes\n' > "${out:?}"
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/wget"
+
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    VMANGOS_DOWNLOAD_RETRY_DELAY=0 \
+    bash -c '
+        set -euo pipefail
+        source "$REPO_ROOT/vmangos_setup.sh"
+        if download_with_retry "https://example.invalid/db.zip" out.zip; then
+            printf "RESULT=pass\n"
+        else
+            printf "RESULT=fail\n"
+        fi
+        WGET_MODE=ok download_with_retry "https://example.invalid/db.zip" ok.zip && \
+            printf "RESULT2=%s\n" "$(cat ok.zip)"
+        WGET_MODE=empty download_with_retry "https://example.invalid/db.zip" empty.zip || \
+            printf "RESULT3=failed-empty\n"
+    ' > "$tmp_dir/test.out" 2>&1
+    rc=$?
+
+    local failed=0
+    assert_equals "0" "$rc" "download helper survives both outcomes without set -e aborts" || failed=1
+    assert_equals "fail" \
+        "$(sed -n 's/^RESULT=//p' "$tmp_dir/test.out")" \
+        "wget error fails the download (no tee masking)" || failed=1
+    assert_equals "3" \
+        "$(grep -c 'wget exited with status 8' "$tmp_dir/install.log" || true)" \
+        "each failed attempt reports wget's status in the log" || failed=1
+    assert_equals "3" \
+        "$(grep -c 'Downloaded file is empty' "$tmp_dir/install.log" || true)" \
+        "empty output file fails the download even when wget exits 0" || failed=1
+    assert_equals "failed-empty" \
+        "$(sed -n 's/^RESULT3=//p' "$tmp_dir/test.out")" \
+        "empty-file download ultimately returns failure" || failed=1
+    assert_equals "database-bytes" \
+        "$(sed -n 's/^RESULT2=//p' "$tmp_dir/test.out")" \
+        "successful download returns the populated file" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
+test_world_db_url_resolution() {
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    mkdir -p "$tmp_dir/bin"
+
+    cat > "$tmp_dir/bin/wget" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+    *api.github.com*)
+        if [[ "${API_MODE:-ok}" == "ok" ]]; then
+            printf '%s\n' '{"assets":[{"name":"db-abc123.zip","browser_download_url":"https://github.com/vmangos/core/releases/download/db_latest/db-abc123.zip"},{"name":"db-sqlite-abc123.zip","browser_download_url":"https://github.com/vmangos/core/releases/download/db_latest/db-sqlite-abc123.zip"}]}'
+            exit 0
+        fi
+        ;;
+esac
+exit 1
+EOF
+    chmod +x "$tmp_dir/bin/wget"
+
+    local output
+    output="$(
+        INSTALL_LOG="$tmp_dir/install.log" \
+        PATH="$tmp_dir/bin:$PATH" \
+        REPO_ROOT="$REPO_ROOT" \
+        bash -c '
+            set -euo pipefail
+            source "$REPO_ROOT/vmangos_setup.sh"
+            resolve_world_db_urls
+            printf "N=%s\n" "${#WORLD_DB_URLS[@]}"
+            printf "U1=%s\n" "${WORLD_DB_URLS[0]:-none}"
+            printf "U2=%s\n" "${WORLD_DB_URLS[1]:-none}"
+            export API_MODE=down
+            resolve_world_db_urls
+            printf "D1=%s\n" "${WORLD_DB_URLS[0]:-none}"
+            printf "D2=%s\n" "${WORLD_DB_URLS[1]:-none}"
+        ' 2>/dev/null
+    )"
+
+    local failed=0
+    assert_equals "2" "$(sed -n 's/^N=//p' <<<"$output")" \
+        "resolver returns resolved URL plus fallback" || failed=1
+    assert_equals "https://github.com/vmangos/core/releases/download/db_latest/db-abc123.zip" \
+        "$(sed -n 's/^U1=//p' <<<"$output")" \
+        "current db_latest asset is resolved from the GitHub API" || failed=1
+    assert_equals "https://github.com/vmangos/core/releases/download/db_latest/db-810fef8.zip" \
+        "$(sed -n 's/^U2=//p' <<<"$output")" \
+        "known-good fallback URL is kept" || failed=1
+    assert_equals "https://github.com/vmangos/core/releases/download/db_latest/db-810fef8.zip" \
+        "$(sed -n 's/^D1=//p' <<<"$output")" \
+        "fallback is used when the API is unreachable" || failed=1
+    assert_equals "none" "$(sed -n 's/^D2=//p' <<<"$output")" \
+        "no duplicate entries when only the fallback is available" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
+test_config_phase_local_db_host() {
+    local tmp_dir root
+    tmp_dir="$(mktemp -d)"
+    root="$tmp_dir/root"
+    mkdir -p "$root/run/etc"
+
+    cat > "$root/run/etc/realmd.conf.dist" <<'EOF'
+LoginDatabaseInfo = "127.0.0.1;3306;mangos;mangos;realmd"
+BindIP = "0.0.0.0"
+EOF
+    cat > "$root/run/etc/mangosd.conf.dist" <<'EOF'
+LoginDatabase.Info = "127.0.0.1;3306;mangos;mangos;realmd"
+WorldDatabase.Info = "127.0.0.1;3306;mangos;mangos;mangos"
+CharacterDatabase.Info = "127.0.0.1;3306;mangos;mangos;characters"
+LogsDatabase.Info = "127.0.0.1;3306;mangos;mangos;logs"
+DataDir = "."
+LogsDir = ""
+HonorDir = ""
+vmap.enableLOS = 1
+BindIP = "0.0.0.0"
+EOF
+
+    INSTALL_LOG="$tmp_dir/install.log" \
+    REPO_ROOT="$REPO_ROOT" \
+    bash -c '
+        set -euo pipefail
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        SERVERIP="10.0.5.5"
+        MANGOSDBUSER="mangos"
+        MANGOSDBPASS="sekrit"
+        AUTHDB="auth"
+        WORLDDB="world"
+        CHARACTERDB="characters"
+        LOGSDB="logs"
+        VMANGOS_PROVISION_TARGET="vmangos_only"
+        phase_config_setup
+    ' > "$tmp_dir/test.out" 2>&1
+
+    local failed=0
+    assert_equals "LoginDatabaseInfo = \"127.0.0.1;3306;mangos;sekrit;auth\"" \
+        "$(grep '^LoginDatabaseInfo' "$root/run/etc/realmd.conf")" \
+        "realmd connects to the local database, not the LAN IP" || failed=1
+    assert_equals "BindIP = \"10.0.5.5\"" \
+        "$(grep '^BindIP' "$root/run/etc/realmd.conf")" \
+        "realmd still binds the LAN IP for clients" || failed=1
+    assert_equals "WorldDatabase.Info = \"127.0.0.1;3306;mangos;sekrit;world\"" \
+        "$(grep '^WorldDatabase.Info' "$root/run/etc/mangosd.conf")" \
+        "mangosd world database points at 127.0.0.1" || failed=1
+    assert_equals "0" \
+        "$(grep -c ';3306;.*10\.0\.5\.5' "$root/run/etc/mangosd.conf" "$root/run/etc/realmd.conf" | awk -F: '{s+=$2} END {print s}')" \
+        "no database tuple keeps the LAN IP" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
 }
 
 main() {
@@ -436,6 +617,9 @@ main() {
     run_test "Installer: Guided state" test_guided_state_round_trip
     run_test "Installer: Extraction root" test_extraction_root_preparation
     run_test "Installer: Extraction phase" test_extraction_phase_invocations
+    run_test "Installer: Download retry" test_download_retry_honesty
+    run_test "Installer: World DB URLs" test_world_db_url_resolution
+    run_test "Installer: Config local DB host" test_config_phase_local_db_host
 
     echo ""
     echo "========================================"
