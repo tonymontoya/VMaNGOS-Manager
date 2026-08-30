@@ -1163,17 +1163,23 @@ phase_data_extraction() {
     log_info "Expected time: 10-20 minutes"
     log_info ""
     
+    local VMAPS_FAILED=0
+
     if [ $EXTRACTION_FAILED -eq 0 ] && [ -f ./vmapextractor ]; then
         log_info "Starting vmapextractor..."
         # -d (not -i): vmapextractor's input flag; it expects the MPQ folder itself.
         # --silent: skip its "press enter" prompts.
-        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmapextractor --silent -d '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG"; then
+        # PIPESTATUS: tee would otherwise mask the extractor's exit code.
+        sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmapextractor --silent -d '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG"
+        if [ "${PIPESTATUS[0]}" -eq 0 ]; then
             log_info "VMap extraction completed"
         else
-            log_warn "VMap extractor had issues (may be normal)"
+            log_warn "VMap extractor exited with errors"
+            VMAPS_FAILED=1
         fi
     else
         log_warn "Skipping vmap extraction (previous step failed or extractor not found)"
+        VMAPS_FAILED=1
     fi
     
     # Step 3: Assemble vmaps (5-10 minutes)
@@ -1185,18 +1191,24 @@ phase_data_extraction() {
     log_info "Expected time: 5-10 minutes"
     log_info ""
     
-    if [ $EXTRACTION_FAILED -eq 0 ] && [ -f ./vmap_assembler ]; then
+    if [ $EXTRACTION_FAILED -eq 0 ] && [ $VMAPS_FAILED -eq 0 ] && [ -f ./vmap_assembler ]; then
         log_info "Starting vmap_assembler..."
         mkdir -p "$INSTALLROOT/vmaps"
+        # The assembler runs as $MANGOSOSUSER and must write into vmaps;
+        # mkdir ran as root, so hand the directory over first.
+        chown "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT/vmaps"
         # Assemble from the Buildings dir vmapextractor wrote to $INSTALLROOT,
         # not from the raw client data. --silent skips its "press enter" prompt.
-        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmap_assembler --silent '$INSTALLROOT/Buildings' '$INSTALLROOT/vmaps'" 2>&1 | tee -a "$INSTALL_LOG"; then
+        sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmap_assembler --silent '$INSTALLROOT/Buildings' '$INSTALLROOT/vmaps'" 2>&1 | tee -a "$INSTALL_LOG"
+        if [ "${PIPESTATUS[0]}" -eq 0 ] && [ -n "$(ls -A "$INSTALLROOT/vmaps" 2>/dev/null)" ]; then
             log_info "VMap assembly completed"
         else
-            log_warn "VMap assembler had issues"
+            log_warn "VMap assembler had issues - server will run without vmaps"
+            VMAPS_FAILED=1
         fi
     else
         log_warn "Skipping vmap assembly (previous step failed or assembler not found)"
+        VMAPS_FAILED=1
     fi
     
     # Step 4: Generate movement maps (1-4 hours - the longest step)
@@ -1228,7 +1240,9 @@ phase_data_extraction() {
     log_info "Starting MoveMapGen at $(date '+%H:%M:%S')..."
     log_info "====================================================================="
     
-    if [ $EXTRACTION_FAILED -eq 0 ] && [ -f ./MoveMapGen ]; then
+    local MMAPS_FAILED=0
+
+    if [ $EXTRACTION_FAILED -eq 0 ] && [ $VMAPS_FAILED -eq 0 ] && [ -f ./MoveMapGen ]; then
         # Run with a background progress heartbeat
         {
             while true; do
@@ -1237,20 +1251,27 @@ phase_data_extraction() {
             done
         } &
         HEARTBEAT_PID=$!
-        
+
         # Run the actual generation (--silent: it waits for "press enter" otherwise)
-        sudo -u "$MANGOSOSUSER" ./MoveMapGen --silent --offMeshInput offmesh.txt 2>&1 | tee -a "$INSTALL_LOG" || \
-            log_warn "MoveMapGen completed with warnings (this is usually OK)"
-        
+        sudo -u "$MANGOSOSUSER" ./MoveMapGen --silent --offMeshInput offmesh.txt 2>&1 | tee -a "$INSTALL_LOG"
+        local MOVEMAP_RC=${PIPESTATUS[0]}
+
         # Stop the heartbeat
         kill "$HEARTBEAT_PID" 2>/dev/null || true
         wait "$HEARTBEAT_PID" 2>/dev/null || true
-        
+
         log_info "====================================================================="
-        log_info "Movement map generation completed at $(date '+%H:%M:%S')"
+        if [ "$MOVEMAP_RC" -eq 0 ] && [ -n "$(ls -A "$INSTALLROOT/mmaps" 2>/dev/null)" ]; then
+            log_info "Movement map generation completed at $(date '+%H:%M:%S')"
+        else
+            log_warn "MoveMapGen exited with status $MOVEMAP_RC at $(date '+%H:%M:%S')"
+            log_warn "Server will run without mmaps (NPC pathfinding disabled)"
+            MMAPS_FAILED=1
+        fi
         log_info "====================================================================="
     else
-        log_warn "MoveMapGen not found, skipping movement map generation"
+        log_warn "Skipping movement map generation (previous step failed, vmaps missing or generator not found)"
+        MMAPS_FAILED=1
     fi
     
     log_info ""
@@ -1276,7 +1297,18 @@ phase_data_extraction() {
         log_error ""
         return 1
     else
-        log_info "All data extraction steps completed successfully!"
+        if [ $VMAPS_FAILED -eq 1 ] || [ $MMAPS_FAILED -eq 1 ]; then
+            log_warn "Extraction completed with gaps:"
+            if [ $VMAPS_FAILED -eq 1 ]; then
+                log_warn "  - vmaps missing: line-of-sight is disabled in mangosd.conf"
+            fi
+            if [ $MMAPS_FAILED -eq 1 ]; then
+                log_warn "  - mmaps missing: NPC pathfinding will be limited"
+            fi
+            log_info "You can re-run the missing steps manually (see commands above)."
+        else
+            log_info "All data extraction steps completed successfully!"
+        fi
         
         # Create versioned directory structure (e.g., 5875 for WoW 1.12.1)
         log_info "Creating versioned data directory structure..."

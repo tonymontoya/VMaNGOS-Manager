@@ -340,8 +340,9 @@ if [[ "${1:-}" == "test" ]]; then
 fi
 exec "$@"
 EOF
-    cat > "$tmp_dir/bin/chown" <<'EOF'
+    cat > "$tmp_dir/bin/chown" <<EOF
 #!/usr/bin/env bash
+printf 'chown:%s\n' "\$*" >> '$tmp_dir/capture'
 exit 0
 EOF
     chmod +x "$tmp_dir/bin/sudo" "$tmp_dir/bin/chown"
@@ -365,24 +366,30 @@ EOF
     cat > "$root/run/bin/Extractors/VMapAssembler" <<EOF
 #!/usr/bin/env bash
 printf 'vmap_assembler:%s\n' "\$*" >> '$tmp_dir/capture'
+if [[ "\${ASM_FAIL:-0}" == "1" ]]; then exit 1; fi
+mkdir -p vmaps
+touch vmaps/000.vmtree
 exit 0
 EOF
     cat > "$root/run/bin/Extractors/MoveMapGenerator" <<EOF
 #!/usr/bin/env bash
 printf 'MoveMapGen:%s\n' "\$*" >> '$tmp_dir/capture'
 mkdir -p mmaps
+touch mmaps/000.mmap
 exit 0
 EOF
     chmod +x "$root/run/bin/Extractors/"*
 
     # The phase's progress heartbeat is a background loop that inherits
     # stdout; capturing with $(...) would block on the open pipe, so the
-    # run is redirected to a file instead.
+    # run is redirected to a file instead. No pipefail here on purpose:
+    # the phase (like production vmangos_setup.sh) runs under plain set -e
+    # and inspects PIPESTATUS directly.
     INSTALL_LOG="$tmp_dir/install.log" \
     PATH="$tmp_dir/bin:$PATH" \
     REPO_ROOT="$REPO_ROOT" \
     bash -c '
-        set -euo pipefail
+        set -eu
         source "$REPO_ROOT/vmangos_setup.sh"
         INSTALLROOT="'"$root"'"
         refresh_runtime_paths
@@ -391,6 +398,10 @@ EOF
         export SUDO_DENY="'"$client"'/dbc.MPQ"
 
         phase_data_extraction
+
+        export ASM_FAIL=1
+        rm -f "'"$root"'/vmaps/000.vmtree"
+        phase_data_extraction
     ' > "$tmp_dir/phase.out" 2>/dev/null
     output="$(cat "$tmp_dir/phase.out")"
 
@@ -398,18 +409,24 @@ EOF
     capture="$(cat "$tmp_dir/capture" 2>/dev/null)"
 
     assert_equals "mapextractor:--silent -i $root/client-data" \
-        "$(printf '%s\n' "$capture" | grep '^mapextractor:')" \
+        "$(printf '%s\n' "$capture" | grep '^mapextractor:' | head -1)" \
         "mapextractor runs silent against the staged extraction root" || failed=1
     assert_equals "vmapextractor:--silent -d $root/client-data" \
-        "$(printf '%s\n' "$capture" | grep '^vmapextractor:')" \
+        "$(printf '%s\n' "$capture" | grep '^vmapextractor:' | head -1)" \
         "vmapextractor runs silent with its -d input flag" || failed=1
     assert_equals "vmap_assembler:--silent $root/Buildings $root/vmaps" \
-        "$(printf '%s\n' "$capture" | grep '^vmap_assembler:')" \
+        "$(printf '%s\n' "$capture" | grep '^vmap_assembler:' | head -1)" \
         "vmap_assembler assembles Buildings into vmaps, silently" || failed=1
     assert_equals "MoveMapGen:--silent --offMeshInput offmesh.txt" \
         "$(printf '%s\n' "$capture" | grep '^MoveMapGen:')" \
         "MoveMapGen runs silent with the offmesh file" || failed=1
     assert_equals "1" \
+        "$(printf '%s\n' "$capture" | grep -c '^MoveMapGen:')" \
+        "MoveMapGen is skipped when the assembler fails (no masked pipeline)" || failed=1
+    assert_equals "2" \
+        "$(printf '%s\n' "$capture" | grep -c '^chown:mangos:mangos '"$root"'/vmaps$')" \
+        "the vmaps directory is handed to the service user before assembly" || failed=1
+    assert_equals "2" \
         "$(printf '%s\n' "$output" | grep -c 'Using previously staged client data')" \
         "extraction phase prepares its root on demand (resume safety)" || failed=1
     assert_equals "0" \
@@ -420,6 +437,12 @@ EOF
     assert_equals "1" \
         "$(if [[ -L "$root/5875/dbc" && -L "$root/5875/maps" && -L "$root/5875/vmaps" && -L "$root/5875/mmaps" ]]; then echo 1; else echo 0; fi)" \
         "versioned 5875 data symlinks are created on success" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$output" | grep -c 'VMap assembler had issues')" \
+        "assembler failure is reported, not masked" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$output" | grep -c 'Skipping movement map generation')" \
+        "mmap step is skipped loudly when vmaps failed" || failed=1
 
     rm -rf "$tmp_dir"
     return "$failed"
