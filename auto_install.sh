@@ -22,6 +22,7 @@ log_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
 
+# shellcheck disable=SC2317  # used only before vmangos_setup.sh (re)defines the log family
 log_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1"
 }
@@ -106,6 +107,7 @@ PROVISIONTARGET="${PROVISIONTARGET:-vmangos_manager}"
 REINSTALL_POLICY="${REINSTALL_POLICY:-abort}"
 
 # Verify client data exists
+# shellcheck disable=SC2153  # CLIENTDATA is loaded from the secrets config at runtime
 if [ ! -d "$CLIENTDATA" ]; then
     log_error "Client Data directory not found at: $CLIENTDATA"
     log_error "Please ensure the WoW 1.12.1 client Data folder is available."
@@ -113,26 +115,6 @@ if [ ! -d "$CLIENTDATA" ]; then
 fi
 
 log_info "Client data found at: $CLIENTDATA"
-
-# Clean up any previous partial installation
-if [ -d "$INSTALLROOT" ]; then
-    log_warn "Existing installation found at: $INSTALLROOT"
-    case "$REINSTALL_POLICY" in
-        replace)
-            log_info "Removing existing installation..."
-            rm -rf "$INSTALLROOT"
-            ;;
-        abort)
-            log_error "Cannot continue with existing installation. Please backup and remove manually."
-            exit 1
-            ;;
-        *)
-            log_error "Invalid REINSTALL_POLICY: $REINSTALL_POLICY"
-            log_error "Expected 'abort' or 'replace'"
-            exit 1
-            ;;
-    esac
-fi
 
 # Export environment variables for vmangos_setup.sh
 export VMANGOS_AUTO_INSTALL="1"
@@ -152,6 +134,35 @@ export VMANGOS_OS_USER="$MANGOSOSUSER"
 export VMANGOS_SKIP_SECURE_MYSQL="$SKIP_SECURE_MYSQL"
 export VMANGOS_BACKGROUND_BUILD="1"  # Run compilation in background to prevent timeout
 export INSTALL_LOG="/var/log/vmangos-install.log"
+
+# Decide how to treat an existing installation. Sourced AFTER the exports
+# so the setup script's defaults resolve from this session's config.
+# shellcheck source=vmangos_setup.sh
+source "$SCRIPT_DIR/vmangos_setup.sh"
+refresh_runtime_paths
+INSTALL_ACTION="$(existing_install_action)"
+case "$INSTALL_ACTION" in
+    clean)
+        : # Fresh host, nothing to do
+        ;;
+    resume)
+        log_warn "Existing partial installation detected at: $INSTALLROOT"
+        log_info "Resuming from the last checkpoint..."
+        ;;
+    replace)
+        log_info "Removing existing installation..."
+        rm -rf "$INSTALLROOT"
+        ;;
+    abort)
+        log_error "Cannot continue with existing installation. Please backup and remove manually."
+        exit 1
+        ;;
+    *)
+        log_error "Invalid REINSTALL_POLICY: $INSTALL_ACTION"
+        log_error "Expected 'abort' or 'replace'"
+        exit 1
+        ;;
+esac
 
 log_info "Starting VMANGOS installation..."
 log_info "Installation log: $INSTALL_LOG"

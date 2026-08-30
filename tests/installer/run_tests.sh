@@ -49,6 +49,84 @@ extract_result() {
     printf '%s\n' "${output##*RESULT=}"
 }
 
+test_service_account_creation() {
+    local tmp_dir output
+    tmp_dir="$(mktemp -d)"
+    mkdir -p "$tmp_dir/bin"
+
+    cat > "$tmp_dir/bin/id" <<'EOF'
+#!/usr/bin/env bash
+[[ "${FAKE_USER_EXISTS:-0}" == "1" ]] && exit 0
+exit 1
+EOF
+    cat > "$tmp_dir/bin/useradd" <<'EOF'
+#!/usr/bin/env bash
+printf 'USERADD:%s\n' "$*"
+EOF
+    chmod +x "$tmp_dir/bin/id" "$tmp_dir/bin/useradd"
+
+    output="$(
+        INSTALL_LOG="$tmp_dir/install.log" \
+        PATH="$tmp_dir/bin:$PATH" \
+        REPO_ROOT="$REPO_ROOT" \
+        bash -c '
+            set -euo pipefail
+            source "$REPO_ROOT/vmangos_setup.sh"
+            MANGOSOSUSER="mangos"
+            INSTALLROOT="/opt/mangos"
+
+            ensure_service_account
+            FAKE_USER_EXISTS=1 ensure_service_account
+        ' 2>/dev/null | grep '^USERADD:'
+    )"
+    rm -rf "$tmp_dir"
+
+    local call_count
+    call_count="$(printf '%s\n' "$output" | grep -c '^USERADD:' || true)"
+
+    assert_equals \
+        "USERADD:--system --home-dir /opt/mangos --no-create-home --shell /usr/sbin/nologin mangos" \
+        "$(printf '%s\n' "$output" | head -1)" \
+        "installer creates the mangos service account with system-user flags"
+    assert_equals "1" "$call_count" "existing service account is left alone (idempotent)"
+}
+
+test_existing_install_action() {
+    local tmp_dir output
+    tmp_dir="$(mktemp -d)"
+
+    output="$(
+        INSTALL_LOG="$tmp_dir/install.log" \
+        bash -lc "
+            set -euo pipefail
+            source \"$REPO_ROOT/vmangos_setup.sh\"
+
+            INSTALLROOT=\"$tmp_dir/missing-root\"
+            refresh_runtime_paths
+            printf 'clean=%s\n' \"\$(existing_install_action)\"
+
+            INSTALLROOT=\"$tmp_dir/partial-root\"
+            refresh_runtime_paths
+            mkdir -p \"\$CHECKPOINT_DIR\"
+            echo PREREQS_DONE > \"\$CHECKPOINT_FILE\"
+            printf 'resume=%s\n' \"\$(existing_install_action)\"
+
+            rm -f \"\$CHECKPOINT_FILE\"
+            REINSTALL_POLICY=\"abort\"
+            printf 'abort=%s\n' \"\$(existing_install_action)\"
+
+            REINSTALL_POLICY=\"replace\"
+            printf 'replace=%s\n' \"\$(existing_install_action)\"
+        "
+    )"
+    rm -rf "$tmp_dir"
+
+    assert_equals "clean=clean" "$(printf '%s\n' "$output" | grep '^clean=')" "no install root means a clean install"
+    assert_equals "resume=resume" "$(printf '%s\n' "$output" | grep '^resume=')" "existing checkpoints switch the wrapper to resume instead of abort"
+    assert_equals "abort=abort" "$(printf '%s\n' "$output" | grep '^abort=')" "completed installation without checkpoints follows REINSTALL_POLICY=abort"
+    assert_equals "replace=replace" "$(printf '%s\n' "$output" | grep '^replace=')" "REINSTALL_POLICY=replace still wipes the tree"
+}
+
 test_noninteractive_defaults() {
     local tmp_dir output result
     tmp_dir="$(mktemp -d)"
@@ -181,6 +259,8 @@ main() {
     echo "VMANGOS Installer Test Suite"
     echo "========================================"
 
+    run_test "Installer: Service account" test_service_account_creation
+    run_test "Installer: Existing install action" test_existing_install_action
     run_test "Installer: Noninteractive defaults" test_noninteractive_defaults
     run_test "Installer: Guided prompts" test_guided_prompts_collect_values
     run_test "Installer: Guided state" test_guided_state_round_trip

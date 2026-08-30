@@ -633,6 +633,30 @@ validate_client_data() {
     fi
 }
 
+# Decide how to treat an existing INSTALLROOT: "clean" (nothing installed),
+# "resume" (install checkpoints present - the phase runner can continue),
+# or the configured REINSTALL_POLICY ("abort"/"replace").
+existing_install_action() {
+    if [ ! -d "$INSTALLROOT" ]; then
+        printf 'clean\n'
+    elif [ -f "$CHECKPOINT_FILE" ]; then
+        printf 'resume\n'
+    else
+        printf '%s\n' "${REINSTALL_POLICY:-abort}"
+    fi
+}
+
+# The extractors and realm services run under a dedicated system account.
+# The installer uses this account from the client-data phase onward, so it
+# must exist before any chown/sudo -u references it.
+ensure_service_account() {
+    if id "$MANGOSOSUSER" >/dev/null 2>&1; then
+        return 0
+    fi
+    log_info "Creating service account: $MANGOSOSUSER (system user, no login shell)"
+    useradd --system --home-dir "$INSTALLROOT" --no-create-home --shell /usr/sbin/nologin "$MANGOSOSUSER"
+}
+
 check_client_data() {
     if [ -z "$CLIENT_DATA" ]; then
         # Try to auto-detect
@@ -677,6 +701,7 @@ check_client_data() {
     fi
     
     log_info "Using client data from: $CLIENT_DATA"
+    ensure_service_account
     
     # The extractor expects {path}/Data/ structure
     # If user provided the Data folder directly, create a Data/Data symlink
@@ -737,7 +762,9 @@ phase_prerequisites() {
         apt-get install -y build-essential cmake git libmariadb-dev libssl-dev \
             libbz2-dev libreadline-dev libncurses-dev libboost-all-dev \
             p7zip-full python3 python3-pip python3-venv sysstat wget zlib1g-dev
-    
+
+    ensure_service_account
+
     set_checkpoint "PREREQS_DONE"
 }
 
