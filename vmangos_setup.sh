@@ -498,6 +498,7 @@ start_background_build() {
     cat > "$CHECKPOINT_DIR/build.sh" << 'BUILDEOF'
 #!/bin/bash
 set -e
+set -o pipefail
 BUILD_LOG="$1"
 CPU="$2"
 INSTALLROOT="$3"
@@ -759,7 +760,7 @@ phase_prerequisites() {
     # may otherwise hold apt open behind a whiptail prompt.
     DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none apt-get update
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none \
-        apt-get install -y build-essential cmake git libmariadb-dev libssl-dev \
+        apt-get install -y build-essential cmake git libmariadb-dev default-libmysqlclient-dev libssl-dev \
             libbz2-dev libreadline-dev libncurses-dev libboost-all-dev \
             p7zip-full python3 python3-pip python3-venv sysstat wget zlib1g-dev
 
@@ -842,34 +843,64 @@ phase_build() {
     # Configure
     log_info ""
     log_info "Step 1/3: Configuring build with cmake..."
+    set +e
     cmake ../source -DCMAKE_INSTALL_PREFIX="$INSTALLROOT/run" \
         -DCONF_DIR="$INSTALLROOT/run/etc" \
         -DBUILD_EXTRACTORS=1 \
         -DDEBUG=0 2>&1 | tee -a "$INSTALL_LOG"
+    CMAKE_RC="${PIPESTATUS[0]}"
+
+    if [ "$CMAKE_RC" -ne 0 ]; then
+        set -e
+        log_error "CMake configuration failed (exit $CMAKE_RC)"
+        log_error "Check $INSTALL_LOG for the cmake error output"
+        return 1
+    fi
     log_info "CMake configuration complete."
-    
+
     # Build - with background support if enabled
     log_info ""
     log_info "Step 2/3: Compiling source code (this is the long part)..."
     log_info ""
-    
+
     if [ "$BUILD_IN_BACKGROUND" = "1" ]; then
-        start_background_build
+        if ! start_background_build; then
+            set -e
+            log_error "Background build failed"
+            log_error "Check $INSTALL_LOG and $CHECKPOINT_DIR/build-status"
+            return 1
+        fi
     else
         log_info "Compiling with $CPU parallel jobs..."
         log_info "You will see percentage progress below:"
         log_info ""
         # Run make and filter output to show progress
         make -j "$CPU" 2>&1 | tee -a "$INSTALL_LOG" | \
-            grep -E "^\[[ 0-9]+%\]|Linking|Building|Built target|Scanning" || true
+            grep -E "^\[[ 0-9]+%\]|Linking|Building|Built target|Scanning"
+        MAKE_RC="${PIPESTATUS[0]}"
+        if [ "$MAKE_RC" -ne 0 ]; then
+            set -e
+            log_error "Compilation failed (exit $MAKE_RC) - full output in $INSTALL_LOG"
+            return 1
+        fi
         log_info ""
         log_info "Compilation complete!"
     fi
-    
+
     # Install
     log_info ""
     log_info "Step 3/3: Installing compiled binaries..."
     make install 2>&1 | tee -a "$INSTALL_LOG"
+    INSTALL_RC="${PIPESTATUS[0]}"
+    set -e
+    if [ "$INSTALL_RC" -ne 0 ]; then
+        log_error "make install failed (exit $INSTALL_RC)"
+        return 1
+    fi
+    if [ ! -f "$INSTALLROOT/run/etc/mangosd.conf.dist" ]; then
+        log_error "Build artifacts missing after install (expected $INSTALLROOT/run/etc/mangosd.conf.dist)"
+        return 1
+    fi
     log_info "Installation of binaries complete."
     
     log_info ""
@@ -1496,6 +1527,15 @@ main() {
     # Get current checkpoint
     CHECKPOINT=$(get_checkpoint)
     log_info "Resuming from checkpoint: $CHECKPOINT"
+
+    # Self-heal a BUILD_DONE checkpoint that has no build artifacts behind
+    # it (a previous build phase reported success while cmake/make failed).
+    if [ "$CHECKPOINT" = "BUILD_DONE" ] && [ ! -f "$INSTALLROOT/run/etc/mangosd.conf.dist" ]; then
+        log_warn "BUILD_DONE checkpoint found but build artifacts are missing"
+        log_warn "Resetting to SOURCE_DONE so the build phase runs again"
+        CHECKPOINT="SOURCE_DONE"
+        set_checkpoint "SOURCE_DONE"
+    fi
     
     case "$CHECKPOINT" in
         START|PREREQS_DONE|DATABASE_DONE|SOURCE_DONE|BUILD_DONE|CONFIG_DONE|DATA_DONE|DB_IMPORT_DONE|SERVICES_DONE)
