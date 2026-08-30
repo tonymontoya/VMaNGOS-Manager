@@ -254,6 +254,176 @@ test_guided_state_round_trip() {
     assert_equals "/srv/client-data|auth_saved|saved_secret" "$result" "guided installer state persists across reruns"
 }
 
+test_extraction_root_preparation() {
+    local tmp_dir output
+    tmp_dir="$(mktemp -d)"
+    mkdir -p "$tmp_dir/bin" "$tmp_dir/client-src" "$tmp_dir/root"
+
+    cat > "$tmp_dir/bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" ]]; then shift 2; fi
+if [[ "${1:-}" == "test" ]]; then
+    if [[ "${3:-}" == "${SUDO_DENY:-__no_deny__}" ]]; then exit 1; fi
+    [[ -r "${3:-}" ]] && exit 0
+    exit 1
+fi
+exec "$@"
+EOF
+    cat > "$tmp_dir/bin/chown" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/sudo" "$tmp_dir/bin/chown"
+
+    touch "$tmp_dir/client-src/dbc.MPQ" "$tmp_dir/client-src/terrain.MPQ"
+
+    output="$(
+        INSTALL_LOG="$tmp_dir/install.log" \
+        PATH="$tmp_dir/bin:$PATH" \
+        REPO_ROOT="$REPO_ROOT" \
+        bash -c '
+            set -euo pipefail
+            source "$REPO_ROOT/vmangos_setup.sh"
+            INSTALLROOT="'"$tmp_dir"'/root"
+            CLIENT_DATA="'"$tmp_dir"'/client-src"
+            MANGOSOSUSER="mangos"
+
+            prepare_extraction_root
+            printf "RESULT1=%s\n" "$CLIENT_DATA_EXTRACT_ROOT"
+
+            prepare_extraction_root
+            printf "RESULT2=%s\n" "$CLIENT_DATA_EXTRACT_ROOT"
+
+            if [[ -L "$CLIENT_DATA/Data" ]]; then
+                printf "SYMLINK=1\n"
+            else
+                printf "SYMLINK=0\n"
+            fi
+
+            export SUDO_DENY="'"$tmp_dir"'/client-src/dbc.MPQ"
+            mkdir -p "$INSTALLROOT/client-data"
+            touch "$INSTALLROOT/client-data/dbc.MPQ"
+            prepare_extraction_root
+            printf "RESULT3=%s\n" "$CLIENT_DATA_EXTRACT_ROOT"
+        ' 2>/dev/null
+    )"
+    rm -rf "$tmp_dir"
+
+    assert_equals "$tmp_dir/client-src" \
+        "$(printf '%s\n' "$output" | sed -n 's/^RESULT1=//p')" \
+        "extraction root defaults to the client data folder"
+    assert_equals "$tmp_dir/client-src" \
+        "$(printf '%s\n' "$output" | sed -n 's/^RESULT2=//p')" \
+        "extraction root preparation is idempotent"
+    assert_equals "1" \
+        "$(printf '%s\n' "$output" | sed -n 's/^SYMLINK=//p')" \
+        "Data/Data self-symlink is created for extractor compatibility"
+    assert_equals "1" \
+        "$(printf '%s\n' "$output" | grep -c 'RESULT3=.*root/client-data')" \
+        "unreadable client data falls back to the staged client-data copy"
+}
+
+test_extraction_phase_invocations() {
+    local tmp_dir output root client
+    tmp_dir="$(mktemp -d)"
+    root="$tmp_dir/root"
+    client="$tmp_dir/client-src"
+    mkdir -p "$tmp_dir/bin" "$client" "$root/run/bin/Extractors" "$root/client-data" "$root/.install-checkpoints"
+
+    cat > "$tmp_dir/bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" ]]; then shift 2; fi
+if [[ "${1:-}" == "test" ]]; then
+    if [[ "${3:-}" == "${SUDO_DENY:-__no_deny__}" ]]; then exit 1; fi
+    [[ -r "${3:-}" ]] && exit 0
+    exit 1
+fi
+exec "$@"
+EOF
+    cat > "$tmp_dir/bin/chown" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/sudo" "$tmp_dir/bin/chown"
+
+    touch "$client/dbc.MPQ" "$client/terrain.MPQ" "$root/client-data/dbc.MPQ"
+
+    cat > "$root/run/bin/Extractors/MapExtractor" <<EOF
+#!/usr/bin/env bash
+printf 'mapextractor:%s\n' "\$*" >> '$tmp_dir/capture'
+echo 'Extracted 733 DBC files'
+mkdir -p dbc maps
+touch dbc/Map.dbc maps/0004331.map
+exit 0
+EOF
+    cat > "$root/run/bin/Extractors/VMapExtractor" <<EOF
+#!/usr/bin/env bash
+printf 'vmapextractor:%s\n' "\$*" >> '$tmp_dir/capture'
+mkdir -p Buildings
+exit 0
+EOF
+    cat > "$root/run/bin/Extractors/VMapAssembler" <<EOF
+#!/usr/bin/env bash
+printf 'vmap_assembler:%s\n' "\$*" >> '$tmp_dir/capture'
+exit 0
+EOF
+    cat > "$root/run/bin/Extractors/MoveMapGenerator" <<EOF
+#!/usr/bin/env bash
+printf 'MoveMapGen:%s\n' "\$*" >> '$tmp_dir/capture'
+mkdir -p mmaps
+exit 0
+EOF
+    chmod +x "$root/run/bin/Extractors/"*
+
+    # The phase's progress heartbeat is a background loop that inherits
+    # stdout; capturing with $(...) would block on the open pipe, so the
+    # run is redirected to a file instead.
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    bash -c '
+        set -euo pipefail
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        refresh_runtime_paths
+        CLIENT_DATA="'"$client"'"
+        MANGOSOSUSER="mangos"
+        export SUDO_DENY="'"$client"'/dbc.MPQ"
+
+        phase_data_extraction
+    ' > "$tmp_dir/phase.out" 2>/dev/null
+    output="$(cat "$tmp_dir/phase.out")"
+
+    local capture
+    capture="$(cat "$tmp_dir/capture" 2>/dev/null)"
+
+    assert_equals "mapextractor:--silent -i $root/client-data" \
+        "$(printf '%s\n' "$capture" | grep '^mapextractor:')" \
+        "mapextractor runs silent against the staged extraction root"
+    assert_equals "vmapextractor:--silent -d $root/client-data" \
+        "$(printf '%s\n' "$capture" | grep '^vmapextractor:')" \
+        "vmapextractor runs silent with its -d input flag"
+    assert_equals "vmap_assembler:--silent $root/Buildings $root/vmaps" \
+        "$(printf '%s\n' "$capture" | grep '^vmap_assembler:')" \
+        "vmap_assembler assembles Buildings into vmaps, silently"
+    assert_equals "MoveMapGen:--silent --offMeshInput offmesh.txt" \
+        "$(printf '%s\n' "$capture" | grep '^MoveMapGen:')" \
+        "MoveMapGen runs silent with the offmesh file"
+    assert_equals "1" \
+        "$(printf '%s\n' "$output" | grep -c 'Using previously staged client data')" \
+        "extraction phase prepares its root on demand (resume safety)"
+    assert_equals "0" \
+        "$(printf '%s\n' "$output" | grep -c 'Copying client data')" \
+        "staged client data is reused instead of re-copied"
+    assert_equals "DATA_DONE" "$(cat "$root/.install-checkpoints/checkpoint")" \
+        "extraction phase completes and checkpoints"
+    assert_equals "1" \
+        "$(if [[ -L "$root/5875/dbc" && -L "$root/5875/maps" && -L "$root/5875/vmaps" && -L "$root/5875/mmaps" ]]; then echo 1; else echo 0; fi)" \
+        "versioned 5875 data symlinks are created on success"
+
+    rm -rf "$tmp_dir"
+}
+
 main() {
     echo "========================================"
     echo "VMANGOS Installer Test Suite"
@@ -264,6 +434,8 @@ main() {
     run_test "Installer: Noninteractive defaults" test_noninteractive_defaults
     run_test "Installer: Guided prompts" test_guided_prompts_collect_values
     run_test "Installer: Guided state" test_guided_state_round_trip
+    run_test "Installer: Extraction root" test_extraction_root_preparation
+    run_test "Installer: Extraction phase" test_extraction_phase_invocations
 
     echo ""
     echo "========================================"

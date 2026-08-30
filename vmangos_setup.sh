@@ -703,7 +703,15 @@ check_client_data() {
     
     log_info "Using client data from: $CLIENT_DATA"
     ensure_service_account
-    
+
+    prepare_extraction_root
+}
+
+# Derive CLIENT_DATA_EXTRACT_ROOT from CLIENT_DATA so the extractors can read
+# the MPQs as $MANGOSOSUSER. Called from check_client_data on fresh installs
+# and on demand from phase_data_extraction, because a resumed install re-enters
+# the extraction phase without re-running the earlier phases.
+prepare_extraction_root() {
     # The extractor expects {path}/Data/ structure
     # If user provided the Data folder directly, create a Data/Data symlink
     CLIENT_DATA_EXTRACT_ROOT="$CLIENT_DATA"
@@ -714,39 +722,48 @@ check_client_data() {
             log_info "Creating Data/Data symlink for extractor compatibility..."
             ln -sf . "$CLIENT_DATA/Data" 2>/dev/null || true
         fi
-        # The extractor will use the path as-is, it expects Data/ subdirectory
-        CLIENT_DATA_EXTRACT_ROOT="$CLIENT_DATA"
     fi
-    
+
     # Check if mangos user can read the client data
     # Extraction runs as mangos user for security, so we need readable permissions
-    if ! sudo -u "$MANGOSOSUSER" test -r "$CLIENT_DATA_EXTRACT_ROOT/dbc.MPQ" 2>/dev/null; then
-        log_warn "Client data is not accessible by $MANGOSOSUSER user"
-        log_info "Copying client data to $INSTALLROOT/client-data for extraction..."
-        
-        # Create temp location and copy data
-        mkdir -p "$INSTALLROOT/client-data"
-        
-        # Copy all MPQ files and required directories
-        cp -r "$CLIENT_DATA_EXTRACT_ROOT"/*.MPQ "$INSTALLROOT/client-data/" 2>/dev/null || true
-        cp -r "$CLIENT_DATA_EXTRACT_ROOT"/*.mpq "$INSTALLROOT/client-data/" 2>/dev/null || true
-        
-        # Copy Interface directory if it exists (contains Cinematics, etc)
-        if [ -d "$CLIENT_DATA_EXTRACT_ROOT/Interface" ]; then
-            cp -r "$CLIENT_DATA_EXTRACT_ROOT/Interface" "$INSTALLROOT/client-data/" 2>/dev/null || true
-        fi
-        
-        # Set ownership for mangos user
-        chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT/client-data"
-        
-        # Create the Data/Data symlink in the copy
-        if [ ! -e "$INSTALLROOT/client-data/Data" ]; then
-            ln -sf . "$INSTALLROOT/client-data/Data" 2>/dev/null || true
-        fi
-        
-        CLIENT_DATA_EXTRACT_ROOT="$INSTALLROOT/client-data"
-        log_info "Client data copied to: $CLIENT_DATA_EXTRACT_ROOT"
+    if sudo -u "$MANGOSOSUSER" test -r "$CLIENT_DATA_EXTRACT_ROOT/dbc.MPQ" 2>/dev/null; then
+        return 0
     fi
+
+    # Reuse a copy staged by an earlier (interrupted) run instead of
+    # re-copying several GB of MPQs on every resume.
+    if [ -f "$INSTALLROOT/client-data/dbc.MPQ" ] && \
+        sudo -u "$MANGOSOSUSER" test -r "$INSTALLROOT/client-data/dbc.MPQ" 2>/dev/null; then
+        CLIENT_DATA_EXTRACT_ROOT="$INSTALLROOT/client-data"
+        log_info "Using previously staged client data: $CLIENT_DATA_EXTRACT_ROOT"
+        return 0
+    fi
+
+    log_warn "Client data is not accessible by $MANGOSOSUSER user"
+    log_info "Copying client data to $INSTALLROOT/client-data for extraction..."
+
+    # Create temp location and copy data
+    mkdir -p "$INSTALLROOT/client-data"
+
+    # Copy all MPQ files and required directories
+    cp -r "$CLIENT_DATA_EXTRACT_ROOT"/*.MPQ "$INSTALLROOT/client-data/" 2>/dev/null || true
+    cp -r "$CLIENT_DATA_EXTRACT_ROOT"/*.mpq "$INSTALLROOT/client-data/" 2>/dev/null || true
+
+    # Copy Interface directory if it exists (contains Cinematics, etc)
+    if [ -d "$CLIENT_DATA_EXTRACT_ROOT/Interface" ]; then
+        cp -r "$CLIENT_DATA_EXTRACT_ROOT/Interface" "$INSTALLROOT/client-data/" 2>/dev/null || true
+    fi
+
+    # Set ownership for mangos user
+    chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT/client-data"
+
+    # Create the Data/Data symlink in the copy
+    if [ ! -e "$INSTALLROOT/client-data/Data" ]; then
+        ln -sf . "$INSTALLROOT/client-data/Data" 2>/dev/null || true
+    fi
+
+    CLIENT_DATA_EXTRACT_ROOT="$INSTALLROOT/client-data"
+    log_info "Client data copied to: $CLIENT_DATA_EXTRACT_ROOT"
 }
 
 # =============================================================================
@@ -1050,11 +1067,15 @@ phase_data_extraction() {
     if [ -z "$CLIENT_DATA" ] || [ ! -d "$CLIENT_DATA" ]; then
         log_warn "No client data available - skipping extraction phase"
         log_info "To extract data later, place 1.12.1 client Data folder and run:"
-        log_info "  sudo $INSTALLROOT/run/bin/Extractors/mapextractor -i <data_path>"
+        log_info "  sudo $INSTALLROOT/run/bin/Extractors/mapextractor --silent -i <data_path>"
         set_checkpoint "DATA_DONE"
         return 0
     fi
-    
+
+    # A resumed install re-enters this phase without re-running
+    # check_client_data, so derive the extraction root on demand.
+    prepare_extraction_root
+
     # Copy extractors (handle both lowercase and capitalized names)
     cp "$INSTALLROOT/run/bin/mapextractor" "$INSTALLROOT/" 2>/dev/null || \
         cp "$INSTALLROOT/run/bin/Extractors/mapextractor" "$INSTALLROOT/" 2>/dev/null || \
@@ -1096,8 +1117,10 @@ phase_data_extraction() {
     log_info ""
     
     if [ -f ./mapextractor ]; then
-        log_info "Starting mapextractor with client data: $CLIENT_DATA"
-        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./mapextractor -i '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG" | \
+        log_info "Starting mapextractor with client data: $CLIENT_DATA_EXTRACT_ROOT"
+        # --silent: the extractor prompts for y/n + "press enter" otherwise,
+        # which wedges an unattended install. Defaults kept: high res, limited height.
+        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./mapextractor --silent -i '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG" | \
             grep -E "Extracting|Processing|Extracted|Done|Error|Fatal|Invalid"; then
             : # Extractor output captured
         fi
@@ -1128,7 +1151,9 @@ phase_data_extraction() {
     
     if [ $EXTRACTION_FAILED -eq 0 ] && [ -f ./vmapextractor ]; then
         log_info "Starting vmapextractor..."
-        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmapextractor -i '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG"; then
+        # -d (not -i): vmapextractor's input flag; it expects the MPQ folder itself.
+        # --silent: skip its "press enter" prompts.
+        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmapextractor --silent -d '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG"; then
             log_info "VMap extraction completed"
         else
             log_warn "VMap extractor had issues (may be normal)"
@@ -1149,7 +1174,9 @@ phase_data_extraction() {
     if [ $EXTRACTION_FAILED -eq 0 ] && [ -f ./vmap_assembler ]; then
         log_info "Starting vmap_assembler..."
         mkdir -p "$INSTALLROOT/vmaps"
-        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmap_assembler '$CLIENT_DATA' '$INSTALLROOT/vmaps'" 2>&1 | tee -a "$INSTALL_LOG"; then
+        # Assemble from the Buildings dir vmapextractor wrote to $INSTALLROOT,
+        # not from the raw client data. --silent skips its "press enter" prompt.
+        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmap_assembler --silent '$INSTALLROOT/Buildings' '$INSTALLROOT/vmaps'" 2>&1 | tee -a "$INSTALL_LOG"; then
             log_info "VMap assembly completed"
         else
             log_warn "VMap assembler had issues"
@@ -1197,8 +1224,8 @@ phase_data_extraction() {
         } &
         HEARTBEAT_PID=$!
         
-        # Run the actual generation
-        sudo -u "$MANGOSOSUSER" ./MoveMapGen --offMeshInput offmesh.txt 2>&1 | tee -a "$INSTALL_LOG" || \
+        # Run the actual generation (--silent: it waits for "press enter" otherwise)
+        sudo -u "$MANGOSOSUSER" ./MoveMapGen --silent --offMeshInput offmesh.txt 2>&1 | tee -a "$INSTALL_LOG" || \
             log_warn "MoveMapGen completed with warnings (this is usually OK)"
         
         # Stop the heartbeat
@@ -1229,10 +1256,10 @@ phase_data_extraction() {
         log_warn ""
         log_info "Manual extraction commands:"
         log_info "  cd $INSTALLROOT"
-        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/mapextractor -i <client_data_path>"
-        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/vmapextractor -i <client_data_path>"
-        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/vmap_assembler buildings vmaps"
-        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/MoveMapGenerator"
+        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/mapextractor --silent -i <client_root_with_Data>"
+        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/vmapextractor --silent -d <client_data_folder>"
+        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/vmap_assembler --silent buildings vmaps"
+        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/MoveMapGenerator --silent"
         log_warn ""
     else
         log_info "All data extraction steps completed successfully!"
