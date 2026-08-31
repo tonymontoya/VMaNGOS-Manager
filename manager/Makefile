@@ -1,4 +1,4 @@
-.PHONY: all test lint install uninstall clean help
+.PHONY: all test test-dashboard lint install uninstall clean help
 
 # Shell scripts to lint (wildcards: new lib/ or tests/ scripts are covered automatically)
 SCRIPTS := $(wildcard bin/*) install_manager.sh $(wildcard lib/*.sh) $(wildcard tests/*.sh)
@@ -36,6 +36,15 @@ test:
 	@echo "Running test suite..."
 	@echo "========================================"
 	@bash tests/run_tests.sh
+
+# Run the Textual dashboard pilot tests (needs textual + pytest; CI installs
+# them from dashboard-requirements.txt)
+test-dashboard:
+	@echo "========================================"
+	@echo "Running dashboard pilot tests..."
+	@echo "========================================"
+	@python3 -m pytest tests/test_dashboard.py -q
+	@echo "✓ Dashboard pilot tests passed"
 
 # Install to system
 install:
@@ -78,6 +87,7 @@ help:
 	@echo "  all     - Run lint and test (default)"
 	@echo "  lint    - Run shellcheck on all scripts"
 	@echo "  test    - Run test suite"
+	@echo "  test-dashboard - Run Textual dashboard pilot tests (pytest)"
 	@echo "  install - Install to system"
 	@echo "  uninstall - Remove installed manager files"
 	@echo "  clean   - Remove generated files"

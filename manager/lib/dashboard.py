@@ -623,53 +623,57 @@ def format_command_tokens(tokens: list[tuple[str, str]]) -> str:
     return "  ".join(f"[bold {ACCENT_GOLD}]{key}[/] {label}" for key, label in tokens)
 
 
+# Single source of truth for which command keys are active in which view.
+# The command rail advertises exactly these keys, and the per-view containers
+# install exactly these bindings — the rail and the keyboard can no longer
+# disagree.
+KEY_ACTION_DESCRIPTIONS: dict[str, tuple[str, str, str]] = {
+    "o": ("open_online_roster", "Roster", "roster"),
+    "s": ("start_server", "Start", "start"),
+    "x": ("stop_server", "Stop", "stop"),
+    "R": ("restart_server", "Restart", "restart"),
+    "b": ("backup_now", "Backup", "backup"),
+    "v": ("verify_selected_backup", "Verify", "verify"),
+    "c": ("create_account", "Create", "create"),
+    "p": ("reset_account_password", "Password", "reset password"),
+    "g": ("set_account_gm", "Set GM", "set GM"),
+    "n": ("ban_account", "Ban", "ban"),
+    "u": ("unban_account", "Unban", "unban"),
+    "l": ("rotate_logs", "Rotate Logs", "rotate"),
+    "T": ("test_logs_config", "Test Config", "test config"),
+    "h": ("create_honor_schedule", "Schedule Maintenance", "maintenance"),
+    "m": ("create_restart_schedule", "Schedule Restart", "restart"),
+    "P": ("refresh_update_plan", "Update Plan", "plan"),
+    "d": ("restore_selected_backup_dry_run", "Dry Run", "restore dry-run"),
+    "y": ("schedule_daily_backup", "Daily", "daily timer"),
+    "w": ("schedule_weekly_backup", "Weekly", "weekly timer"),
+    "j": ("cancel_selected_schedule", "Remove Task", "remove task"),
+    "k": ("validate_config", "Validate", "validate config"),
+    "f": ("filter_logs", "Filters", "filters"),
+}
+
+VIEW_KEYS: dict[str, list[str]] = {
+    "overview": ["o", "s", "x", "R", "b", "v", "k"],
+    "monitor": ["o", "s", "x", "R", "b", "v"],
+    "accounts": ["c", "p", "g", "n", "u"],
+    "backups": ["b", "v", "d", "y", "w"],
+    "operations": ["h", "m", "j", "P", "T", "l"],
+    "config": ["k"],
+    "logs": ["f"],
+}
+
+
 def view_command_tokens(active_view: str) -> list[tuple[str, str]]:
-    if active_view == "monitor":
-        return [
-            ("o", "roster"),
-            ("s", "start"),
-            ("x", "stop"),
-            ("R", "restart"),
-            ("b", "backup"),
-            ("v", "verify"),
-        ]
-    if active_view == "accounts":
-        return [
-            ("c", "create"),
-            ("p", "reset password"),
-            ("g", "set GM"),
-            ("n", "ban"),
-            ("u", "unban"),
-        ]
-    if active_view == "backups":
-        return [
-            ("b", "backup now"),
-            ("v", "verify"),
-            ("d", "restore dry-run"),
-            ("y", "daily timer"),
-            ("w", "weekly timer"),
-        ]
-    if active_view == "operations":
-        return [
-            ("h", "maintenance"),
-            ("m", "restart"),
-            ("j", "remove task"),
-            ("P", "plan"),
-            ("T", "test config"),
-            ("l", "rotate"),
-        ]
-    if active_view == "config":
-        return [("k", "validate config")]
-    if active_view == "logs":
-        return [("f", "filters")]
+    keys = VIEW_KEYS.get(active_view, VIEW_KEYS["overview"])
+    return [(key, KEY_ACTION_DESCRIPTIONS[key][2]) for key in keys]
+
+
+def make_view_bindings(view_id: str) -> list[tuple[str, str, str]]:
     return [
-        ("o", "roster"),
-        ("s", "start"),
-        ("x", "stop"),
-        ("R", "restart"),
-        ("b", "backup"),
-        ("v", "verify"),
-        ("k", "validate config"),
+        # "app." prefix: the binding lives on the view container, but the
+        # action method lives on the App class.
+        (key, f"app.{KEY_ACTION_DESCRIPTIONS[key][0]}", KEY_ACTION_DESCRIPTIONS[key][1])
+        for key in VIEW_KEYS.get(view_id, [])
     ]
 
 
@@ -2419,34 +2423,29 @@ def create_app(
             elif event.button.id == "roster-open":
                 self.action_open_accounts()
 
+    # One focusable container class per view carrying that view's command
+    # bindings. Binding resolution walks the focused widget's ancestors, so
+    # the keys are live exactly while a descendant of the view container (its
+    # table, or the container itself) has focus.
+    view_containers = {
+        view_id: type(
+            f"{view_id.capitalize()}ViewContainer",
+            (Container,),
+            {"BINDINGS": make_view_bindings(view_id), "can_focus": True},
+        )
+        for view_id in VIEW_KEYS
+    }
+
     class VMangosDashboard(App[None]):
         CSS = DASHBOARD_CSS
 
+        # Only navigation and app utilities stay global. Every command key
+        # lives on its view's container (see view_containers below), so it
+        # fires only while that view is focused — matching what the command
+        # rail advertises.
         BINDINGS = [
             ("q", "quit", "Quit"),
             ("r", "manual_refresh", "Refresh"),
-            ("s", "start_server", "Start"),
-            ("x", "stop_server", "Stop"),
-            ("R", "restart_server", "Restart"),
-            ("o", "open_online_roster", "Roster"),
-            ("b", "backup_now", "Backup"),
-            ("v", "verify_selected_backup", "Verify"),
-            ("c", "create_account", "Create"),
-            ("p", "reset_account_password", "Password"),
-            ("g", "set_account_gm", "Set GM"),
-            ("n", "ban_account", "Ban"),
-            ("u", "unban_account", "Unban"),
-            ("l", "rotate_logs", "Rotate Logs"),
-            ("T", "test_logs_config", "Test Config"),
-            ("h", "create_honor_schedule", "Schedule Maintenance"),
-            ("m", "create_restart_schedule", "Schedule Restart"),
-            ("P", "refresh_update_plan", "Update Plan"),
-            ("d", "restore_selected_backup_dry_run", "Dry Run"),
-            ("y", "schedule_daily_backup", "Daily"),
-            ("w", "schedule_weekly_backup", "Weekly"),
-            ("j", "cancel_selected_schedule", "Remove Task"),
-            ("k", "validate_config", "Validate"),
-            ("f", "filter_logs", "Filters"),
             ("1", "show_overview", "Overview"),
             ("2", "show_monitor", "Monitor"),
             ("3", "show_accounts", "Accounts"),
@@ -2494,33 +2493,33 @@ def create_app(
                 with Container(id="content"):
                     yield Static("", id="action-banner")
                     with Container(id="view-stack"):
-                        with Container(id="overview-view", classes="view"):
+                        with view_containers["overview"](id="overview-view", classes="view"):
                             with Container(id="overview-grid"):
                                 yield Static("", id="service-pane", classes="panel hero-panel")
                                 yield Static("", id="metrics-pane", classes="panel accent-panel")
                                 yield Static("", id="player-pulse-pane", classes="panel hero-panel")
                                 yield Static("", id="alerts-pane", classes="panel accent-panel")
-                        with Container(id="monitor-view", classes="view hidden"):
+                        with view_containers["monitor"](id="monitor-view", classes="view hidden"):
                             with Container(id="monitor-grid"):
                                 yield Static("", id="monitor-pressure-pane", classes="panel hero-panel")
                                 yield Static("", id="monitor-process-pane", classes="panel accent-panel")
                                 yield Static("", id="monitor-trends-pane", classes="panel hero-panel")
                                 yield Static("", id="monitor-storage-pane", classes="panel accent-panel")
-                        with Container(id="accounts-view", classes="view hidden"):
+                        with view_containers["accounts"](id="accounts-view", classes="view hidden"):
                             with Horizontal(id="accounts-layout"):
                                 with Vertical(classes="panel table-panel", id="accounts-table-layout"):
                                     yield Static("[b]Account Inventory[/b]", classes="table-detail-title")
                                     yield DataTable(id="accounts-table", classes="detail-table")
                                 yield Static("", id="account-details", classes="panel hero-panel")
-                        with Container(id="backups-view", classes="view hidden"):
+                        with view_containers["backups"](id="backups-view", classes="view hidden"):
                             with Horizontal(id="backups-layout"):
                                 yield Static("", id="backup-summary", classes="panel hero-panel")
                                 with Vertical(classes="panel table-panel", id="backups-table-layout"):
                                     yield Static("[b]Backup Inventory[/b]", classes="table-detail-title")
                                     yield DataTable(id="backups-table", classes="detail-table")
-                        with Container(id="config-view", classes="view hidden"):
+                        with view_containers["config"](id="config-view", classes="view hidden"):
                             yield Static("", id="config-pane", classes="panel hero-panel")
-                        with Container(id="logs-view", classes="view hidden"):
+                        with view_containers["logs"](id="logs-view", classes="view hidden"):
                             with Vertical(id="realm-logs-layout"):
                                 yield Static("", id="realm-logs-summary", classes="panel hero-panel")
                                 with Horizontal(id="realm-logs-body"):
@@ -2528,7 +2527,7 @@ def create_app(
                                         yield Static("[b]Recent Events[/b]", classes="table-detail-title")
                                         yield DataTable(id="realm-logs-table", classes="detail-table")
                                     yield Static("", id="realm-log-details", classes="panel accent-panel")
-                        with Container(id="operations-view", classes="view hidden"):
+                        with view_containers["operations"](id="operations-view", classes="view hidden"):
                             with Vertical(id="operations-layout"):
                                 with Horizontal(id="operations-summary"):
                                     yield Static("", id="logs-pane", classes="panel accent-panel")
@@ -2600,6 +2599,10 @@ def create_app(
                 self.set_focus(self.query_one("#realm-logs-table", DataTable))
             elif self.active_view == "operations":
                 self.set_focus(self.query_one("#schedules-table", DataTable))
+            else:
+                # Views without a table focus the view container itself so
+                # its scoped command bindings are live.
+                self.set_focus(self.query_one(f"#{self.active_view}-view", Container))
 
         def refresh_chrome(self) -> None:
             self.query_one("#sidebar", Static).update(

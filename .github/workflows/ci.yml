@@ -40,3 +40,10 @@ jobs:
       - name: Run manager tests
         working-directory: ./manager
         run: make test
+
+      - name: Install dashboard pilot deps
+        run: python3 -m pip install -r manager/dashboard-requirements.txt pytest
+
+      - name: Run dashboard pilot tests
+        working-directory: ./manager
+        run: python3 -m pytest tests/test_dashboard.py -q
