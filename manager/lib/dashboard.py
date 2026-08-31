@@ -568,20 +568,31 @@ def find_selected_log_entry(snapshot: dict[str, Any], selected_log_key: str) -> 
     return entries[0] if entries else None
 
 
+def natural_sort_key(text: str) -> list[tuple[int, object]]:
+    """Sort key that orders embedded digit runs numerically ("1000" > "999")."""
+    return [
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in re.split(r"(\d+)", text.lower())
+    ]
+
+
 class SelectionTable:
     """Single implementation of the select-a-row DataTable pattern.
 
     rebuild() re-renders rows, preserves the current selection by key when
     it still exists, moves the cursor without animation, and returns the
     selected entry so the caller can refresh its detail pane. Callers
-    pre-sort entries; the controller never reorders them. A case-insensitive
-    substring filter (set_filter) narrows the rows to what the user typed.
+    pre-sort entries; the controller never reorders them unless the user
+    picked a sort column (set_sort), which applies after the substring
+    filter (set_filter).
     """
 
-    def __init__(self, table: Any) -> None:
+    def __init__(self, table: Any, titles: list[str] | None = None) -> None:
         self.table = table
+        self.titles = list(titles or [])
         self._rendered: tuple[tuple[str, tuple[str, ...]], ...] | None = None
         self.filter_text = ""
+        self.sort_column: int | None = None
 
     def set_filter(self, text: str) -> None:
         normalized = text.strip().lower()
@@ -591,6 +602,20 @@ class SelectionTable:
         # A filter change must redraw even when the underlying data did not.
         self._rendered = None
 
+    def set_sort(self, column_index: int | None) -> None:
+        if column_index == self.sort_column:
+            return
+        self.sort_column = column_index
+        self._rendered = None
+        self.apply_sort_indicator()
+
+    def apply_sort_indicator(self) -> None:
+        if not self.titles:
+            return
+        for index, column in enumerate(self.table.columns.values()):
+            title = self.titles[index] if index < len(self.titles) else str(column.label)
+            column.label = f"{title} ▲" if index == self.sort_column else title
+
     def rebuild(
         self,
         entries: list[dict[str, Any]],
@@ -599,16 +624,28 @@ class SelectionTable:
         row_fn: Callable[[dict[str, Any]], list[str]],
         current_key: str,
     ) -> tuple[str, dict[str, Any] | None]:
-        rendered = tuple((key_fn(entry), tuple(row_fn(entry))) for entry in entries)
+        rows = [
+            (key_fn(entry), tuple(row_fn(entry)), entry)
+            for entry in entries
+        ]
         if self.filter_text:
-            rendered = tuple(
-                pair for pair in rendered if self.filter_text in " ".join(pair[1]).lower()
+            rows = [row for row in rows if self.filter_text in " ".join(row[1]).lower()]
+        if self.sort_column is not None and rows and self.sort_column < len(rows[0][1]):
+            column = self.sort_column
+            # Ties break on the first column (ID/timestamp) so equal keys
+            # get a deterministic, sensible order instead of caller order.
+            rows.sort(
+                key=lambda row: (
+                    natural_sort_key(str(row[1][column])),
+                    natural_sort_key(str(row[1][0])),
+                )
             )
+        rendered = tuple((key, cells) for key, cells, _entry in rows)
 
         if self._rendered is not None and rendered == self._rendered:
             # Data unchanged: leave the table (and the user's cursor) alone.
             # Detail panes still refresh from the returned entry.
-            selected = next((entry for entry in entries if key_fn(entry) == current_key), None)
+            selected = next((entry for _key, _cells, entry in rows if _key == current_key), None)
             return (current_key if selected is not None else "", selected)
 
         self._rendered = rendered
@@ -619,7 +656,7 @@ class SelectionTable:
         for index, (key_value, row_values) in enumerate(rendered):
             if current_key and key_value == current_key:
                 selected_index = index
-                selected = next((entry for entry in entries if key_fn(entry) == key_value), None)
+                selected = next((entry for _key, _cells, entry in rows if _key == key_value), None)
             self.table.add_row(*row_values, key=key_value)
 
         if not rendered:
@@ -627,7 +664,7 @@ class SelectionTable:
 
         if selected is None:
             selected_key = rendered[selected_index][0]
-            selected = next((entry for entry in entries if key_fn(entry) == selected_key), None)
+            selected = next((entry for _key, _cells, entry in rows if _key == selected_key), None)
         self.table.move_cursor(row=selected_index, column=0, animate=False)
         return (key_fn(selected) if selected is not None else "", selected)
 
@@ -664,16 +701,17 @@ KEY_ACTION_DESCRIPTIONS: dict[str, tuple[str, str, str]] = {
     "k": ("validate_config", "Validate", "validate config"),
     "f": ("filter_logs", "Filters", "filters"),
     "/": ("table_search", "Search", "search"),
+    "S": ("sort_table", "Sort", "sort"),
 }
 
 VIEW_KEYS: dict[str, list[str]] = {
     "overview": ["o", "s", "x", "R", "b", "v", "k"],
     "monitor": ["o", "s", "x", "R", "b", "v"],
-    "accounts": ["c", "p", "g", "n", "u", "/"],
-    "backups": ["b", "v", "d", "y", "w", "/"],
-    "operations": ["h", "m", "j", "P", "T", "l", "/"],
+    "accounts": ["c", "p", "g", "n", "u", "/", "S"],
+    "backups": ["b", "v", "d", "y", "w", "/", "S"],
+    "operations": ["h", "m", "j", "P", "T", "l", "/", "S"],
     "config": ["k"],
-    "logs": ["f", "/"],
+    "logs": ["f", "/", "S"],
 }
 
 
@@ -701,6 +739,13 @@ TABLE_VIEW_SEARCH_IDS: dict[str, str] = {
     "backups": "backups-search",
     "logs": "logs-search",
     "operations": "schedules-search",
+}
+
+TABLE_VIEW_SELECTION_KEYS: dict[str, str] = {
+    "accounts": "accounts",
+    "backups": "backups",
+    "logs": "logs",
+    "operations": "schedules",
 }
 
 SEARCH_INPUT_TO_SELECTION: dict[str, str] = {
@@ -2635,10 +2680,10 @@ def create_app(
 
             # Long-lived controllers so unchanged data can skip table churn.
             self.selection_tables = {
-                "accounts": SelectionTable(accounts_table),
-                "backups": SelectionTable(backups_table),
-                "logs": SelectionTable(realm_logs_table),
-                "schedules": SelectionTable(schedules_table),
+                "accounts": SelectionTable(accounts_table, titles=["ID", "Username", "GM", "Online", "Banned"]),
+                "backups": SelectionTable(backups_table, titles=["Timestamp", "Size", "File", "Created By"]),
+                "logs": SelectionTable(realm_logs_table, titles=["Time", "Source", "Severity", "Message"]),
+                "schedules": SelectionTable(schedules_table, titles=["Type", "Schedule", "Next Run", "ID"]),
             }
 
             self.apply_theme()
@@ -2932,6 +2977,23 @@ def create_app(
 
         def action_table_search_escape(self) -> None:
             self.close_table_search(clear=True)
+
+        def action_sort_table(self) -> None:
+            selection_key = TABLE_VIEW_SELECTION_KEYS.get(self.active_view)
+            if selection_key is None:
+                return
+            controller = self.selection_tables[selection_key]
+            column_count = len(controller.titles)
+            if not column_count:
+                return
+            current = controller.sort_column
+            nxt = None if current is not None and current + 1 >= column_count else 0 if current is None else current + 1
+            controller.set_sort(nxt)
+            self.rebuild_selection_table(selection_key)
+            if nxt is None:
+                self.set_action_result("table sort cleared", tone="info")
+            else:
+                self.set_action_result(f"table sorted by {controller.titles[nxt]}", tone="info")
 
         def on_input_changed(self, event: Input.Changed) -> None:
             selection_key = SEARCH_INPUT_TO_SELECTION.get(str(event.input.id or ""))

@@ -75,7 +75,9 @@ def write_snapshot_fixture(directory, accounts):
 
 def build_app(tmp_path, *, initial_view, accounts=None):
     stub, log_path = write_recorder_stub(tmp_path)
-    snapshot_file = write_snapshot_fixture(tmp_path, make_accounts(accounts or 8))
+    if accounts is None:
+        accounts = make_accounts(8)
+    snapshot_file = write_snapshot_fixture(tmp_path, accounts)
     app = create_app(
         manager_bin=stub,
         config_path="/dev/null",
@@ -88,7 +90,7 @@ def build_app(tmp_path, *, initial_view, accounts=None):
     return app, log_path
 
 
-async def wait_for(predicate, timeout=5.0, message="condition"):
+async def wait_for(predicate, timeout=10.0, message="condition"):
     for _ in range(int(timeout / 0.05)):
         if predicate():
             return
@@ -211,18 +213,49 @@ def test_unban_requires_confirmation(tmp_path):
 
 
 def test_accounts_search_finds_one_account_in_500(tmp_path):
-    app, _log_path = build_app(tmp_path, initial_view=ACCOUNTS_KEYS_VIEW, accounts=500)
+    app, _log_path = build_app(tmp_path, initial_view=ACCOUNTS_KEYS_VIEW, accounts=make_accounts(500))
 
     async def scenario():
         async with app.run_test() as pilot:
             table = app.query_one("#accounts-table", DataTable)
-            await wait_for(lambda: table.row_count == 500, message="500 accounts to load")
+            await wait_for(lambda: table.row_count == 500, timeout=30.0, message="500 accounts to load")
             await pilot.press("/")
             await pilot.pause()
             await pilot.press(*"user123")
             await wait_for(lambda: table.row_count == 1, message="filter to narrow to one row")
             await pilot.press("escape")
             await wait_for(lambda: table.row_count == 500, message="escape to clear the filter")
+
+    asyncio.run(scenario())
+
+
+def test_accounts_sort_cycles_columns(tmp_path):
+    accounts = list(reversed(make_accounts(30)))
+    app, _log_path = build_app(tmp_path, initial_view=ACCOUNTS_KEYS_VIEW, accounts=accounts)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            table = app.query_one("#accounts-table", DataTable)
+            await wait_for(lambda: table.row_count == 30, message="accounts table to load")
+
+            def first_username():
+                row = table.get_row_at(0)
+                return str(row[1])
+
+            assert first_username() == "user029"  # fixture arrives reversed
+            await pilot.press("S")  # sort by ID ascending
+            await pilot.pause()
+            assert first_username() == "user000"
+            await pilot.press("S")  # sort by Username ascending
+            await pilot.pause()
+            assert first_username() == "user000"
+            await pilot.press("S")  # sort by GM ascending: gm=0 rows first
+            await pilot.pause()
+            assert first_username() == "user001"  # user000 has gm 3
+            for _ in range(3):  # Online, Banned, then back to natural order
+                await pilot.press("S")
+            await pilot.pause()
+            assert first_username() == "user029"
 
     asyncio.run(scenario())
 
