@@ -30,7 +30,10 @@ VMANGOS Manager - Server Management Tool
 Version: 0.3.1
 
 USAGE:
-    vmangos-manager [GLOBAL_OPTIONS] <COMMAND> [SUBCOMMAND_OPTIONS]
+    vmangos-manager [GLOBAL_OPTIONS] [<COMMAND> [SUBCOMMAND_OPTIONS]]
+
+    Running with no COMMAND starts the dashboard (5s refresh, auto-detected
+    config) — the everyday way to launch it.
 
 GLOBAL OPTIONS:
     -c, --config FILE      Configuration file path
@@ -45,7 +48,7 @@ COMMANDS:
       stop options: [--graceful|--force] [--timeout SECONDS]
       restart options: [--timeout SECONDS]
       status options: [--format text|json] [--watch] [--interval SECONDS]
-    dashboard [--refresh SECONDS] [--theme dark|light] [--bootstrap]
+    dashboard [--refresh SECONDS] [--theme dark|light] [--bootstrap]   (default refresh: 5s)
     logs [status|rotate|test-config|recent] [OPTIONS]
       recent options: [--source all|auth|world] [--window 15m|1h|1d] [--severity all|debug|info|notice|warning|error|critical|alert] [--limit N] [--watch|--follow] [--interval SECONDS] [--format text|json]
     account [create|list|setgm|ban|unban|password] [OPTIONS]
@@ -462,7 +465,7 @@ cmd_logs() {
 }
 
 cmd_dashboard() {
-    local refresh=2
+    local refresh=5
     local theme="dark"
     local bootstrap=false
 
@@ -1300,9 +1303,9 @@ main() {
     done
     
     if [[ $# -eq 0 ]]; then
-        echo "Error: No command specified" >&2
-        show_help >&2
-        exit 2
+        # Bare invocation is the everyday entry point: open the dashboard.
+        cmd_dashboard
+        exit $?
     fi
     
     local command_name="$1"

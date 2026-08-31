@@ -1320,6 +1320,24 @@ test_account_list_json_output() {
     return $all_passed
 }
 
+test_cli_no_args_opens_dashboard() {
+    local all_passed=0
+    local output exit_code
+
+    # Stub the dashboard python seam so the TUI never launches; reaching
+    # dashboard_run at all proves the bare invocation opens the dashboard.
+    output=$(VMANGOS_DASHBOARD_PYTHON=/nonexistent-python \
+        bash "$MANAGER_DIR/bin/vmangos-manager" 2>&1 || echo "exit_code=$?")
+    exit_code="${output##*exit_code=}"
+
+    assert_true "[[ \$output != *'No command specified'* ]]" "bare invocation is not a usage error" || all_passed=1
+    assert_true "[[ \$output == *'Dashboard dependencies are not installed'* ]]" "bare invocation dispatches to the dashboard" || all_passed=1
+    assert_true "[[ \$output == *'dashboard --bootstrap'* ]]" "bare invocation surfaces the bootstrap hint on missing deps" || all_passed=1
+    assert_equals 1 "$exit_code" "bare invocation propagates dashboard failure exit code" || all_passed=1
+
+    return $all_passed
+}
+
 test_cli_account_rejects_positional_password() {
     local all_passed=0
     local output
@@ -4595,6 +4613,7 @@ main() {
     run_test "DB: Restore credentials" test_db_restore_credentials_and_invocation
     run_test "DB: Load config defaults" test_db_load_config_defaults
     run_test "CLI: Parsing" test_cli_parsing
+    run_test "CLI: No args opens dashboard" test_cli_no_args_opens_dashboard
     run_test "Account: Validation" test_account_validation
     run_test "Account: Hash vector" test_account_hash_known_vector
     run_test "Account: Password file checks" test_account_password_file_checks

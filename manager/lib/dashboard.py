@@ -103,7 +103,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="VMANGOS Manager Textual dashboard")
     parser.add_argument("--manager-bin", required=True, help="Path to vmangos-manager")
     parser.add_argument("--config", required=True, help="Path to manager.conf")
-    parser.add_argument("--refresh", type=int, default=2, help="Refresh interval in seconds")
+    parser.add_argument("--refresh", type=int, default=5, help="Refresh interval in seconds")
     parser.add_argument("--theme", choices=("dark", "light"), default="dark", help="Dashboard theme")
     parser.add_argument("--view", choices=tuple(VIEW_TITLES.keys()), default="overview", help="Initial dashboard view")
     parser.add_argument("--screenshot", help="Write an SVG screenshot after the first refresh and exit")

@@ -243,18 +243,21 @@ sudo /opt/mangos/manager/bin/vmangos-manager logs recent --limit 10
 
 | Task | Command |
 |---|---|
-| Start services and wait for health | `sudo /opt/mangos/manager/bin/vmangos-manager server start --wait` |
-| Restart services | `sudo /opt/mangos/manager/bin/vmangos-manager server restart` |
-| Watch live status | `sudo /opt/mangos/manager/bin/vmangos-manager server status --watch` |
-| Create account | `sudo VMANGOS_PASSWORD='pass' /opt/mangos/manager/bin/vmangos-manager account create USER --password-env` |
-| Set GM level | `sudo /opt/mangos/manager/bin/vmangos-manager account setgm USER 3` |
-| Ban account | `sudo /opt/mangos/manager/bin/vmangos-manager account ban USER 7d --reason "Rule violation"` |
-| Backup now + verify | `sudo /opt/mangos/manager/bin/vmangos-manager backup now --verify` |
-| Schedule daily backup | `sudo /opt/mangos/manager/bin/vmangos-manager backup schedule --daily 04:00` |
-| Check recent errors | `sudo /opt/mangos/manager/bin/vmangos-manager logs recent --source world --severity error` |
-| Schedule weekly restart | `sudo /opt/mangos/manager/bin/vmangos-manager schedule restart --time 04:00 --weekly Sun` |
-| Check for updates | `sudo /opt/mangos/manager/bin/vmangos-manager update check` |
-| Inspect DB impact | `sudo /opt/mangos/manager/bin/vmangos-manager update inspect` |
+| Open the dashboard | `vmangos-manager` (no arguments needed) |
+| Watch live status | `vmangos-manager server status --watch` |
+| Create account | `VMANGOS_PASSWORD='pass' vmangos-manager account create USER --password-env` |
+| Set GM level | `vmangos-manager account setgm USER 3` |
+| Ban account | `vmangos-manager account ban USER 7d --reason "Rule violation"` |
+| Backup now + verify | `vmangos-manager backup now --verify` |
+| Check recent errors | `vmangos-manager logs recent --source world --severity error` |
+| Check for updates | `vmangos-manager update check` |
+| Inspect DB impact | `vmangos-manager update inspect` |
+| Start services and wait for health | `sudo vmangos-manager server start --wait` |
+| Restart services | `sudo vmangos-manager server restart` |
+| Schedule daily backup | `sudo vmangos-manager backup schedule --daily 04:00` |
+| Schedule weekly restart | `sudo vmangos-manager schedule restart --time 04:00 --weekly Sun` |
+
+Commands marked `sudo` touch systemd (services or timers) and stay root-only. Everything else works as your normal user once access is granted (see [Running as a Non-Root User](#-running-as-a-non-root-user)).
 
 ---
 
