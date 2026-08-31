@@ -2342,6 +2342,43 @@ def create_app(
             elif event.button.id == "command-submit":
                 self.dismiss(self.collect_values())
 
+    class ConfirmScreen(ModalScreen[bool]):
+        BINDINGS = [
+            ("escape", "cancel", "Cancel"),
+            ("enter", "confirm", "Confirm"),
+        ]
+
+        def __init__(self, title: str, message: str, confirm_label: str = "Confirm") -> None:
+            super().__init__()
+            self.title_text = title
+            self.message_text = message
+            self.confirm_label = confirm_label
+
+        def compose(self) -> ComposeResult:
+            with Container(id="confirm-modal"):
+                yield Static(self.title_text, id="confirm-modal-title")
+                yield Static(self.message_text, id="confirm-modal-message")
+                with Horizontal(id="command-modal-actions"):
+                    yield Button("Cancel", id="confirm-cancel")
+                    yield Button(self.confirm_label, id="confirm-confirm", variant="error")
+
+        def on_mount(self) -> None:
+            if getattr(self.app, "theme_name", "dark") == "light":
+                self.add_class("theme-light")
+            self.set_focus(self.query_one("#confirm-confirm", Button))
+
+        def action_cancel(self) -> None:
+            self.dismiss(False)
+
+        def action_confirm(self) -> None:
+            self.dismiss(True)
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "confirm-cancel":
+                self.dismiss(False)
+            elif event.button.id == "confirm-confirm":
+                self.dismiss(True)
+
     class OnlineRosterScreen(ModalScreen[str | None]):
         BINDINGS = [
             ("escape", "close", "Close"),
@@ -2830,6 +2867,12 @@ def create_app(
                 return
             self.dispatch_dashboard_action(action_name, result)
 
+        def request_confirmation(self, title: str, message: str, on_confirm, confirm_label: str = "Confirm") -> None:
+            self.push_screen(
+                ConfirmScreen(title=title, message=message, confirm_label=confirm_label),
+                lambda confirmed: on_confirm() if confirmed else None,
+            )
+
         def dispatch_dashboard_action(self, action_name: str, form_values: dict[str, Any] | None = None) -> None:
             request = build_dashboard_action_request(
                 self.snapshot,
@@ -2926,25 +2969,35 @@ def create_app(
             )
 
         def action_stop_server(self) -> None:
-            self.request_command_action(
-                "stop",
-                ["server", "stop", "--timeout", "60"],
-                feedback={
-                    "success_receipt": "Requested a realm stop.",
-                    "success_next": "Confirm auth and world settle inactive before backups, updates, or maintenance work.",
-                    "failure_next": "Inspect service health and logs, then retry the stop when the host is ready.",
-                },
+            self.request_confirmation(
+                "Stop the realm?",
+                "Auth and world services will be stopped and connected players disconnected.",
+                lambda: self.request_command_action(
+                    "stop",
+                    ["server", "stop", "--timeout", "60"],
+                    feedback={
+                        "success_receipt": "Requested a realm stop.",
+                        "success_next": "Confirm auth and world settle inactive before backups, updates, or maintenance work.",
+                        "failure_next": "Inspect service health and logs, then retry the stop when the host is ready.",
+                    },
+                ),
+                confirm_label="Stop realm",
             )
 
         def action_restart_server(self) -> None:
-            self.request_command_action(
-                "restart",
-                ["server", "restart", "--timeout", "60"],
-                feedback={
-                    "success_receipt": "Requested a realm restart.",
-                    "success_next": "Use Overview and Logs to confirm the realm settles cleanly after the restart.",
-                    "failure_next": "Inspect service health and recent logs, then retry the restart when the host is ready.",
-                },
+            self.request_confirmation(
+                "Restart the realm?",
+                "Auth and world services will be restarted; players disconnect until the realm is back.",
+                lambda: self.request_command_action(
+                    "restart",
+                    ["server", "restart", "--timeout", "60"],
+                    feedback={
+                        "success_receipt": "Requested a realm restart.",
+                        "success_next": "Use Overview and Logs to confirm the realm settles cleanly after the restart.",
+                        "failure_next": "Inspect service health and recent logs, then retry the restart when the host is ready.",
+                    },
+                ),
+                confirm_label="Restart realm",
             )
 
         def handle_online_roster_result(self, account_id: str | None) -> None:
@@ -3072,7 +3125,17 @@ def create_app(
             )
 
         def action_unban_account(self) -> None:
-            self.dispatch_dashboard_action("account_unban")
+            account = self.selected_account()
+            if account is None:
+                self.set_action_result("account unban skipped: no account selected")
+                return
+            username = str(account.get("username", "selected account"))
+            self.request_confirmation(
+                f"Unban {username}?",
+                f"The ban on {username} will be lifted immediately.",
+                lambda: self.dispatch_dashboard_action("account_unban"),
+                confirm_label="Unban account",
+            )
 
         def action_restore_selected_backup_dry_run(self) -> None:
             backup = self.selected_backup()
@@ -3710,6 +3773,39 @@ DASHBOARD_CSS = """
             border: heavy #f59e0b;
             background: #0c1b2c;
             padding: 1 2 2 2;
+        }
+
+        #confirm-modal {
+            width: 72;
+            max-width: 100;
+            height: auto;
+            border: heavy #ef4444;
+            background: #0c1b2c;
+            padding: 1 2 2 2;
+        }
+
+        ConfirmScreen.theme-light #confirm-modal {
+            border: round #dc2626;
+            background: #fffdf7;
+        }
+
+        #confirm-modal-title {
+            text-style: bold;
+            color: #f87171;
+            margin-bottom: 1;
+        }
+
+        ConfirmScreen.theme-light #confirm-modal-title {
+            color: #b91c1c;
+        }
+
+        #confirm-modal-message {
+            color: #e6edf7;
+            margin-bottom: 1;
+        }
+
+        ConfirmScreen.theme-light #confirm-modal-message {
+            color: #142033;
         }
 
         CommandFormScreen.theme-light #command-modal {
