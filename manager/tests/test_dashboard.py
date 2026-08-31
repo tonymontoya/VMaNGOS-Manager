@@ -260,6 +260,54 @@ def test_accounts_sort_cycles_columns(tmp_path):
     asyncio.run(scenario())
 
 
+def test_create_account_form_validates_inline(tmp_path):
+    app, log_path = build_app(tmp_path, initial_view=ACCOUNTS_KEYS_VIEW)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            table = app.query_one("#accounts-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="accounts table to load")
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press(*"a!")  # invalid username: too short, non-alphanumeric
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.screen.__class__.__name__ == "CommandFormScreen", "form must stay open on invalid input"
+            error_text = str(app.query_one("#command-modal-error").renderable)
+            assert "username must be 2-32 alphanumeric characters" in error_text
+            assert recorded_commands(log_path) == []
+            await pilot.press("escape")
+            await asyncio.sleep(0.3)
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+
+def test_create_account_form_dispatches_valid_input(tmp_path):
+    app, log_path = build_app(tmp_path, initial_view=ACCOUNTS_KEYS_VIEW)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            table = app.query_one("#accounts-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="accounts table to load")
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press(*"playerone")
+            await pilot.press("tab")
+            await pilot.press(*"seekrit1")
+            await pilot.press("tab")
+            await pilot.press(*"seekrit1")
+            await pilot.press("enter")
+            await wait_for(
+                lambda: any("account create" in line for line in recorded_commands(log_path)),
+                message="account create to be dispatched",
+            )
+            await asyncio.sleep(0.4)
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+
 def test_accounts_create_still_opens_its_form(tmp_path):
     app, _log_path = build_app(tmp_path, initial_view=ACCOUNTS_KEYS_VIEW)
 

@@ -776,6 +776,55 @@ def render_command_rail(active_view: str) -> str:
     )
 
 
+def validate_command_form_values(action_name: str, values: dict[str, Any]) -> str:
+    """Field validation for command forms, shared by the modal (inline
+    errors before dismissal) and build_dashboard_action_request (the
+    authoritative backstop for every dispatch path). Returns a
+    human-readable error, or "" when the values pass."""
+    if action_name == "account_create":
+        if not USERNAME_PATTERN.fullmatch(values.get("username", "")):
+            return "account create skipped: username must be 2-32 alphanumeric characters"
+        if len(values.get("password", "")) < 6 or len(values.get("password", "")) > 32:
+            return "account create skipped: password must be 6-32 characters"
+        if values.get("password", "") != values.get("confirm_password", ""):
+            return "account create skipped: passwords do not match"
+    elif action_name == "account_password":
+        if len(values.get("password", "")) < 6 or len(values.get("password", "")) > 32:
+            return "password reset skipped: password must be 6-32 characters"
+        if values.get("password", "") != values.get("confirm_password", ""):
+            return "password reset skipped: passwords do not match"
+    elif action_name == "account_setgm":
+        if not GM_LEVEL_PATTERN.fullmatch(values.get("gm_level", "")):
+            return "set GM skipped: GM level must be 0, 1, 2, or 3"
+    elif action_name == "account_ban":
+        if not DURATION_PATTERN.fullmatch(values.get("duration", "")):
+            return "account ban skipped: duration must use forms like 30m, 12h, or 7d"
+        if not BAN_REASON_PATTERN.fullmatch(values.get("reason", "")):
+            return "account ban skipped: reason must use letters, numbers, and spaces only"
+    elif action_name == "backup_schedule_daily":
+        if not DAILY_TIME_PATTERN.fullmatch(values.get("time", "")):
+            return "backup schedule skipped: daily time must use HH:MM in 24-hour format"
+    elif action_name == "backup_schedule_weekly":
+        if not WEEKLY_SCHEDULE_PATTERN.fullmatch(values.get("schedule", "")):
+            return "backup schedule skipped: weekly value must use 'Mon 04:00' style format"
+    elif action_name in ("schedule_honor_create", "schedule_restart_create"):
+        schedule_type = values.get("schedule_type", "").lower()
+        if not SCHEDULE_TYPE_PATTERN.fullmatch(schedule_type):
+            return "schedule create skipped: type must be daily or weekly"
+        if not DAILY_TIME_PATTERN.fullmatch(values.get("time", "")):
+            return "schedule create skipped: time must use HH:MM in 24-hour format"
+        if schedule_type == "weekly" and not DAY_NAME_PATTERN.fullmatch(values.get("day", "")):
+            return "schedule create skipped: weekly schedules require a day like Sun"
+        timezone_value = values.get("timezone", "")
+        if timezone_value and not re.fullmatch(r"^[A-Za-z0-9_+./-]+$", timezone_value):
+            return "schedule create skipped: timezone contains unsupported characters"
+        if action_name == "schedule_restart_create":
+            warnings_value = values.get("warnings", "")
+            if warnings_value and not WARNINGS_PATTERN.fullmatch(warnings_value):
+                return "schedule create skipped: warnings must use comma-separated minutes like 30,15,5,1"
+    return ""
+
+
 def build_dashboard_action_request(
     snapshot: dict[str, Any],
     selected_account_id: str,
@@ -786,16 +835,15 @@ def build_dashboard_action_request(
 ) -> dict[str, Any]:
     values = normalize_form_values(form_values)
 
+    # Field validation is shared with the form modal; selection-dependent
+    # guards (no account/backup/task selected) stay below, per action.
+    form_error = validate_command_form_values(action_name, values)
+    if form_error:
+        return {"error": form_error}
+
     if action_name == "account_create":
         username = values.get("username", "")
         password = values.get("password", "")
-        confirm_password = values.get("confirm_password", "")
-        if not USERNAME_PATTERN.fullmatch(username):
-            return {"error": "account create skipped: username must be 2-32 alphanumeric characters"}
-        if len(password) < 6 or len(password) > 32:
-            return {"error": "account create skipped: password must be 6-32 characters"}
-        if password != confirm_password:
-            return {"error": "account create skipped: passwords do not match"}
         return {
             "label": f"account create {username}",
             "command": ["account", "create", username, "--password-env"],
@@ -861,11 +909,6 @@ def build_dashboard_action_request(
 
         if action_name == "account_password":
             password = values.get("password", "")
-            confirm_password = values.get("confirm_password", "")
-            if len(password) < 6 or len(password) > 32:
-                return {"error": "password reset skipped: password must be 6-32 characters"}
-            if password != confirm_password:
-                return {"error": "password reset skipped: passwords do not match"}
             return {
                 "label": f"account password {username}",
                 "command": ["account", "password", username, "--password-env"],
@@ -881,8 +924,6 @@ def build_dashboard_action_request(
 
         if action_name == "account_setgm":
             gm_level = values.get("gm_level", "")
-            if not GM_LEVEL_PATTERN.fullmatch(gm_level):
-                return {"error": "set GM skipped: GM level must be 0, 1, 2, or 3"}
             return {
                 "label": f"account setgm {username}",
                 "command": ["account", "setgm", username, gm_level],
@@ -899,10 +940,6 @@ def build_dashboard_action_request(
         if action_name == "account_ban":
             duration = values.get("duration", "")
             reason = values.get("reason", "")
-            if not DURATION_PATTERN.fullmatch(duration):
-                return {"error": "account ban skipped: duration must use forms like 30m, 12h, or 7d"}
-            if not BAN_REASON_PATTERN.fullmatch(reason):
-                return {"error": "account ban skipped: reason must use letters, numbers, and spaces only"}
             return {
                 "label": f"account ban {username}",
                 "command": ["account", "ban", username, duration, "--reason", reason],
@@ -957,8 +994,6 @@ def build_dashboard_action_request(
 
         if action_name == "backup_schedule_daily":
             daily_time = values.get("time", "")
-            if not DAILY_TIME_PATTERN.fullmatch(daily_time):
-                return {"error": "backup schedule skipped: daily time must use HH:MM in 24-hour format"}
             return {
                 "label": f"backup schedule daily {daily_time}",
                 "command": ["backup", "schedule", "--daily", daily_time],
@@ -974,8 +1009,6 @@ def build_dashboard_action_request(
 
         if action_name == "backup_schedule_weekly":
             weekly_schedule = values.get("schedule", "")
-            if not WEEKLY_SCHEDULE_PATTERN.fullmatch(weekly_schedule):
-                return {"error": "backup schedule skipped: weekly value must use 'Mon 04:00' style format"}
             return {
                 "label": f"backup schedule weekly {weekly_schedule}",
                 "command": ["backup", "schedule", "--weekly", weekly_schedule],
@@ -995,15 +1028,6 @@ def build_dashboard_action_request(
         day = values.get("day", "")
         timezone_value = values.get("timezone", "")
 
-        if not SCHEDULE_TYPE_PATTERN.fullmatch(schedule_type):
-            return {"error": "schedule create skipped: type must be daily or weekly"}
-        if not DAILY_TIME_PATTERN.fullmatch(time_value):
-            return {"error": "schedule create skipped: time must use HH:MM in 24-hour format"}
-        if schedule_type == "weekly" and not DAY_NAME_PATTERN.fullmatch(day):
-            return {"error": "schedule create skipped: weekly schedules require a day like Sun"}
-        if timezone_value and not re.fullmatch(r"^[A-Za-z0-9_+./-]+$", timezone_value):
-            return {"error": "schedule create skipped: timezone contains unsupported characters"}
-
         subcommand = "honor" if action_name == "schedule_honor_create" else "restart"
         command = ["schedule", subcommand, "--time", time_value]
         if schedule_type == "weekly":
@@ -1016,8 +1040,6 @@ def build_dashboard_action_request(
         if action_name == "schedule_restart_create":
             warnings = values.get("warnings", "")
             announce = values.get("announce", "")
-            if warnings and not WARNINGS_PATTERN.fullmatch(warnings):
-                return {"error": "schedule create skipped: warnings must use comma-separated minutes like 30,15,5,1"}
             if warnings:
                 command.extend(["--warnings", warnings])
             if announce:
@@ -2365,12 +2387,14 @@ def create_app(
             submit_label: str,
             fields: list[dict[str, Any]],
             intro: str = "",
+            action_name: str = "",
         ) -> None:
             super().__init__()
             self.title = title
             self.submit_label = submit_label
             self.fields = fields
             self.intro = intro
+            self.action_name = action_name
 
         def compose(self) -> ComposeResult:
             with Container(id="command-modal"):
@@ -2410,13 +2434,28 @@ def create_app(
             self.dismiss(None)
 
         def action_submit(self) -> None:
-            self.dismiss(self.collect_values())
+            values = self.collect_values()
+            error = validate_command_form_values(self.action_name, values)
+            if error:
+                # Inline, in the modal: bad input must not close the form and
+                # lose what the user already typed.
+                self.query_one("#command-modal-error", Static).update(error)
+                return
+            self.dismiss(values)
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            # Enter inside a field is consumed by the Input itself; submit
+            # from here so the keyboard path and the button path agree.
+            self.action_submit()
+
+        def on_input_changed(self, event: Input.Changed) -> None:
+            self.query_one("#command-modal-error", Static).update("")
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "command-cancel":
                 self.dismiss(None)
             elif event.button.id == "command-submit":
-                self.dismiss(self.collect_values())
+                self.action_submit()
 
     class ConfirmScreen(ModalScreen[bool]):
         BINDINGS = [
@@ -2938,7 +2977,13 @@ def create_app(
             intro: str = "",
         ) -> None:
             self.push_screen(
-                CommandFormScreen(title=title, submit_label=submit_label, fields=fields, intro=intro),
+                CommandFormScreen(
+                    title=title,
+                    submit_label=submit_label,
+                    fields=fields,
+                    intro=intro,
+                    action_name=action_name,
+                ),
                 lambda result, action_name=action_name: self.handle_command_form_result(action_name, result),
             )
 
