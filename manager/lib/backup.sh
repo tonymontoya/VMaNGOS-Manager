@@ -933,8 +933,9 @@ backup_service_unit_content() {
 backup_timer_unit_content() {
     local description="$1"
     local on_calendar="$2"
+    local service_name="$3"
 
-    systemd_timer_unit_content "$description" "$on_calendar"
+    systemd_timer_unit_content "$description" "$on_calendar" "$service_name"
 }
 
 backup_schedule_create_daily() {
@@ -955,10 +956,12 @@ backup_schedule_create_daily() {
         "${service_name}.service" \
         "$(backup_service_unit_content "VMANGOS Daily Backup" "$manager_bin_path")" \
         "${timer_name}.timer" \
-        "$(backup_timer_unit_content "Run VMANGOS backup daily at $time_str" "*-*-* $hour:$minute:00")"
+        "$(backup_timer_unit_content "Run VMANGOS backup daily at $time_str" "*-*-* $hour:$minute:00" "${service_name}.service")"
 
     log_info "Enabling timer..."
-    systemd_enable_timer backup_systemctl "${timer_name}.timer"
+    systemd_enable_timer backup_systemctl "${timer_name}.timer" || {
+        error_exit "Daily backup timer could not be enabled and started" "$E_SERVICE_ERROR"
+    }
 
     log_info "✓ Daily backup scheduled for $time_str"
     log_info "Timer status:"
@@ -989,10 +992,12 @@ backup_schedule_create_weekly() {
         "${service_name}.service" \
         "$(backup_service_unit_content "VMANGOS Weekly Backup" "$manager_bin_path")" \
         "${timer_name}.timer" \
-        "$(backup_timer_unit_content "Run VMANGOS backup weekly on $day at $time" "$day *-*-* $hour:$minute:00")"
+        "$(backup_timer_unit_content "Run VMANGOS backup weekly on $day at $time" "$day *-*-* $hour:$minute:00" "${service_name}.service")"
 
     log_info "Enabling timer..."
-    systemd_enable_timer backup_systemctl "${timer_name}.timer"
+    systemd_enable_timer backup_systemctl "${timer_name}.timer" || {
+        error_exit "Weekly backup timer could not be enabled and started" "$E_SERVICE_ERROR"
+    }
 
     log_info "✓ Weekly backup scheduled for $day at $time"
     log_info "Timer status:"

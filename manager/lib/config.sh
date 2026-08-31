@@ -955,6 +955,16 @@ config_grant() {
         log_warn "Backup dir not writable: $backup_dir (created later by the installer or root)"
     fi
 
+    # Runtime lock dir lives on tmpfs: provision it via tmpfiles.d so it is
+    # recreated (group-writable) at every boot, not just right now.
+    mkdir -p /etc/tmpfiles.d
+    printf 'd /run/vmangos-manager 0775 root %s -\n' "$group" > /etc/tmpfiles.d/vmangos-manager.conf
+    if systemd-tmpfiles --create /etc/tmpfiles.d/vmangos-manager.conf >/dev/null 2>&1; then
+        log_info "Provisioned /run/vmangos-manager (group '$group', mode 775, recreated at boot)"
+    else
+        log_warn "Could not run systemd-tmpfiles; lock dir /run/vmangos-manager may be missing until reboot"
+    fi
+
     local user_groups
     user_groups=$(id -nG "$user" 2>/dev/null || true)
     if [[ " $user_groups " == *" $group "* ]]; then

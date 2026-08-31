@@ -410,8 +410,9 @@ schedule_service_unit_content() {
 schedule_timer_unit_content() {
     local description="$1"
     local on_calendar="$2"
+    local service_name="$3"
 
-    systemd_timer_unit_content "$description" "$on_calendar"
+    systemd_timer_unit_content "$description" "$on_calendar" "$service_name"
 }
 
 schedule_main_exec_args() {
@@ -468,8 +469,10 @@ schedule_create_warning_units() {
             "$service_name" \
             "$(schedule_service_unit_content "VMANGOS restart warning ${warning_minutes}m ($job_id)" "$(schedule_warning_exec_args "$job_id" "$warning_minutes")")" \
             "$timer_name" \
-            "$(schedule_timer_unit_content "Run VMANGOS restart warning ${warning_minutes}m ($job_id)" "$warning_oncalendar")"
-        schedule_enable_timer "$timer_name"
+            "$(schedule_timer_unit_content "Run VMANGOS restart warning ${warning_minutes}m ($job_id)" "$warning_oncalendar" "$service_name")"
+        schedule_enable_timer "$timer_name" || {
+            error_exit "Warning timer $timer_name could not be enabled and started" "$E_SERVICE_ERROR"
+        }
     done
 }
 
@@ -527,9 +530,11 @@ schedule_create_job() {
         "$main_service" \
         "$(schedule_service_unit_content "VMANGOS scheduled $job_type ($job_id)" "$(schedule_main_exec_args "$job_type" "$job_id")")" \
         "$main_timer" \
-        "$(schedule_timer_unit_content "Run VMANGOS scheduled $job_type ($job_id)" "$on_calendar")"
+        "$(schedule_timer_unit_content "Run VMANGOS scheduled $job_type ($job_id)" "$on_calendar" "$main_service")"
 
-    schedule_enable_timer "$main_timer"
+    schedule_enable_timer "$main_timer" || {
+        error_exit "Timer $main_timer could not be enabled and started" "$E_SERVICE_ERROR"
+    }
 
     if [[ "$job_type" == "restart" && -n "$warnings" ]]; then
         schedule_create_warning_units "$job_id" "$schedule_type" "$day" "$time_value" "$timezone" "$warnings"

@@ -158,6 +158,12 @@ EOF
 systemd_timer_unit_content() {
     local description="$1"
     local on_calendar="$2"
+    local service_name="$3"
+
+    if [[ -z "$service_name" ]]; then
+        log_error "systemd_timer_unit_content: service name is required (Unit= cannot be implicit)"
+        return 1
+    fi
 
     cat <<EOF
 [Unit]
@@ -166,6 +172,7 @@ Description=$description
 [Timer]
 OnCalendar=$on_calendar
 Persistent=true
+Unit=$service_name
 
 [Install]
 WantedBy=timers.target
@@ -187,12 +194,25 @@ systemd_install_units() {
 # systemd_enable_timer <ctl_fn> <timer_name>
 # ctl_fn is the module's systemctl seam (schedule_systemctl/backup_systemctl)
 # so tests can stub the daemon interaction per module.
+# Fails loudly: a silently-unstarted timer is an unkept promise (the unit
+# files exist but the schedule never fires).
 systemd_enable_timer() {
     local ctl_fn="$1"
     local timer_name="$2"
-    "$ctl_fn" daemon-reload
-    "$ctl_fn" enable "$timer_name" >/dev/null
-    "$ctl_fn" start "$timer_name" >/dev/null
+    if ! "$ctl_fn" daemon-reload; then
+        log_error "systemctl daemon-reload failed"
+        return 1
+    fi
+    if ! "$ctl_fn" enable "$timer_name" >/dev/null 2>&1; then
+        log_error "Failed to enable $timer_name"
+        return 1
+    fi
+    if ! "$ctl_fn" start "$timer_name" >/dev/null 2>&1; then
+        log_error "Failed to start $timer_name"
+        log_error "Inspect with: systemctl status $timer_name"
+        return 1
+    fi
+    return 0
 }
 
 # ============================================================================

@@ -1044,6 +1044,13 @@ EOF
         chmod 640 "$manager_config_file" "$manager_password_file"
         mkdir -p "$INSTALLROOT/backups"
         chmod 775 "$INSTALLROOT/backups"
+        # Runtime lock dir is on tmpfs: recreate it group-writable at boot.
+        mkdir -p /etc/tmpfiles.d
+        printf 'd /run/vmangos-manager 0775 root %s -\n' "$MANGOSOSUSER" > /etc/tmpfiles.d/vmangos-manager.conf
+        systemd-tmpfiles --create /etc/tmpfiles.d/vmangos-manager.conf 2>/dev/null || true
+        mkdir -p /var/run/vmangos-manager
+        chgrp "$MANGOSOSUSER" /var/run/vmangos-manager
+        chmod 775 /var/run/vmangos-manager
         log_info "Manager config written to $manager_config_file"
         log_info "To manage the server as a non-root user:"
         log_info "  sudo usermod -aG $MANGOSOSUSER <username>   # then that user logs out/in"

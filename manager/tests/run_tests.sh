@@ -4137,11 +4137,38 @@ test_backup_service_unit_generation() {
     local service_content timer_content
 
     service_content=$(backup_service_unit_content "VMANGOS Daily Backup" "/opt/mangos/manager/bin/vmangos-manager")
-    timer_content=$(backup_timer_unit_content "Run VMANGOS backup daily at 04:00" "*-*-* 04:00:00")
+    timer_content=$(backup_timer_unit_content "Run VMANGOS backup daily at 04:00" "*-*-* 04:00:00" "vmangos-backup.service")
 
     assert_true "[[ \$service_content == *'ExecStart=/opt/mangos/manager/bin/vmangos-manager backup now --verify'* ]]" "service unit contains resolved ExecStart" || all_passed=1
     assert_true "[[ \$service_content != *'MANAGER_BIN'* ]]" "service unit does not contain unresolved MANAGER_BIN token" || all_passed=1
     assert_true "[[ \$timer_content == *'OnCalendar=*-*-* 04:00:00'* ]]" "timer unit contains expected OnCalendar value" || all_passed=1
+    assert_true "[[ \$timer_content == *'Unit=vmangos-backup.service'* ]]" "timer unit explicitly targets the service (no stem-name guessing)" || all_passed=1
+
+    return $all_passed
+}
+
+test_systemd_enable_timer_reports_failure() {
+    # shellcheck source=../lib/common.sh
+    source "$LIB_DIR/common.sh"
+
+    local all_passed=0
+    local output rc
+
+    failing_ctl() {
+        case "$1" in
+            daemon-reload) return 0 ;;
+            enable) return 0 ;;
+            start) return 1 ;;
+        esac
+    }
+
+    output=$(systemd_enable_timer failing_ctl "vmangos-backup-daily.timer" 2>&1) && rc=0 || rc=$?
+    assert_true "[[ \$rc -ne 0 ]]" "systemd_enable_timer propagates start failure" || all_passed=1
+    assert_true "[[ \$output == *'Failed to start vmangos-backup-daily.timer'* ]]" "systemd_enable_timer names the timer that failed" || all_passed=1
+    assert_true "[[ \$output == *'systemctl status vmangos-backup-daily.timer'* ]]" "systemd_enable_timer points at diagnosis command" || all_passed=1
+
+    output=$(systemd_enable_timer true "vmangos-backup-daily.timer" 2>&1) && rc=0 || rc=$?
+    assert_true "[[ \$rc -eq 0 ]]" "systemd_enable_timer succeeds when every step succeeds" || all_passed=1
 
     return $all_passed
 }
@@ -4582,6 +4609,7 @@ main() {
     run_test "Config: 640 permissions accepted" test_config_load_accepts_640
     run_test "Config: Grant requires root" test_cli_config_grant_requires_root
     run_test "Config: Grant validates args" test_cli_config_grant_validates_args
+    run_test "Timers: enable failures surface" test_systemd_enable_timer_reports_failure
     run_test "CLI: Account rejects positional password" test_cli_account_rejects_positional_password
     run_test "Update: Text output" test_update_check_text_output
     run_test "Update: JSON output" test_update_check_json_output
