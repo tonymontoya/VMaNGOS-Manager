@@ -11,13 +11,13 @@ This guide covers the two installer entry points and how to adopt Manager onto a
 | `auto_install.sh` | Non-interactive, zero-touch | Fresh Ubuntu hosts; generated defaults |
 | `vmangos_setup.sh` | Guided, interactive | Custom paths, DB names, or credentials |
 
-Both target **Ubuntu 22.04 LTS**.
+Both target **Ubuntu 22.04/24.04/26.04 LTS** (MariaDB or MySQL 8.4).
 
 ---
 
 ## 🛠️ What the Installer Handles
 
-- Ubuntu package prerequisites (build tools, MariaDB client, Python, etc.)
+- Ubuntu package prerequisites (build tools, MariaDB/MySQL client libraries, Python, etc.)
 - VMANGOS source checkout and compilation
 - MariaDB database creation and user grants
 - Runtime path layout under the chosen install root
@@ -46,7 +46,7 @@ sudo bash auto_install.sh
 - Logs all output to `/var/log/vmangos-install.log`
 - Prints credentials and runtime paths at completion
 
-**Reinstall safety:** If `/opt/mangos` already exists, the installer aborts unless you set `REINSTALL_POLICY="replace"` in `/root/.vmangos-secrets/setup.conf`.
+**Reinstall safety:** If `/opt/mangos` already exists, the installer decides how to proceed: a partial install with checkpoints resumes from the last completed phase; an install without checkpoints follows `REINSTALL_POLICY` in `/root/.vmangos-secrets/setup.conf` (`abort` by default, or `replace` to wipe and reinstall).
 
 ### Guided Interactive Install
 

@@ -1,9 +1,9 @@
 #!/bin/bash
 # =============================================================================
-# VMANGOS Setup Script - Ubuntu 22.04 LTS
+# VMANGOS Setup Script - Ubuntu LTS (22.04/24.04/26.04)
 # =============================================================================
 # This script automates the installation of VMaNGOS (Vanilla MaNGOS)
-# onto Ubuntu 22.04 LTS. It includes:
+# onto Ubuntu LTS (22.04/24.04/26.04, MariaDB or MySQL 8.4). It includes:
 # - Retry logic for network operations
 # - Resume capability for interrupted installations
 # - Background execution support for long builds
@@ -685,14 +685,14 @@ check_client_data() {
         show_client_data_help
         if check_noninteractive; then
             log_warn "Client data not found. Set VMANGOS_CLIENT_DATA environment variable."
-            log_warn "Installation will continue but data extraction will be skipped."
+            log_warn "The installer will stop at the data extraction phase."
             CLIENT_DATA=""
             return 0
         else
             read -rp "Enter path to WoW 1.12.1 client Data folder (or press Enter to skip): " CLIENT_DATA
             if [ -z "$CLIENT_DATA" ] || [ ! -d "$CLIENT_DATA" ]; then
-                log_warn "No valid client data provided. Data extraction will be skipped."
-                log_warn "You can manually extract data later after providing client files."
+                log_warn "No valid client data provided."
+                log_warn "The installer will stop at the data extraction phase."
                 CLIENT_DATA=""
                 return 0
             fi
@@ -1077,17 +1077,29 @@ phase_data_extraction() {
     
     cd "$INSTALLROOT"
     
-    # Check if client data is available
+    # The server cannot boot without DBC files and base maps, so do NOT
+    # checkpoint DATA_DONE here — stop and tell the user how to resume.
     if [ -z "$CLIENT_DATA" ] || [ ! -d "$CLIENT_DATA" ]; then
-        log_warn "No client data available - skipping extraction phase"
-        log_info "To extract data later, place 1.12.1 client Data folder and run:"
-        log_info "  sudo $INSTALLROOT/run/bin/Extractors/mapextractor --silent -i <data_path>"
-        set_checkpoint "DATA_DONE"
-        return 0
+        log_error "========================================="
+        log_error "NO CLIENT DATA"
+        log_error "========================================="
+        log_error ""
+        log_error "The server cannot start without DBC files and base maps,"
+        log_error "so the installation stops here instead of continuing."
+        log_error ""
+        log_info "Provide a WoW 1.12.1 (build 5875) client Data folder and re-run"
+        log_info "the installer; it will resume from this phase:"
+        log_info "  VMANGOS_CLIENT_DATA=/path/to/Data sudo bash vmangos_setup.sh"
+        log_info ""
+        log_info "To extract manually instead, place the client Data folder and run:"
+        log_info "  sudo $INSTALLROOT/run/bin/Extractors/mapextractor --silent -i <client_root_with_Data>"
+        return 1
     fi
 
     # A resumed install re-enters this phase without re-running
-    # check_client_data, so derive the extraction root on demand.
+    # check_client_data, so make sure the service account exists (this phase
+    # chowns and sudo -us to it) and derive the extraction root on demand.
+    ensure_service_account
     prepare_extraction_root
 
     # Copy extractors (handle both lowercase and capitalized names)
@@ -1134,20 +1146,15 @@ phase_data_extraction() {
         log_info "Starting mapextractor with client data: $CLIENT_DATA_EXTRACT_ROOT"
         # --silent: the extractor prompts for y/n + "press enter" otherwise,
         # which wedges an unattended install. Defaults kept: high res, limited height.
-        if sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./mapextractor --silent -i '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG" | \
-            grep -E "Extracting|Processing|Extracted|Done|Error|Fatal|Invalid"; then
-            : # Extractor output captured
-        fi
-        
-        # Check if extraction succeeded
-        if [ ! -d "$INSTALLROOT/dbc" ] || [ ! -d "$INSTALLROOT/maps" ]; then
-            log_error "Map extraction failed - no output files generated"
-            EXTRACTION_FAILED=1
-        elif [ -z "$(ls -A "$INSTALLROOT/dbc" 2>/dev/null)" ]; then
-            log_error "Map extraction failed - DBC folder is empty"
-            EXTRACTION_FAILED=1
-        else
+        # PIPESTATUS: tee would otherwise mask the extractor's exit code.
+        sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./mapextractor --silent -i '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG"
+        local MAPEXTRACT_RC=${PIPESTATUS[0]}
+
+        if [ "$MAPEXTRACT_RC" -eq 0 ] && [ -n "$(ls -A "$INSTALLROOT/dbc" 2>/dev/null)" ] && [ -n "$(ls -A "$INSTALLROOT/maps" 2>/dev/null)" ]; then
             log_info "DBC and map extraction completed successfully"
+        else
+            log_error "Map extraction failed (exit status $MAPEXTRACT_RC or missing dbc/maps output)"
+            EXTRACTION_FAILED=1
         fi
     else
         log_warn "mapextractor not found, skipping DBC/map extraction"
@@ -1171,10 +1178,10 @@ phase_data_extraction() {
         # --silent: skip its "press enter" prompts.
         # PIPESTATUS: tee would otherwise mask the extractor's exit code.
         sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmapextractor --silent -d '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG"
-        if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+        if [ "${PIPESTATUS[0]}" -eq 0 ] && [ -n "$(ls -A "$INSTALLROOT/Buildings" 2>/dev/null)" ]; then
             log_info "VMap extraction completed"
         else
-            log_warn "VMap extractor exited with errors"
+            log_warn "VMap extractor failed or produced no Buildings output"
             VMAPS_FAILED=1
         fi
     else

@@ -340,12 +340,24 @@ if [[ "${1:-}" == "test" ]]; then
 fi
 exec "$@"
 EOF
+    # The phase ensures the service account on entry, so id/useradd must be
+    # stubbed: real useradd would try to create a system user on the test box.
+    cat > "$tmp_dir/bin/id" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "${FAKE_MISSING_USER:-mangos}" ]]; then exit 1; fi
+exec /usr/bin/id "$@"
+EOF
+    cat > "$tmp_dir/bin/useradd" <<EOF
+#!/usr/bin/env bash
+printf 'useradd:%s\n' "\$*" >> '$tmp_dir/capture'
+exit 0
+EOF
     cat > "$tmp_dir/bin/chown" <<EOF
 #!/usr/bin/env bash
 printf 'chown:%s\n' "\$*" >> '$tmp_dir/capture'
 exit 0
 EOF
-    chmod +x "$tmp_dir/bin/sudo" "$tmp_dir/bin/chown"
+    chmod +x "$tmp_dir/bin/sudo" "$tmp_dir/bin/id" "$tmp_dir/bin/useradd" "$tmp_dir/bin/chown"
 
     touch "$client/dbc.MPQ" "$client/terrain.MPQ" "$root/client-data/dbc.MPQ"
 
@@ -361,6 +373,7 @@ EOF
 #!/usr/bin/env bash
 printf 'vmapextractor:%s\n' "\$*" >> '$tmp_dir/capture'
 mkdir -p Buildings
+touch Buildings/0001_0000.wmo
 exit 0
 EOF
     cat > "$root/run/bin/Extractors/VMapAssembler" <<EOF
@@ -434,6 +447,9 @@ EOF
         "staged client data is reused instead of re-copied" || failed=1
     assert_equals "DATA_DONE" "$(cat "$root/.install-checkpoints/checkpoint")" \
         "extraction phase completes and checkpoints" || failed=1
+    assert_equals "2" \
+        "$(printf '%s\n' "$capture" | grep -c '^useradd:--system ')" \
+        "the service account is ensured on every phase entry (resume safety)" || failed=1
     assert_equals "1" \
         "$(if [[ -L "$root/5875/dbc" && -L "$root/5875/maps" && -L "$root/5875/vmaps" && -L "$root/5875/mmaps" ]]; then echo 1; else echo 0; fi)" \
         "versioned 5875 data symlinks are created on success" || failed=1
@@ -443,6 +459,161 @@ EOF
     assert_equals "1" \
         "$(printf '%s\n' "$output" | grep -c 'Skipping movement map generation')" \
         "mmap step is skipped loudly when vmaps failed" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
+test_extraction_failure_honesty() {
+    local tmp_dir root client capture failed=0
+    tmp_dir="$(mktemp -d)"
+    root="$tmp_dir/root"
+    client="$tmp_dir/client-src"
+    mkdir -p "$tmp_dir/bin" "$client" "$root/run/bin/Extractors" "$root/client-data" "$root/.install-checkpoints"
+
+    cat > "$tmp_dir/bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" ]]; then shift 2; fi
+if [[ "${1:-}" == "test" ]]; then
+    [[ -r "${3:-}" ]] && exit 0
+    exit 1
+fi
+exec "$@"
+EOF
+    cat > "$tmp_dir/bin/id" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "${FAKE_MISSING_USER:-mangos}" ]]; then exit 1; fi
+exec /usr/bin/id "$@"
+EOF
+    cat > "$tmp_dir/bin/useradd" <<EOF
+#!/usr/bin/env bash
+printf 'useradd:%s\n' "\$*" >> '$tmp_dir/capture'
+exit 0
+EOF
+    cat > "$tmp_dir/bin/chown" <<EOF
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/sudo" "$tmp_dir/bin/id" "$tmp_dir/bin/useradd" "$tmp_dir/bin/chown"
+
+    touch "$client/dbc.MPQ" "$client/terrain.MPQ" "$root/client-data/dbc.MPQ"
+
+    cat > "$root/run/bin/Extractors/MapExtractor" <<EOF
+#!/usr/bin/env bash
+printf 'mapextractor:%s\n' "\$*" >> '$tmp_dir/capture'
+if [[ "\${MAPEXTRACT_FAIL:-0}" == "1" ]]; then exit 1; fi
+mkdir -p dbc maps
+touch dbc/Map.dbc maps/0004331.map
+exit 0
+EOF
+    # Exits 0 but leaves Buildings/ empty: output-dir validation must catch it.
+    cat > "$root/run/bin/Extractors/VMapExtractor" <<EOF
+#!/usr/bin/env bash
+printf 'vmapextractor:%s\n' "\$*" >> '$tmp_dir/capture'
+mkdir -p Buildings
+exit 0
+EOF
+    cat > "$root/run/bin/Extractors/VMapAssembler" <<EOF
+#!/usr/bin/env bash
+printf 'vmap_assembler:%s\n' "\$*" >> '$tmp_dir/capture'
+mkdir -p vmaps
+touch vmaps/000.vmtree
+exit 0
+EOF
+    cat > "$root/run/bin/Extractors/MoveMapGenerator" <<EOF
+#!/usr/bin/env bash
+printf 'MoveMapGen:%s\n' "\$*" >> '$tmp_dir/capture'
+mkdir -p mmaps
+touch mmaps/000.mmap
+exit 0
+EOF
+    chmod +x "$root/run/bin/Extractors/"*
+
+    # Run under plain set -eu like production (the phase inspects PIPESTATUS
+    # directly); output to a file, rc captured, so failing runs stay assertable.
+    local run_rc
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    CLIENT_DATA="" \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        refresh_runtime_paths
+        CLIENT_DATA=""
+        MANGOSOSUSER="mangos"
+
+        phase_data_extraction
+    ' > "$tmp_dir/run1.out" 2>/dev/null || run_rc=$?
+    assert_equals "1" "${run_rc:-0}" \
+        "no client data aborts the extraction phase" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$(cat "$tmp_dir/run1.out")" | grep -c 'NO CLIENT DATA')" \
+        "no-client-data stop is explained to the user" || failed=1
+    if [ -f "$root/.install-checkpoints/checkpoint" ]; then
+        assert_equals "absent" "present" \
+            "no client data must not checkpoint DATA_DONE" || failed=1
+    else
+        echo "✓ no client data must not checkpoint DATA_DONE"
+    fi
+
+    run_rc=0
+    MAPEXTRACT_FAIL=1 \
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        refresh_runtime_paths
+        CLIENT_DATA="'"$client"'"
+        MANGOSOSUSER="mangos"
+
+        phase_data_extraction
+    ' > "$tmp_dir/run2.out" 2>/dev/null || run_rc=$?
+    assert_equals "1" "${run_rc:-0}" \
+        "mapextractor failure aborts the extraction phase" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$(cat "$tmp_dir/run2.out")" | grep -c 'Map extraction failed')" \
+        "mapextractor failure is reported, not masked by tee" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$(cat "$tmp_dir/run2.out")" | grep -c 'DATA EXTRACTION FAILED')" \
+        "failed extraction prints the failure block with manual commands" || failed=1
+    if [ -f "$root/.install-checkpoints/checkpoint" ]; then
+        assert_equals "absent" "present" \
+            "failed extraction must not checkpoint DATA_DONE" || failed=1
+    else
+        echo "✓ failed extraction must not checkpoint DATA_DONE"
+    fi
+
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        refresh_runtime_paths
+        CLIENT_DATA="'"$client"'"
+        MANGOSOSUSER="mangos"
+
+        phase_data_extraction
+    ' > "$tmp_dir/run3.out" 2>/dev/null
+    assert_equals "1" \
+        "$(printf '%s\n' "$(cat "$tmp_dir/run3.out")" | grep -c 'VMap extractor failed or produced no Buildings output')" \
+        "vmapextractor success with empty Buildings output is caught" || failed=1
+    assert_equals "DATA_DONE" "$(cat "$root/.install-checkpoints/checkpoint" 2>/dev/null)" \
+        "gaps-only extraction (vmaps missing) still checkpoints and completes" || failed=1
+
+    capture="$(cat "$tmp_dir/capture" 2>/dev/null)"
+    assert_equals "2" \
+        "$(printf '%s\n' "$capture" | grep -c '^useradd:--system ')" \
+        "service account is ensured when the phase has client data" || failed=1
+    assert_equals "0" \
+        "$(printf '%s\n' "$capture" | grep -c '^vmap_assembler:' )" \
+        "assembler is skipped when Buildings validation failed" || failed=1
 
     rm -rf "$tmp_dir"
     return "$failed"
@@ -640,6 +811,7 @@ main() {
     run_test "Installer: Guided state" test_guided_state_round_trip
     run_test "Installer: Extraction root" test_extraction_root_preparation
     run_test "Installer: Extraction phase" test_extraction_phase_invocations
+    run_test "Installer: Extraction failure honesty" test_extraction_failure_honesty
     run_test "Installer: Download retry" test_download_retry_honesty
     run_test "Installer: World DB URLs" test_world_db_url_resolution
     run_test "Installer: Config local DB host" test_config_phase_local_db_host
