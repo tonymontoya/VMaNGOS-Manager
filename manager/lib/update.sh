@@ -72,8 +72,8 @@ update_find_repo_root() {
 }
 
 update_load_install_context() {
-    config_load "$CONFIG_FILE" >/dev/null 2>&1 || {
-        log_error "Failed to load configuration: $CONFIG_FILE"
+    config_load "$CONFIG_FILE" || {
+        [[ "${CONFIG_ERROR_REPORTED:-0}" == "1" ]] || log_error "Failed to load configuration: $CONFIG_FILE"
         return 1
     }
 
@@ -125,7 +125,11 @@ update_get_tracking_ref() {
 }
 
 update_get_install_target() {
+    # Speculative probe: isolate its CONFIG_ERROR_REPORTED side effect so a
+    # failing probe here cannot silence a real error later in this process.
+    local prev_reported="${CONFIG_ERROR_REPORTED:-0}"
     config_load "$CONFIG_FILE" >/dev/null 2>&1 || true
+    CONFIG_ERROR_REPORTED="$prev_reported"
     config_resolve_manager_root "$CONFIG_FILE"
 }
 

@@ -321,7 +321,7 @@ account_list() {
 
     account_load_config || {
         account_emit_error "CONFIG_ERROR" "Failed to load account configuration" "Check manager.conf and database settings"
-        return 1
+        return "$E_CONFIG_ERROR"
     }
 
     query=$(account_build_list_query "$online_only")
@@ -373,7 +373,7 @@ account_create() {
 
     account_load_config || {
         account_emit_error "CONFIG_ERROR" "Failed to load account configuration" "Check manager.conf and database settings"
-        return 1
+        return "$E_CONFIG_ERROR"
     }
 
     username=$(account_normalize_value "$raw_username")
@@ -422,7 +422,7 @@ account_setgm() {
 
     account_load_config || {
         account_emit_error "CONFIG_ERROR" "Failed to load account configuration" "Check manager.conf and database settings"
-        return 1
+        return "$E_CONFIG_ERROR"
     }
 
     username=$(account_normalize_value "$raw_username")
@@ -473,7 +473,7 @@ account_ban() {
 
     account_load_config || {
         account_emit_error "CONFIG_ERROR" "Failed to load account configuration" "Check manager.conf and database settings"
-        return 1
+        return "$E_CONFIG_ERROR"
     }
 
     username=$(account_normalize_value "$raw_username")
@@ -526,7 +526,7 @@ account_unban() {
 
     account_load_config || {
         account_emit_error "CONFIG_ERROR" "Failed to load account configuration" "Check manager.conf and database settings"
-        return 1
+        return "$E_CONFIG_ERROR"
     }
 
     username=$(account_normalize_value "$raw_username")
@@ -558,7 +558,7 @@ account_password() {
 
     account_load_config || {
         account_emit_error "CONFIG_ERROR" "Failed to load account configuration" "Check manager.conf and database settings"
-        return 1
+        return "$E_CONFIG_ERROR"
     }
 
     username=$(account_normalize_value "$raw_username")

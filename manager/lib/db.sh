@@ -38,7 +38,7 @@ db_load_config() {
     [[ "$DB_CONFIG_LOADED" == "1" ]] && return 0
 
     config_load "$CONFIG_FILE" || {
-        log_error "Failed to load database configuration"
+        [[ "${CONFIG_ERROR_REPORTED:-0}" == "1" ]] || log_error "Failed to load database configuration"
         return 1
     }
 

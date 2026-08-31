@@ -14,9 +14,23 @@ Check the path passed with `-c` or create the default config at:
 /opt/mangos/manager/config/manager.conf
 ```
 
+### `Configuration file is not readable`
+
+Every subcommand fails with this error when the invoking user cannot read `manager.conf`. The manager config and password file are owned by the service account (`mangos`) with mode `600`/`640`, so a plain user is locked out by design.
+
+One-time fix, as root:
+
+```bash
+sudo /opt/mangos/manager/bin/vmangos-manager config grant --user <your-username>
+```
+
+This grants group read on the config and `.dbpass` (mode `640`), group write on the backup directory, and adds the user to the service group. **Log out and back in** afterwards — group membership only applies to new sessions.
+
+Note: starting/stopping the realm services and installing systemd timers still require root (`sudo systemctl ...` or run those commands via sudo).
+
 ### File permissions are wrong
 
-Manager expects mode `600` for:
+Manager expects mode `600` (owner only) or `640` (owner + service group) for:
 
 - `manager.conf`
 - `.dbpass`

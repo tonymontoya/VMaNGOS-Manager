@@ -39,7 +39,7 @@ server_load_config() {
     [[ "$SERVER_CONFIG_LOADED" == "1" ]] && return 0
     
     db_load_config || {
-        log_error "Failed to load configuration"
+        [[ "${CONFIG_ERROR_REPORTED:-0}" == "1" ]] || log_error "Failed to load configuration"
         return 1
     }
     
@@ -1098,8 +1098,8 @@ server_render_status_text() {
 
 server_status_text() {
     server_collect_status || {
-        log_error "Failed to load configuration"
-        return 1
+        [[ "${CONFIG_ERROR_REPORTED:-0}" == "1" ]] || log_error "Failed to load configuration"
+        return "$E_CONFIG_ERROR"
     }
 
     server_render_status_text
@@ -1211,7 +1211,7 @@ server_watch_render() {
     if server_collect_status; then
         server_render_status_text
     else
-        log_error "Failed to load configuration"
+        [[ "${CONFIG_ERROR_REPORTED:-0}" == "1" ]] || log_error "Failed to load configuration"
         return 1
     fi
 }

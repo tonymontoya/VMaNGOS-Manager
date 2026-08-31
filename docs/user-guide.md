@@ -279,6 +279,22 @@ sudo /opt/mangos/manager/bin/vmangos-manager logs recent --limit 10
 
 ---
 
+## 🔑 Running as a Non-Root User
+
+The installer provisions everything under the `mangos` service account, including the manager config (which contains the path to the database password file). By default only `root` and `mangos` can read it, so a plain user gets `Configuration file is not readable` on every command.
+
+Grant yourself access once, as root:
+
+```bash
+sudo /opt/mangos/manager/bin/vmangos-manager config grant --user <your-username>
+```
+
+Then **log out and back in** — the group membership it adds only applies to new sessions. Afterwards `vmangos-manager`, the dashboard, account admin, logs, and backups all work without sudo.
+
+Still requires root (run via sudo): starting/stopping/restarting the realm services, installing backup/maintenance systemd timers, and log rotation changes.
+
+---
+
 ## 🖥️ vs ⌨️ Dashboard vs CLI
 
 Use the dashboard for day-to-day operation. Drop to the CLI for scripting, raw JSON, bulk workflows, or advanced paths.

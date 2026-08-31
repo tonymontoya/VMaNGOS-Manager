@@ -64,6 +64,9 @@ run_test() {
     local name="$1" func="$2"
     echo ""
     echo "Running: $name"
+    # Each test simulates a fresh CLI process; reset cross-cutting globals a
+    # real process would never inherit (config error dedup flag).
+    CONFIG_ERROR_REPORTED=0
     TESTS_RUN=$((TESTS_RUN + 1))
     REGISTERED_TESTS+=("$func")
     if $func; then
@@ -994,7 +997,7 @@ test_cli_parsing() {
     assert_true "[[ \$output == *'update'* ]]" "CLI --help lists update command" || all_passed=1
     assert_true "[[ \$output == *'schedule [honor|restart|list|cancel|simulate]'* ]]" "CLI --help lists schedule command" || all_passed=1
     assert_true "[[ \$output == *'update [check|inspect|plan|apply]'* ]]" "CLI --help lists update inspect command" || all_passed=1
-    assert_true "[[ \$output == *'config [create|validate|show|detect]'* ]]" "CLI --help lists config detect command" || all_passed=1
+    assert_true "[[ \$output == *'config [create|validate|show|detect|grant]'* ]]" "CLI --help lists config detect command" || all_passed=1
     return $all_passed
 }
 
@@ -1332,21 +1335,78 @@ test_cli_account_rejects_positional_password() {
 
 test_cli_account_reports_unreadable_config() {
     local all_passed=0
-    local temp_dir config_file output
+    local temp_dir config_file output exit_code
     temp_dir=$(mktemp -d)
     config_file="$temp_dir/manager.conf"
 
     create_test_config "$config_file"
     chmod 000 "$config_file"
 
-    output=$(bash "$MANAGER_DIR/bin/vmangos-manager" -c "$config_file" account list 2>&1 || true)
+    output=$(bash "$MANAGER_DIR/bin/vmangos-manager" -c "$config_file" account list 2>&1 || echo "exit_code=$?")
+    exit_code="${output##*exit_code=}"
 
-    assert_true "[[ \$output == *'Configuration file is not readable:'* ]]" "CLI account reports unreadable config path" || all_passed=1
-    assert_true "[[ \$output == *'Run with sudo or adjust file ownership/permissions'* ]]" "CLI account suggests sudo or permission fix" || all_passed=1
+    assert_true "[[ \$output == *'Configuration file is not readable'* ]]" "CLI account reports unreadable config path" || all_passed=1
+    assert_true "[[ \$output == *'config grant --user'* ]]" "CLI account suggests the config grant fix" || all_passed=1
+    assert_true "[[ \$output != *'Failed to load configuration'* ]]" "CLI account does not cascade duplicate config errors" || all_passed=1
+    assert_true "[[ \$output != *'Failed to load database configuration'* ]]" "CLI account does not cascade duplicate DB config errors" || all_passed=1
     assert_true "[[ \$output != *'Check database connectivity and credentials'* ]]" "CLI account does not misreport unreadable config as DB failure" || all_passed=1
+    assert_equals 5 "$exit_code" "unreadable config exits with E_CONFIG_ERROR" || all_passed=1
 
     chmod 600 "$config_file"
     rm -rf "$temp_dir"
+    return $all_passed
+}
+
+test_config_load_accepts_640() {
+    # shellcheck source=../lib/config.sh
+    source "$LIB_DIR/config.sh"
+
+    local all_passed=0
+    local temp_dir config_file output
+    temp_dir=$(mktemp -d)
+    config_file="$temp_dir/manager.conf"
+
+    create_test_config "$config_file"
+    chmod 640 "$config_file"
+
+    output=$(CONFIG_FILE="$config_file" config_load "$config_file" 2>&1)
+    assert_true "[[ \$output != *'should be'* ]]" "config_load does not warn on 640 perms" || all_passed=1
+
+    chmod 644 "$config_file"
+    output=$(CONFIG_FILE="$config_file" config_load "$config_file" 2>&1)
+    assert_true "[[ \$output == *'should be 600 (owner only) or 640 (owner+group)'* ]]" "config_load still warns on 644 perms" || all_passed=1
+
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
+test_cli_config_grant_requires_root() {
+    local all_passed=0
+    local output exit_code
+
+    if [[ "$EUID" -eq 0 ]]; then
+        log_info "running as root; skipping non-root refusal check"
+        return $all_passed
+    fi
+
+    output=$(bash "$MANAGER_DIR/bin/vmangos-manager" config grant --user "$(id -un)" 2>&1 || echo "exit_code=$?")
+    exit_code="${output##*exit_code=}"
+    assert_true "[[ \$output == *'config grant must run as root'* ]]" "config grant refuses to run as non-root" || all_passed=1
+    assert_true "[[ \$output == *'sudo'* ]]" "config grant refusal includes the sudo command" || all_passed=1
+    assert_equals 5 "$exit_code" "config grant non-root refusal exits E_CONFIG_ERROR" || all_passed=1
+
+    return $all_passed
+}
+
+test_cli_config_grant_validates_args() {
+    local all_passed=0
+    local output exit_code
+
+    output=$(bash "$MANAGER_DIR/bin/vmangos-manager" config grant 2>&1 || echo "exit_code=$?")
+    exit_code="${output##*exit_code=}"
+    assert_true "[[ \$output == *'requires --user'* ]]" "config grant without --user exits with usage error" || all_passed=1
+    assert_equals 2 "$exit_code" "config grant without --user exits 2" || all_passed=1
+
     return $all_passed
 }
 
@@ -4519,6 +4579,9 @@ main() {
     run_test "Account: Env not forwarded" test_account_password_env_not_forwarded_to_python
     run_test "Account: List JSON" test_account_list_json_output
     run_test "Account: Unreadable config" test_cli_account_reports_unreadable_config
+    run_test "Config: 640 permissions accepted" test_config_load_accepts_640
+    run_test "Config: Grant requires root" test_cli_config_grant_requires_root
+    run_test "Config: Grant validates args" test_cli_config_grant_validates_args
     run_test "CLI: Account rejects positional password" test_cli_account_rejects_positional_password
     run_test "Update: Text output" test_update_check_text_output
     run_test "Update: JSON output" test_update_check_json_output

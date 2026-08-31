@@ -38,12 +38,12 @@ schedule_load_config() {
     [[ "$SCHEDULE_CONFIG_LOADED" == "1" ]] && return 0
 
     config_load "$CONFIG_FILE" || {
-        log_error "Failed to load configuration"
+        [[ "${CONFIG_ERROR_REPORTED:-0}" == "1" ]] || log_error "Failed to load configuration"
         return 1
     }
 
     server_load_config || {
-        log_error "Failed to load server configuration"
+        [[ "${CONFIG_ERROR_REPORTED:-0}" == "1" ]] || log_error "Failed to load server configuration"
         return 1
     }
 

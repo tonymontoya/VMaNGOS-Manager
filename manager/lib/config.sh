@@ -126,20 +126,27 @@ config_load() {
     
     if [[ ! -f "$config_file" ]]; then
         log_error "Configuration file not found: $config_file"
+        log_error "Create one with: vmangos-manager config create --path $config_file"
+        # shellcheck disable=SC2034  # read by error_exit and *_load_config in sibling libs
+        CONFIG_ERROR_REPORTED=1
         return 1
     fi
 
     if [[ ! -r "$config_file" ]]; then
-        log_error "Configuration file is not readable: $config_file"
-        log_error "Run with sudo or adjust file ownership/permissions"
+        log_error "Configuration file is not readable by $(id -un): $config_file"
+        log_error "An admin can fix this by running: sudo $0 config grant --user $(id -un)"
+        log_error "Or run this command with sudo"
+        # shellcheck disable=SC2034  # read by error_exit and *_load_config in sibling libs
+        CONFIG_ERROR_REPORTED=1
         return 1
     fi
-    
+
     local perms
     perms=$(get_file_permissions "$config_file" 2>/dev/null || echo "644")
-    if [[ "$perms" != "600" ]]; then
-        log_warn "Config file permissions are $perms, should be 600"
-    fi
+    case "$perms" in
+        600|640) ;;
+        *) log_warn "Config file permissions are $perms, should be 600 (owner only) or 640 (owner+group)" ;;
+    esac
     
     CONFIG_DATABASE_HOST=$(ini_read "$config_file" "database" "host" "127.0.0.1")
     CONFIG_DATABASE_PORT=$(ini_read "$config_file" "database" "port" "3306")
@@ -842,14 +849,126 @@ level = info
 EOF
 
     chmod 600 "$config_path"
-    
+
     if [[ ! -f "$password_file" ]]; then
         touch "$password_file"
         chmod 600 "$password_file"
         log_info "Created password file: $password_file (mode 600)"
     fi
-    
+
     log_info "Configuration created at $config_path (mode 600)"
+}
+
+# ============================================================================
+# CONFIG ACCESS GRANT (non-root management)
+# ============================================================================
+
+# Grants a non-root user read access to the manager config + password file
+# (via a shared group) and write access to the backup directory. Must run as
+# root; every step is idempotent.
+config_grant_fail() {
+    local message="$1"
+    local suggestion="${2:-}"
+    local output_format="${3:-text}"
+
+    if [[ "$output_format" == "json" ]]; then
+        json_output false "null" "CONFIG_GRANT_FAILED" "$message" "$suggestion"
+    else
+        log_error "$message"
+        [[ -n "$suggestion" ]] && log_info "$suggestion"
+    fi
+    return "$E_CONFIG_ERROR"
+}
+
+config_grant() {
+    local user="$1"
+    local requested_group="${2:-}"
+    local output_format="${3:-text}"
+
+    if [[ "$EUID" -ne 0 ]]; then
+        if [[ "$output_format" == "json" ]]; then
+            json_output false "null" "NOT_ROOT" \
+                "config grant must run as root" \
+                "Run: sudo $0 config grant --user <username>"
+        else
+            log_error "config grant must run as root"
+            log_info "Run: sudo $0 config grant --user <username>"
+        fi
+        return "$E_CONFIG_ERROR"
+    fi
+
+    if ! id "$user" >/dev/null 2>&1; then
+        config_grant_fail "User not found: $user" "Pass an existing username via --user" "$output_format"
+        return
+    fi
+
+    local config_file="$CONFIG_FILE"
+    if [[ ! -f "$config_file" ]]; then
+        config_grant_fail "Configuration file not found: $config_file" \
+             "Point at it with -c PATH, or run: vmangos-manager config create" "$output_format"
+        return
+    fi
+
+    local group="$requested_group"
+    if [[ -z "$group" ]]; then
+        group=$(stat -c %G "$config_file" 2>/dev/null || true)
+        if [[ -z "$group" || "$group" == "root" ]]; then
+            group=$(stat -c %G "$(dirname "$config_file")" 2>/dev/null || true)
+        fi
+    fi
+    if [[ -z "$group" || "$group" == "root" ]]; then
+        config_grant_fail "Could not determine a sharing group for $config_file" \
+             "Re-run with --group NAME (the group that owns the install)" "$output_format"
+        return
+    fi
+    if ! getent group "$group" >/dev/null 2>&1; then
+        config_grant_fail "Group not found: $group" "Create it first or pass --group NAME" "$output_format"
+        return
+    fi
+
+    chgrp "$group" "$config_file" || { config_grant_fail "chgrp failed on $config_file" "" "$output_format"; return; }
+    chmod 640 "$config_file" || { config_grant_fail "chmod failed on $config_file" "" "$output_format"; return; }
+    log_info "Granted group '$group' read access to $config_file (mode 640)"
+
+    local password_file inline_password
+    password_file=$(ini_read "$config_file" "database" "password_file" "")
+    inline_password=$(ini_read "$config_file" "database" "password" "")
+    if [[ -n "$inline_password" ]]; then
+        log_warn "Config contains an inline database password; it is now group-readable"
+    fi
+    if [[ -n "$password_file" && -f "$password_file" ]]; then
+        chgrp "$group" "$password_file" || { config_grant_fail "chgrp failed on $password_file" "" "$output_format"; return; }
+        chmod 640 "$password_file" || { config_grant_fail "chmod failed on $password_file" "" "$output_format"; return; }
+        log_info "Granted group '$group' read access to $password_file (mode 640)"
+    fi
+
+    local backup_dir
+    backup_dir=$(ini_read "$config_file" "backup" "backup_dir" "/opt/mangos/backups")
+    if [[ -d "$backup_dir" ]] || mkdir -p "$backup_dir" 2>/dev/null; then
+        if chgrp "$group" "$backup_dir" 2>/dev/null; then
+            chmod 775 "$backup_dir"
+            log_info "Granted group '$group' write access to backup dir $backup_dir (mode 775)"
+        else
+            log_warn "Could not chgrp backup dir $backup_dir; 'backup now' may need root"
+        fi
+    else
+        log_warn "Backup dir not writable: $backup_dir (created later by the installer or root)"
+    fi
+
+    local user_groups
+    user_groups=$(id -nG "$user" 2>/dev/null || true)
+    if [[ " $user_groups " == *" $group "* ]]; then
+        log_info "User '$user' is already a member of group '$group'"
+    else
+        usermod -aG "$group" "$user" || { config_grant_fail "usermod failed for $user" "" "$output_format"; return; }
+        log_info "Added user '$user' to group '$group'"
+    fi
+
+    log_info "Done. '$user' must log out and back in for the group change to take effect."
+    if [[ "$output_format" == "json" ]]; then
+        json_output true "{\"user\":\"$(json_escape "$user")\",\"group\":\"$(json_escape "$group")\",\"config\":\"$(json_escape "$config_file")\"}"
+    fi
+    return 0
 }
 
 # ============================================================================
@@ -876,9 +995,10 @@ config_validate() {
     
     local perms
     perms=$(get_file_permissions "$config_file" 2>/dev/null || echo "unknown")
-    if [[ "$perms" != "600" ]]; then
-        warnings+=("Config file permissions are $perms (should be 600)")
-    fi
+    case "$perms" in
+        600|640) ;;
+        *) warnings+=("Config file permissions are $perms (should be 600 owner-only or 640 owner+group)") ;;
+    esac
     
     local required_fields=(
         "database:host"

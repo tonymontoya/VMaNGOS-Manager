@@ -68,7 +68,11 @@ run_cleanup() {
 error_exit() {
     local message="$1"
     local code="${2:-$E_ERROR}"
-    log_error "$message"
+    # config_load already reported the root cause with guidance; skip the
+    # generic follow-on message so the user sees exactly one clear error.
+    if [[ "${CONFIG_ERROR_REPORTED:-0}" != "1" ]]; then
+        log_error "$message"
+    fi
     run_cleanup
     exit "$code"
 }

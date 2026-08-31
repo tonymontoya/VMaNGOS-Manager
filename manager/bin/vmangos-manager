@@ -51,7 +51,9 @@ COMMANDS:
     account [create|list|setgm|ban|unban|password] [OPTIONS]
     update [check|inspect|plan|apply] [OPTIONS]
     schedule [honor|restart|list|cancel|simulate] [OPTIONS]
-    config [create|validate|show|detect] [OPTIONS]
+    config [create|validate|show|detect|grant] [OPTIONS]
+      grant options: --user NAME [--group NAME] [--format text|json]  (run as root; grants NAME
+                      read access to the config and write access to backups via a shared group)
     backup [now|list|verify|restore|clean|schedule] [OPTIONS]
       schedule options: [status] [--daily HH:MM | --weekly "Sun 04:00"] [--format text|json]
 EOF
@@ -769,10 +771,35 @@ cmd_config() {
             done
             config_detect "$fmt"
             ;;
-            
+
+        grant)
+            local grant_user="" grant_group="" fmt="text"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --user) grant_user="$2"; shift 2 ;;
+                    --group) grant_group="$2"; shift 2 ;;
+                    --format) fmt="$2"; shift 2 ;;
+                    --) shift; break ;;
+                    -*)
+                        echo "Unknown option: $1" >&2
+                        exit 2
+                        ;;
+                    *)
+                        echo "Error: config grant does not accept positional arguments" >&2
+                        exit 2
+                        ;;
+                esac
+            done
+            if [[ -z "$grant_user" ]]; then
+                echo "Error: config grant requires --user NAME (the user to grant access to)" >&2
+                exit 2
+            fi
+            config_grant "$grant_user" "$grant_group" "$fmt"
+            ;;
+
         *)
             echo "Error: Unknown config subcommand: $subcmd" >&2
-            echo "Valid subcommands: create, validate, show, detect" >&2
+            echo "Valid subcommands: create, validate, show, detect, grant" >&2
             exit 2
             ;;
     esac

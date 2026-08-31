@@ -31,7 +31,7 @@ logs_load_config() {
     [[ "$LOGS_CONFIG_LOADED" == "1" ]] && return 0
 
     config_load "$CONFIG_FILE" || {
-        log_error "Failed to load configuration"
+        [[ "${CONFIG_ERROR_REPORTED:-0}" == "1" ]] || log_error "Failed to load configuration"
         return 1
     }
 
@@ -518,8 +518,8 @@ logs_collect_status() {
 
 logs_status_text() {
     logs_collect_status || {
-        log_error "Failed to load configuration"
-        return 1
+        [[ "${CONFIG_ERROR_REPORTED:-0}" == "1" ]] || log_error "Failed to load configuration"
+        return "$E_CONFIG_ERROR"
     }
 
     local disk_free_mb=$((LOGS_STATUS_DISK_AVAILABLE_KB / 1024))

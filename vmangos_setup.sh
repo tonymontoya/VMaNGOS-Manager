@@ -1038,8 +1038,15 @@ file = /var/log/vmangos-manager.log
 EOF
 
         printf '%s\n' "$MANGOSDBPASS" > "$manager_password_file"
-        chmod 600 "$manager_config_file" "$manager_password_file"
+        # 640 + mangos group (set by the later chown -R) lets non-root users
+        # read the config after 'usermod -aG mangos <user>'; 600 would lock
+        # them out with errors on every subcommand.
+        chmod 640 "$manager_config_file" "$manager_password_file"
+        mkdir -p "$INSTALLROOT/backups"
+        chmod 775 "$INSTALLROOT/backups"
         log_info "Manager config written to $manager_config_file"
+        log_info "To manage the server as a non-root user:"
+        log_info "  sudo usermod -aG $MANGOSOSUSER <username>   # then that user logs out/in"
 
         if [ -x "$manager_root/bin/vmangos-manager" ]; then
             if "$manager_root/bin/vmangos-manager" -c "$manager_config_file" dashboard --bootstrap >/dev/null 2>&1; then
