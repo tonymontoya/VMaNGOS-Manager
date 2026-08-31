@@ -574,12 +574,22 @@ class SelectionTable:
     rebuild() re-renders rows, preserves the current selection by key when
     it still exists, moves the cursor without animation, and returns the
     selected entry so the caller can refresh its detail pane. Callers
-    pre-sort entries; the controller never reorders them.
+    pre-sort entries; the controller never reorders them. A case-insensitive
+    substring filter (set_filter) narrows the rows to what the user typed.
     """
 
     def __init__(self, table: Any) -> None:
         self.table = table
         self._rendered: tuple[tuple[str, tuple[str, ...]], ...] | None = None
+        self.filter_text = ""
+
+    def set_filter(self, text: str) -> None:
+        normalized = text.strip().lower()
+        if normalized == self.filter_text:
+            return
+        self.filter_text = normalized
+        # A filter change must redraw even when the underlying data did not.
+        self._rendered = None
 
     def rebuild(
         self,
@@ -590,6 +600,10 @@ class SelectionTable:
         current_key: str,
     ) -> tuple[str, dict[str, Any] | None]:
         rendered = tuple((key_fn(entry), tuple(row_fn(entry))) for entry in entries)
+        if self.filter_text:
+            rendered = tuple(
+                pair for pair in rendered if self.filter_text in " ".join(pair[1]).lower()
+            )
 
         if self._rendered is not None and rendered == self._rendered:
             # Data unchanged: leave the table (and the user's cursor) alone.
@@ -602,21 +616,20 @@ class SelectionTable:
 
         selected_index = 0
         selected: dict[str, Any] | None = None
-        for index, entry in enumerate(entries):
-            key_value = rendered[index][0]
-            row_values = rendered[index][1]
+        for index, (key_value, row_values) in enumerate(rendered):
             if current_key and key_value == current_key:
                 selected_index = index
-                selected = entry
+                selected = next((entry for entry in entries if key_fn(entry) == key_value), None)
             self.table.add_row(*row_values, key=key_value)
 
-        if not entries:
+        if not rendered:
             return "", None
 
         if selected is None:
-            selected = entries[selected_index]
+            selected_key = rendered[selected_index][0]
+            selected = next((entry for entry in entries if key_fn(entry) == selected_key), None)
         self.table.move_cursor(row=selected_index, column=0, animate=False)
-        return key_fn(selected), selected
+        return (key_fn(selected) if selected is not None else "", selected)
 
 
 def format_command_tokens(tokens: list[tuple[str, str]]) -> str:
@@ -650,16 +663,17 @@ KEY_ACTION_DESCRIPTIONS: dict[str, tuple[str, str, str]] = {
     "j": ("cancel_selected_schedule", "Remove Task", "remove task"),
     "k": ("validate_config", "Validate", "validate config"),
     "f": ("filter_logs", "Filters", "filters"),
+    "/": ("table_search", "Search", "search"),
 }
 
 VIEW_KEYS: dict[str, list[str]] = {
     "overview": ["o", "s", "x", "R", "b", "v", "k"],
     "monitor": ["o", "s", "x", "R", "b", "v"],
-    "accounts": ["c", "p", "g", "n", "u"],
-    "backups": ["b", "v", "d", "y", "w"],
-    "operations": ["h", "m", "j", "P", "T", "l"],
+    "accounts": ["c", "p", "g", "n", "u", "/"],
+    "backups": ["b", "v", "d", "y", "w", "/"],
+    "operations": ["h", "m", "j", "P", "T", "l", "/"],
     "config": ["k"],
-    "logs": ["f"],
+    "logs": ["f", "/"],
 }
 
 
@@ -674,7 +688,24 @@ def make_view_bindings(view_id: str) -> list[tuple[str, str, str]]:
         # action method lives on the App class.
         (key, f"app.{KEY_ACTION_DESCRIPTIONS[key][0]}", KEY_ACTION_DESCRIPTIONS[key][1])
         for key in VIEW_KEYS.get(view_id, [])
-    ]
+    ] + (
+        # Escape clears the table search when one is open in this view.
+        [("escape", "app.table_search_escape", "Clear Search")]
+        if view_id in TABLE_VIEW_SEARCH_IDS
+        else []
+    )
+
+
+TABLE_VIEW_SEARCH_IDS: dict[str, str] = {
+    "accounts": "accounts-search",
+    "backups": "backups-search",
+    "logs": "logs-search",
+    "operations": "schedules-search",
+}
+
+SEARCH_INPUT_TO_SELECTION: dict[str, str] = {
+    search_id: selection_key for selection_key, search_id in TABLE_VIEW_SEARCH_IDS.items()
+}
 
 
 def render_command_rail(active_view: str) -> str:
@@ -2546,6 +2577,7 @@ def create_app(
                             with Horizontal(id="accounts-layout"):
                                 with Vertical(classes="panel table-panel", id="accounts-table-layout"):
                                     yield Static("[b]Account Inventory[/b]", classes="table-detail-title")
+                                    yield Input(placeholder="filter rows - Enter keeps, Esc clears", id="accounts-search", classes="table-search hidden")
                                     yield DataTable(id="accounts-table", classes="detail-table")
                                 yield Static("", id="account-details", classes="panel hero-panel")
                         with view_containers["backups"](id="backups-view", classes="view hidden"):
@@ -2553,6 +2585,7 @@ def create_app(
                                 yield Static("", id="backup-summary", classes="panel hero-panel")
                                 with Vertical(classes="panel table-panel", id="backups-table-layout"):
                                     yield Static("[b]Backup Inventory[/b]", classes="table-detail-title")
+                                    yield Input(placeholder="filter rows - Enter keeps, Esc clears", id="backups-search", classes="table-search hidden")
                                     yield DataTable(id="backups-table", classes="detail-table")
                         with view_containers["config"](id="config-view", classes="view hidden"):
                             yield Static("", id="config-pane", classes="panel hero-panel")
@@ -2562,6 +2595,7 @@ def create_app(
                                 with Horizontal(id="realm-logs-body"):
                                     with Vertical(classes="panel table-panel", id="realm-logs-table-layout"):
                                         yield Static("[b]Recent Events[/b]", classes="table-detail-title")
+                                        yield Input(placeholder="filter rows - Enter keeps, Esc clears", id="logs-search", classes="table-search hidden")
                                         yield DataTable(id="realm-logs-table", classes="detail-table")
                                     yield Static("", id="realm-log-details", classes="panel accent-panel")
                         with view_containers["operations"](id="operations-view", classes="view hidden"):
@@ -2572,6 +2606,7 @@ def create_app(
                                 with Vertical(classes="panel table-panel table-detail", id="schedules-layout"):
                                     yield Static("[b]Scheduled Tasks[/b]", classes="table-detail-title")
                                     yield Static("", id="schedule-intro")
+                                    yield Input(placeholder="filter rows - Enter keeps, Esc clears", id="schedules-search", classes="table-search hidden")
                                     with Horizontal(classes="table-detail-body"):
                                         yield DataTable(id="schedules-table", classes="detail-table")
                                         yield Static("", id="schedule-details", classes="detail-pane")
@@ -2872,6 +2907,53 @@ def create_app(
                 ConfirmScreen(title=title, message=message, confirm_label=confirm_label),
                 lambda confirmed: on_confirm() if confirmed else None,
             )
+
+        def active_search_input(self) -> Input | None:
+            search_id = TABLE_VIEW_SEARCH_IDS.get(self.active_view)
+            if not search_id:
+                return None
+            return self.query_one(f"#{search_id}", Input)
+
+        def action_table_search(self) -> None:
+            search_input = self.active_search_input()
+            if search_input is None:
+                return
+            search_input.remove_class("hidden")
+            self.set_focus(search_input)
+
+        def close_table_search(self, *, clear: bool) -> None:
+            search_input = self.active_search_input()
+            if search_input is None or search_input.has_class("hidden"):
+                return
+            search_input.add_class("hidden")
+            if clear:
+                search_input.value = ""
+            self.set_focus(self.query_one(f"#{self.active_view}-view", Container))
+
+        def action_table_search_escape(self) -> None:
+            self.close_table_search(clear=True)
+
+        def on_input_changed(self, event: Input.Changed) -> None:
+            selection_key = SEARCH_INPUT_TO_SELECTION.get(str(event.input.id or ""))
+            if selection_key is None:
+                return
+            controller = self.selection_tables[selection_key]
+            controller.set_filter(event.value)
+            self.rebuild_selection_table(selection_key)
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            if str(event.input.id or "") in SEARCH_INPUT_TO_SELECTION:
+                self.close_table_search(clear=False)
+
+        def rebuild_selection_table(self, selection_key: str) -> None:
+            if selection_key == "accounts":
+                self.refresh_accounts(self.snapshot.get("all_accounts", []))
+            elif selection_key == "backups":
+                self.refresh_backups(self.snapshot.get("backups", {}).get("entries", []))
+            elif selection_key == "logs":
+                self.refresh_logs(self.snapshot.get("log_events", []))
+            elif selection_key == "schedules":
+                self.refresh_schedules(self.snapshot.get("schedules", []))
 
         def dispatch_dashboard_action(self, action_name: str, form_values: dict[str, Any] | None = None) -> None:
             request = build_dashboard_action_request(
@@ -3773,6 +3855,15 @@ DASHBOARD_CSS = """
             border: heavy #f59e0b;
             background: #0c1b2c;
             padding: 1 2 2 2;
+        }
+
+        .table-search {
+            margin: 0 0 1 0;
+            border: round #14b8a6;
+        }
+
+        .table-search.hidden {
+            display: none;
         }
 
         #confirm-modal {

@@ -210,6 +210,23 @@ def test_unban_requires_confirmation(tmp_path):
     asyncio.run(scenario())
 
 
+def test_accounts_search_finds_one_account_in_500(tmp_path):
+    app, _log_path = build_app(tmp_path, initial_view=ACCOUNTS_KEYS_VIEW, accounts=500)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            table = app.query_one("#accounts-table", DataTable)
+            await wait_for(lambda: table.row_count == 500, message="500 accounts to load")
+            await pilot.press("/")
+            await pilot.pause()
+            await pilot.press(*"user123")
+            await wait_for(lambda: table.row_count == 1, message="filter to narrow to one row")
+            await pilot.press("escape")
+            await wait_for(lambda: table.row_count == 500, message="escape to clear the filter")
+
+    asyncio.run(scenario())
+
+
 def test_accounts_create_still_opens_its_form(tmp_path):
     app, _log_path = build_app(tmp_path, initial_view=ACCOUNTS_KEYS_VIEW)
 
