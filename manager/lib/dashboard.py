@@ -45,7 +45,7 @@ ACCENT_GREEN = "#34d399"
 ACCENT_BLUE = "#3b82f6"
 
 ACTION_STYLES = {
-    "info": ("Action", ACCENT_SKY),
+    "info": ("Ready", ACCENT_SKY),
     "running": ("Running", ACCENT_GOLD),
     "success": ("Complete", ACCENT_GREEN),
     "warning": ("Attention", ACCENT_GOLD),
@@ -63,13 +63,13 @@ VIEW_TITLES = {
 }
 
 VIEW_SUMMARIES = {
-    "overview": "Keep a summary-first realm pulse: services, host pressure, players, and alerts.",
-    "monitor": "Diagnose host pressure with deeper trends, device saturation, and realm process footprint.",
-    "accounts": "Work the selected-account admin flow for provisioning, access, and moderation.",
-    "backups": "Check protection posture, then act on the selected archive with confidence.",
-    "config": "Confirm Manager's wiring view before you trust higher-level automation.",
-    "logs": "Inspect recent realm events by source, severity, and time window without leaving Manager.",
-    "operations": "Work the maintenance and change-window flow: readiness, scheduled tasks, and update planning.",
+    "overview": "Services, host pressure, players, and alerts in one screen.",
+    "monitor": "Trends, disk device detail, and per-service resource use.",
+    "accounts": "Create accounts; select one for password, GM, ban, and unban.",
+    "backups": "Backup health and timer state; select an archive to verify or dry-run.",
+    "config": "Read-only view of manager.conf; k re-validates it.",
+    "logs": "Recent auth/world events under the current filters; f changes them.",
+    "operations": "Maintenance readiness, scheduled tasks, and update planning.",
 }
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9]{2,32}$")
@@ -865,7 +865,7 @@ def build_dashboard_action_request(
             "refresh_after": True,
             "view": "config",
             "feedback": {
-                "success_receipt": "Revalidated Manager's configuration wiring against the current host.",
+                "success_receipt": "Re-read manager.conf and re-checked it against the current host.",
                 "success_next": "If validation still looks wrong, fix manager.conf or .dbpass in the shell and re-run validation here.",
                 "failure_next": "Review manager.conf and .dbpass in the shell, then validate again from Config.",
             },
@@ -881,7 +881,7 @@ def build_dashboard_action_request(
             "feedback": {
                 "success_receipt": "Requested a log rotation cycle for the realm host.",
                 "success_next": "Review Maintenance Readiness after refresh to confirm rotation posture and disk headroom.",
-                "failure_next": "Check logrotate wiring and permissions, then retry from Operations.",
+                "failure_next": "Check logrotate config and permissions, then retry from Operations.",
             },
         }
 
@@ -1363,15 +1363,14 @@ def render_action_banner(
     receipt = escape_markup(truncate_text(action_receipt or "", 140))
     next_step = escape_markup(truncate_text(action_next_step or "", 140))
     view_title = VIEW_TITLES.get(active_view, active_view.title())
-    view_summary = VIEW_SUMMARIES.get(active_view, "Operate the realm from one console.")
+    view_summary = VIEW_SUMMARIES.get(active_view, "")
     show_follow_up = not action_view_context or active_view == action_view_context
     lines = [
         f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]  [{ACCENT_MUTED}]realm console[/]  [bold {ACCENT_SKY}]{view_title}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
-        f"[{ACCENT_MUTED}]last refresh[/] {captured_at}  [{ACCENT_MUTED}]action state[/] [bold {tone_color}]{tone_label}[/]",
-        "",
-        f"[bold {ACCENT_SKY}]This View[/] {escape_markup(view_summary)}",
-        f"[{ACCENT_MUTED}]Last action[/] {message}",
+        f"[{ACCENT_MUTED}]last refresh[/] {captured_at}  [{ACCENT_MUTED}]last action[/] [bold {tone_color}]{tone_label}[/] [{ACCENT_MUTED}]—[/] {message}",
     ]
+    if view_summary:
+        lines.extend(["", f"[bold {ACCENT_SKY}]This View[/] {escape_markup(view_summary)}"])
     if show_follow_up and receipt:
         lines.append(f"[{ACCENT_MUTED}]Receipt[/] {receipt}")
     if show_follow_up and next_step:
@@ -1400,7 +1399,6 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
 
     lines = [
         f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]",
-        f"[{ACCENT_MUTED}]Realm operator console[/]",
         "",
         f"[bold {ACCENT_SKY}]Modules[/]",
     ]
@@ -1417,7 +1415,7 @@ def render_sidebar(active_view: str, last_action: str, snapshot: dict[str, Any],
             f"[{ACCENT_MUTED}]Updated[/]  {escape_markup(iso_to_clock(snapshot.get('captured_at')))}",
             f"[{ACCENT_MUTED}]Refresh[/]  {refresh_interval}s",
             f"[{ACCENT_MUTED}]Players[/]  {players.get('online_count', 0)} online",
-            f"[{ACCENT_MUTED}]Backups[/]  {backups.get('count', 0)} known",
+            f"[{ACCENT_MUTED}]Backups[/]  {backups.get('count', 0)} stored",
             f"[{ACCENT_MUTED}]Auth[/]     {format_state(auth.get('health', auth.get('state', 'unavailable')))}",
             f"[{ACCENT_MUTED}]World[/]    {format_state(world.get('health', world.get('state', 'unavailable')))}",
         ]
@@ -1449,7 +1447,7 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]Realm Services[/]",
-            f"[{ACCENT_MUTED}]Auth, world, and database readiness at a glance.[/]",
+            f"[{ACCENT_MUTED}]Auth and world services plus the database connectivity check.[/]",
             "",
             f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
             f"[{ACCENT_MUTED}]       cpu[/] {auth.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {auth.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {auth_restarts}",
@@ -1471,7 +1469,7 @@ def render_metrics_panel(
     metric_history = metric_history or []
     lines = [
         f"[bold {ACCENT_GOLD}]Host Metrics[/]",
-        f"[{ACCENT_MUTED}]Host pressure and capacity at a glance.[/]",
+        f"[{ACCENT_MUTED}]CPU, memory, load, disk, and I/O on the realm host.[/]",
         f"[{ACCENT_MUTED}]Window[/] {history_window_label(metric_history, refresh_interval)}",
         "",
     ]
@@ -1551,8 +1549,8 @@ def render_monitor_pressure(
     server = snapshot["server"]
     metric_history = metric_history or []
     lines = [
-        f"[bold {ACCENT_GOLD}]Pressure Deck[/]",
-        f"[{ACCENT_MUTED}]CPU, memory, load, disk, and I/O pressure.[/]",
+        f"[bold {ACCENT_GOLD}]Host Pressure[/]",
+        f"[{ACCENT_MUTED}]Current value, window peak, and trend per metric.[/]",
         f"[{ACCENT_MUTED}]Window[/] {history_window_label(metric_history, refresh_interval)}",
     ]
 
@@ -1644,8 +1642,8 @@ def render_monitor_pressure(
 def render_monitor_processes(snapshot: dict[str, Any]) -> str:
     server = snapshot["server"]
     lines = [
-        f"[bold {ACCENT_GOLD}]Realm Process Footprint[/]",
-        f"[{ACCENT_MUTED}]Auth/world runtime detail plus DB readiness for diagnosis.[/]",
+        f"[bold {ACCENT_GOLD}]Realm Processes[/]",
+        f"[{ACCENT_MUTED}]Per-service CPU, memory, uptime, and restart history.[/]",
         "",
     ]
 
@@ -1685,8 +1683,8 @@ def render_monitor_trends(
     server = snapshot["server"]
     metric_history = metric_history or []
     lines = [
-        f"[bold {ACCENT_GOLD}]Trend Ledger[/]",
-        f"[{ACCENT_MUTED}]Compare current value, peak window, and direction at a glance.[/]",
+        f"[bold {ACCENT_GOLD}]Trends[/]",
+        f"[{ACCENT_MUTED}]Now vs window peak vs direction.[/]",
         f"[{ACCENT_MUTED}]Window[/] {history_window_label(metric_history, refresh_interval)}",
         "",
     ]
@@ -1729,8 +1727,8 @@ def render_monitor_trends(
 def render_monitor_storage(snapshot: dict[str, Any]) -> str:
     server = snapshot["server"]
     lines = [
-        f"[bold {ACCENT_GOLD}]Storage and Device[/]",
-        f"[{ACCENT_MUTED}]Filesystem headroom and disk saturation detail.[/]",
+        f"[bold {ACCENT_GOLD}]Storage[/]",
+        f"[{ACCENT_MUTED}]Filesystem space plus device rates and disk wait.[/]",
         "",
     ]
 
@@ -1821,7 +1819,7 @@ def render_player_pulse(
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]Player Pulse[/]",
-            f"[{ACCENT_MUTED}]Realm population, trend, and operator-presence summary.[/]",
+            f"[{ACCENT_MUTED}]Who is online, the window peak, and staff coverage.[/]",
             "",
             f"[{ACCENT_MUTED}]Online Now[/]   [bold {ACCENT_GOLD}]{online_now}[/]  [{ACCENT_MUTED}]trend[/] {describe_trend(player_history, 'players')}",
             f"[{ACCENT_MUTED}]Peak Window[/] {peak_window}  [{ACCENT_MUTED}]window[/] {history_window_label(metric_history, refresh_interval)}",
@@ -1831,7 +1829,7 @@ def render_player_pulse(
             f"[{ACCENT_MUTED}]GMs Online[/]   {staff_count}  [{ACCENT_MUTED}]names[/] {escape_markup(truncate_text(summary.get('gm_summary', 'none'), 36))}",
             f"[{ACCENT_MUTED}]Roster[/]       {summary.get('roster_count', len(players))} visible  [{ACCENT_MUTED}]mode[/] {escape_markup(str(summary.get('roster_source', 'unknown')))}",
             "",
-            f"[{ACCENT_MUTED}]Drilldown[/]   [bold {ACCENT_GOLD}]o[/] online roster  [bold {ACCENT_GOLD}]2[/] accounts",
+            f"[{ACCENT_MUTED}]Open[/]        [bold {ACCENT_GOLD}]o[/] online roster  [bold {ACCENT_GOLD}]2[/] accounts",
         ]
     )
 
@@ -1841,19 +1839,15 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
         return "\n".join(
             [
                 f"[bold {ACCENT_GOLD}]Selected Account[/]",
-                f"[{ACCENT_MUTED}]Focused account state and account-scoped actions.[/]",
                 "",
                 f"[{ACCENT_MUTED}]Inventory[/]     {total_accounts} account{'s' if total_accounts != 1 else ''} loaded",
                 f"[{ACCENT_MUTED}]Selection[/]    choose a row to inspect or act on an account.",
-                "",
-                f"[{ACCENT_MUTED}]Actions[/]      create new accounts here, then select a row for account-level changes.",
             ]
         )
 
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]Selected Account[/]",
-            f"[{ACCENT_MUTED}]Focused account state and account-scoped actions.[/]",
             "",
             f"[{ACCENT_MUTED}]Inventory[/]     {total_accounts} account{'s' if total_accounts != 1 else ''} loaded",
             f"[{ACCENT_MUTED}]Selected[/]     [bold {ACCENT_TEAL}]{escape_markup(account.get('username', '-'))}[/]",
@@ -1869,7 +1863,7 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
 
 def render_alerts_panel(snapshot: dict[str, Any]) -> str:
     server = snapshot["server"]
-    lines = [f"[bold {ACCENT_GOLD}]Alerts and Events[/]", f"[{ACCENT_MUTED}]Active risk signals plus recent realm-side events worth noticing.[/]", ""]
+    lines = [f"[bold {ACCENT_GOLD}]Alerts and Events[/]", f"[{ACCENT_MUTED}]Anything currently wrong, plus recent service events.[/]", ""]
 
     if not server["ok"]:
         lines.append(f"[bold {ACCENT_ROSE}]Alerts unavailable:[/] {format_error_text(server['error'])}")
@@ -1957,16 +1951,15 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
                 f"[{ACCENT_MUTED}]DBs[/]         {escape_markup(', '.join(selected_backup.get('databases', [])) or 'n/a')}",
                 f"[{ACCENT_MUTED}]Created By[/]  {escape_markup(selected_backup.get('created_by', 'n/a'))}",
                 "",
-                f"[{ACCENT_MUTED}]Ready for[/]   verify or restore dry-run from this selection.",
-                f"[{ACCENT_MUTED}]Boundary[/]    dry-run restore here first; live restore stays in the CLI on purpose.",
+                f"[{ACCENT_MUTED}]Safety[/]      live restore is CLI-only: vmangos-manager backup restore <file>",
             ]
         )
     else:
         lines.extend(
             [
                 "",
-                f"[{ACCENT_MUTED}]Selection[/]   choose a backup row to inspect, verify, or dry-run restore.",
-                f"[{ACCENT_MUTED}]Boundary[/]    verify and dry-run here; live restore stays in the CLI.",
+                f"[{ACCENT_MUTED}]Selection[/]   choose a backup row to inspect it.",
+                f"[{ACCENT_MUTED}]Safety[/]      live restore is CLI-only: vmangos-manager backup restore <file>",
             ]
         )
 
@@ -1985,7 +1978,7 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
     else:
         secret_label = "not configured"
 
-    lines = [f"[bold {ACCENT_GOLD}]Configuration Wiring[/]", ""]
+    lines = [f"[bold {ACCENT_GOLD}]Configuration[/]", ""]
     if validate["ok"]:
         valid = validate["data"].get("valid", True)
         lines.append(f"Validation  {format_state('healthy' if valid else 'critical')}")
@@ -1997,22 +1990,20 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
             "",
             f"[{ACCENT_MUTED}]Config Path[/]   {escape_markup(config_path)}",
             "",
-            f"[bold {ACCENT_SKY}]Realm Wiring[/]",
+            f"[bold {ACCENT_SKY}]Server Settings[/]",
             f"[{ACCENT_MUTED}]Install Root[/]  {escape_markup(summary.get('install_root', 'n/a') or 'n/a')}",
             f"[{ACCENT_MUTED}]Auth Service[/]  {escape_markup(summary.get('auth_service', 'n/a') or 'n/a')}",
             f"[{ACCENT_MUTED}]World Service[/] {escape_markup(summary.get('world_service', 'n/a') or 'n/a')}",
             f"[{ACCENT_MUTED}]Backup Dir[/]    {escape_markup(summary.get('backup_dir', 'n/a') or 'n/a')}",
             "",
-            f"[bold {ACCENT_SKY}]Database Wiring[/]",
+            f"[bold {ACCENT_SKY}]Database Settings[/]",
             f"[{ACCENT_MUTED}]DB Host[/]       {escape_markup(summary.get('db_host', 'n/a') or 'n/a')}",
             f"[{ACCENT_MUTED}]DB User[/]       {escape_markup(summary.get('db_user', 'n/a') or 'n/a')}",
             f"[{ACCENT_MUTED}]DB Secret[/]     {escape_markup(secret_label)}",
             f"[{ACCENT_MUTED}]DB Names[/]      auth={escape_markup(summary.get('auth_db', 'n/a'))} world={escape_markup(summary.get('world_db', 'n/a'))} chars={escape_markup(summary.get('characters_db', 'n/a'))} logs={escape_markup(summary.get('logs_db', 'n/a'))}",
             "",
-            f"[bold {ACCENT_SKY}]Boundary[/]",
-            f"[{ACCENT_MUTED}]Read-only[/]     inspect and validate wiring here; edit manager.conf and .dbpass in the shell.",
-            f"[{ACCENT_MUTED}]CLI[/]           [bold {ACCENT_GOLD}]config detect[/], [bold {ACCENT_GOLD}]config validate[/], [bold {ACCENT_GOLD}]config show[/]",
-            f"[{ACCENT_MUTED}]Action[/]        [bold {ACCENT_GOLD}]k[/] validate config",
+            f"[bold {ACCENT_SKY}]Safety[/]",
+            f"[{ACCENT_MUTED}]Read-only[/]     edit manager.conf and .dbpass in the shell, never here.",
         ]
     )
     return "\n".join(lines)
@@ -2075,7 +2066,7 @@ def render_realm_logs_summary(snapshot: dict[str, Any]) -> str:
     lines = [
         f"[bold {ACCENT_GOLD}]Realm Logs[/]",
         "",
-        f"[{ACCENT_MUTED}]Recent auth/world activity for live troubleshooting. This view follows the current filters on each refresh.[/]",
+        f"[{ACCENT_MUTED}]Recent auth/world events; each refresh re-reads the current filters.[/]",
         "",
     ]
 
@@ -2113,16 +2104,25 @@ def render_realm_logs_summary(snapshot: dict[str, Any]) -> str:
 
     lines.extend(
         [
-            f"[{ACCENT_MUTED}]Filters[/]      source={escape_markup(str(filters.get('source', 'all')))}  window={escape_markup(str(filters.get('window', '15m')))}  severity={escape_markup(str(filters.get('severity', 'all')))}  limit={filters.get('limit', 25)}",
-            f"[{ACCENT_MUTED}]Events[/]       {events_returned} visible  [{ACCENT_MUTED}]latest[/] {escape_markup(latest_summary)}",
-            f"[{ACCENT_MUTED}]Hot Path[/]     {escape_markup(top_severity)}",
-            f"[{ACCENT_MUTED}]Source Mix[/]   {escape_markup(source_counts)}",
-            f"[{ACCENT_MUTED}]Severity Mix[/] {escape_markup(severity_counts)}",
-            f"[{ACCENT_MUTED}]Coverage[/]     backing={escape_markup(str(summary.get('backing', 'unavailable')))}  sources={summary.get('sources_available', 0)}/{summary.get('sources_requested', 0)}  available={escape_markup(available_sources)}",
-            f"[{ACCENT_MUTED}]Follow[/]       refresh={str(capabilities.get('follow_via_refresh', False)).lower()}  severity_filter={str(capabilities.get('severity_filter_supported', False)).lower()}  window_filter={str(capabilities.get('time_window_supported', False)).lower()}",
+            f"[{ACCENT_MUTED}]Filters[/]       source={escape_markup(str(filters.get('source', 'all')))}  window={escape_markup(str(filters.get('window', '15m')))}  severity={escape_markup(str(filters.get('severity', 'all')))}  limit={filters.get('limit', 25)}",
+            f"[{ACCENT_MUTED}]Events[/]        {events_returned} visible  [{ACCENT_MUTED}]latest[/] {escape_markup(latest_summary)}",
+            f"[{ACCENT_MUTED}]Top Severity[/]  {escape_markup(top_severity)}",
+            f"[{ACCENT_MUTED}]By Source[/]     {escape_markup(source_counts)}",
+            f"[{ACCENT_MUTED}]By Severity[/]   {escape_markup(severity_counts)}",
+            f"[{ACCENT_MUTED}]Source[/]        {escape_markup(str(summary.get('backing', 'unavailable')))} journal; {summary.get('sources_available', 0)}/{summary.get('sources_requested', 0)} feeds ({escape_markup(available_sources)})",
+        ]
+    )
+    capability_limits = []
+    if not capabilities.get("severity_filter_supported", False):
+        capability_limits.append("severity filtering unsupported")
+    if not capabilities.get("time_window_supported", False):
+        capability_limits.append("time windows unsupported")
+    if capability_limits:
+        lines.append(f"[{ACCENT_MUTED}]Limits[/]        {escape_markup('; '.join(capability_limits))} by this log source")
+    lines.extend(
+        [
             "",
-            f"[{ACCENT_MUTED}]Adjust[/]       [bold {ACCENT_GOLD}]f[/] filters  [{ACCENT_MUTED}]Follow[/] automatic on refresh",
-            f"[{ACCENT_MUTED}]Escalate[/]     stay here for evidence  [bold {ACCENT_GOLD}]7[/] Ops when this becomes maintenance or change-window work",
+            f"[{ACCENT_MUTED}]Escalate[/]      [bold {ACCENT_GOLD}]7[/] Operations schedules the fix",
         ]
     )
     return "\n".join(lines)
@@ -2132,7 +2132,7 @@ def render_log_event_details(entry: dict[str, Any] | None, total_count: int) -> 
     lines = [
         f"[bold {ACCENT_GOLD}]Selected Event[/]",
         "",
-        f"[{ACCENT_MUTED}]Inspect the highlighted log entry here before dropping to shell tools.[/]",
+        f"[{ACCENT_MUTED}]The highlighted log entry in full.[/]",
         "",
         f"[{ACCENT_MUTED}]Window[/] {total_count} visible event{'s' if total_count != 1 else ''}",
     ]
@@ -2169,7 +2169,7 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
     lines = [
         f"[bold {ACCENT_GOLD}]Maintenance Readiness[/]",
         "",
-        f"[{ACCENT_MUTED}]Log rotation, file hygiene, and disk headroom that can make or break a clean maintenance window.[/]",
+        f"[{ACCENT_MUTED}]Log rotation, permissions, and disk headroom; check before a maintenance window.[/]",
         "",
     ]
 
@@ -2197,9 +2197,7 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
             f"[{ACCENT_MUTED}]Headroom[/]      {disk.get('used_percent', 0)}% used  free {format_gb_from_kb(disk.get('available_kb', 0))}",
             f"[{ACCENT_MUTED}]Retention[/]     max={escape_markup(str(policy.get('max_size', 'n/a')))}  min={escape_markup(str(policy.get('min_size', 'n/a')))}",
             "",
-            f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
-            f"[{ACCENT_MUTED}]Support[/]       [bold {ACCENT_GOLD}]T[/] test log config  [bold {ACCENT_GOLD}]l[/] rotate logs",
-            f"[{ACCENT_MUTED}]Boundary[/]      inspect realm events in Logs; use this panel for readiness before scheduled work.",
+            f"[{ACCENT_MUTED}]Safety[/]      live rotation and timer changes are CLI/root; this panel only reads state.",
         ]
     )
     return "\n".join(lines)
@@ -2211,7 +2209,7 @@ def render_update_panel(snapshot: dict[str, Any], update_plan_data: dict[str, An
     lines = [
         f"[bold {ACCENT_GOLD}]Change Window Readiness[/]",
         "",
-        f"[{ACCENT_MUTED}]Repository drift, DB impact, and next-step planning before risky code changes.[/]",
+        f"[{ACCENT_MUTED}]How far behind origin, DB impact, and the planned steps.[/]",
         "",
     ]
 
@@ -2269,9 +2267,8 @@ def render_update_panel(snapshot: dict[str, Any], update_plan_data: dict[str, An
     lines.extend(
         [
             "",
-            f"[bold {ACCENT_SKY}]Boundary[/]",
-            f"[{ACCENT_MUTED}]Dashboard[/]     inspect readiness and build the plan here.",
-            f"[{ACCENT_MUTED}]CLI[/]           run update apply or source-tree work from the shell after backup and maintenance prep.",
+            f"[bold {ACCENT_SKY}]Safety[/]",
+            f"[{ACCENT_MUTED}]Apply[/]         updates run from the shell (vmangos-manager update apply), after a backup.",
         ]
     )
 
@@ -2302,9 +2299,7 @@ def render_schedule_intro(schedules: list[dict[str, Any]]) -> str:
     count = len(schedules)
     return "\n".join(
         [
-            f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
-            f"[{ACCENT_MUTED}]Source[/]        tasks appear here after you create them in Operations or with the matching schedule CLI commands.",
-            f"[{ACCENT_MUTED}]Queue[/]         {count} scheduled task{'s' if count != 1 else ''} ready for review.",
+            f"[{ACCENT_MUTED}]Queue[/]         {count} scheduled task{'s' if count != 1 else ''} loaded from systemd timers.",
         ]
     )
 
@@ -2318,14 +2313,12 @@ def render_schedule_details(
         return "\n".join(
             [
                 f"[bold {ACCENT_GOLD}]Selected Task[/]",
-                f"[{ACCENT_MUTED}]Origin, cadence, and next action for the highlighted scheduled task.[/]",
+                f"[{ACCENT_MUTED}]What this task is, when it runs next, and how to cancel it.[/]",
                 "",
                 f"[{ACCENT_MUTED}]Selection[/]     choose a job row from the queue to inspect or cancel it.",
                 f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
                 "",
-                f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
-                f"[{ACCENT_MUTED}]Boundary[/]      queue entries can be created here or from the CLI; inspect and cancel them here either way.",
-                f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] cancel the selected task once one is highlighted.",
+                f"[{ACCENT_MUTED}]Safety[/]      cancel removes the timers from systemd immediately.",
             ]
         )
 
@@ -2334,7 +2327,7 @@ def render_schedule_details(
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]Selected Task[/]",
-            f"[{ACCENT_MUTED}]Origin, cadence, and next action for the highlighted scheduled task.[/]",
+            f"[{ACCENT_MUTED}]What this task is, when it runs next, and how to cancel it.[/]",
             "",
             f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
             f"[{ACCENT_MUTED}]Task ID[/]       {escape_markup(schedule.get('id', 'n/a'))}",
@@ -2346,7 +2339,6 @@ def render_schedule_details(
             f"[{ACCENT_MUTED}]Warnings[/]      {escape_markup(warnings)}",
             f"[{ACCENT_MUTED}]Announce[/]      {escape_markup(announce_message)}",
             "",
-            f"[{ACCENT_MUTED}]Create[/]        [bold {ACCENT_GOLD}]h[/] maintenance  [bold {ACCENT_GOLD}]m[/] restart",
             f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] remove this task if it is no longer desired.",
         ]
     )
