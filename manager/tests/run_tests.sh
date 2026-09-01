@@ -4592,6 +4592,234 @@ test_backup_metadata_carries_real_commit() {
     return $all_passed
 }
 
+test_installer_unit_name_and_state_queries() {
+    # shellcheck source=../lib/installer.sh
+    source "$LIB_DIR/installer.sh"
+
+    local all_passed=0
+    local output
+
+    assert_equals "vmangos-install" "$(installer_unit_name)" "installer unit name is the single vmangos-install constant" || all_passed=1
+    assert_equals "journalctl -u vmangos-install" "$(installer_journal_cmd)" "journal command targets the install unit" || all_passed=1
+
+    installer_systemctl() {
+        case "$1" in
+            show)
+                printf 'ActiveState=active\n'
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    }
+    assert_equals "active" "$(installer_unit_state)" "state parses ActiveState from systemctl show" || all_passed=1
+    installer_unit_active && output="yes" || output="no"
+    assert_equals "yes" "$output" "active unit reports active" || all_passed=1
+
+    installer_systemctl() {
+        case "$1" in
+            show)
+                printf 'ActiveState=failed\n'
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    }
+    assert_equals "failed" "$(installer_unit_state)" "failed state is surfaced" || all_passed=1
+    installer_unit_active && output="yes" || output="no"
+    assert_equals "no" "$output" "failed unit is not active" || all_passed=1
+
+    installer_systemctl() {
+        case "$1" in
+            show)
+                printf 'ActiveState=inactive\n'
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    }
+    assert_equals "inactive" "$(installer_unit_state)" "inactive state is surfaced" || all_passed=1
+    installer_unit_active && output="yes" || output="no"
+    assert_equals "no" "$output" "inactive unit is not active" || all_passed=1
+
+    return $all_passed
+}
+
+test_installer_unit_start_builds_systemd_run_env() {
+    # shellcheck source=../lib/installer.sh
+    source "$LIB_DIR/installer.sh"
+
+    local all_passed=0
+    local temp_root secrets_file setup_script systemd_run_log log
+
+    temp_root=$(mktemp -d)
+    secrets_file="$temp_root/secrets.conf"
+    setup_script="$temp_root/setup/vmangos_setup.sh"
+    systemd_run_log="$temp_root/systemd-run.log"
+    mkdir -p "$temp_root/setup"
+    printf '#!/bin/bash\nexit 0\n' > "$setup_script"
+
+    cat > "$secrets_file" << 'EOF'
+PROVISIONTARGET=mangos_box
+CLIENTDATA=/home/tony/Data
+INSTALLROOT=/opt/mangos
+SQLADMINUSER=root
+SQLADMINIP=%
+SQLADMINPASS='p@ss w0rd!'
+WORLDDB=world
+AUTHDB=auth
+CHARACTERDB=characters
+LOGSDB=realm_logs
+MANGOSDBUSER=mangos
+MANGOSDBPASS='db p@ss'
+MANGOSOSUSER=mangos
+SKIP_SECURE_MYSQL=no
+REINSTALL_POLICY=replace
+EOF
+
+    check_root() { :; }
+    installer_unit_active() { return 1; }
+    installer_systemd_run() {
+        local arg
+        for arg in "$@"; do
+            printf '%s\n' "$arg" >> "$systemd_run_log"
+        done
+        return 0
+    }
+
+    installer_unit_start "$secrets_file" "$setup_script" >/dev/null || all_passed=1
+
+    log=$(cat "$systemd_run_log" 2>/dev/null)
+    assert_true "[[ \"\$log\" == *'--unit=vmangos-install'* ]]" "systemd-run targets the vmangos-install unit" || all_passed=1
+    assert_true "[[ \"\$log\" == *'--description=VMaNGOS install'* ]]" "systemd-run carries the install description" || all_passed=1
+    assert_true "[[ \"\$log\" == *'--collect'* ]]" "systemd-run collects the transient unit after exit" || all_passed=1
+    assert_true "[[ \"\$log\" == *'bash'* ]]" "systemd-run invocation runs the setup script with bash" || all_passed=1
+    assert_true "[[ \"\$log\" == *\"$temp_root/setup/vmangos_setup.sh\"* ]]" "systemd-run uses the absolute setup script path" || all_passed=1
+    assert_true "[[ \"\$log\" == *'VMANGOS_AUTO_INSTALL=1'* ]]" "automated install flag is passed" || all_passed=1
+    assert_true "[[ \"\$log\" == *'VMANGOS_INPUT_MODE=automated'* ]]" "input mode is automated" || all_passed=1
+    assert_true "[[ \"\$log\" == *'VMANGOS_PROVISION_TARGET=mangos_box'* ]]" "provision target maps from PROVISIONTARGET" || all_passed=1
+    assert_true "[[ \"\$log\" == *'VMANGOS_CLIENT_DATA=/home/tony/Data'* ]]" "client data maps from CLIENTDATA" || all_passed=1
+    assert_true "[[ \"\$log\" == *'VMANGOS_INSTALL_ROOT=/opt/mangos'* ]]" "install root maps from INSTALLROOT" || all_passed=1
+    assert_true "[[ \"\$log\" == *'VMANGOS_SQL_ADMIN_PASS=p@ss w0rd!'* ]]" "SQL admin password passes through as one --setenv value" || all_passed=1
+    assert_true "[[ \"\$log\" == *'VMANGOS_DB_PASS=db p@ss'* ]]" "DB password with a space passes through as one --setenv value" || all_passed=1
+    assert_true "[[ \"\$log\" == *'VMANGOS_LOGS_DB=realm_logs'* ]]" "logs DB maps from LOGSDB" || all_passed=1
+    assert_true "[[ \"\$log\" == *'REINSTALL_POLICY=replace'* ]]" "reinstall policy reaches the unit" || all_passed=1
+    assert_true "[[ \"\$log\" == *'VMANGOS_BACKGROUND_BUILD=1'* ]]" "background build is enabled" || all_passed=1
+    assert_true "[[ \"\$log\" == *'INSTALL_LOG=/var/log/vmangos-install.log'* ]]" "install log path is passed" || all_passed=1
+
+    rm -rf "$temp_root"
+    return $all_passed
+}
+
+test_installer_unit_start_rejects_double_start() {
+    # shellcheck source=../lib/installer.sh
+    source "$LIB_DIR/installer.sh"
+
+    local all_passed=0
+    local temp_root secrets_file setup_script systemd_run_log output rc
+
+    temp_root=$(mktemp -d)
+    secrets_file="$temp_root/secrets.conf"
+    setup_script="$temp_root/setup/vmangos_setup.sh"
+    systemd_run_log="$temp_root/systemd-run.log"
+    mkdir -p "$temp_root/setup"
+    printf '#!/bin/bash\nexit 0\n' > "$setup_script"
+    printf 'CLIENTDATA=/data\n' > "$secrets_file"
+
+    check_root() { :; }
+    installer_unit_active() { return 0; }
+    installer_systemd_run() {
+        printf 'MUST_NOT_RUN\n' >> "$systemd_run_log"
+        return 0
+    }
+
+    rc=0
+    output=$(installer_unit_start "$secrets_file" "$setup_script" 2>&1) || rc=$?
+    assert_equals "1" "$rc" "double start is rejected" || all_passed=1
+    assert_true "[[ \"\$output\" == *'already in progress'* ]]" "rejection names the running install" || all_passed=1
+    assert_true "[[ \"\$output\" == *'journalctl -u vmangos-install'* ]]" "rejection points at the journal" || all_passed=1
+    assert_true "! [[ -f \"\$systemd_run_log\" ]]" "systemd-run is never invoked on double start" || all_passed=1
+
+    rm -rf "$temp_root"
+    return $all_passed
+}
+
+test_installer_unit_start_surfaces_systemd_run_failure() {
+    # shellcheck source=../lib/installer.sh
+    source "$LIB_DIR/installer.sh"
+
+    local all_passed=0
+    local temp_root secrets_file setup_script output rc
+
+    temp_root=$(mktemp -d)
+    secrets_file="$temp_root/secrets.conf"
+    setup_script="$temp_root/setup/vmangos_setup.sh"
+    mkdir -p "$temp_root/setup"
+    printf '#!/bin/bash\nexit 0\n' > "$setup_script"
+    printf 'CLIENTDATA=/data\n' > "$secrets_file"
+
+    check_root() { :; }
+    installer_unit_active() { return 1; }
+    installer_systemd_run() { return 5; }
+
+    rc=0
+    output=$(installer_unit_start "$secrets_file" "$setup_script" 2>&1) || rc=$?
+    assert_equals "1" "$rc" "systemd-run failure is not swallowed" || all_passed=1
+    assert_true "[[ \"\$output\" == *'systemd-run failed'* ]]" "failure is reported" || all_passed=1
+    assert_true "[[ \"\$output\" == *'journalctl -u vmangos-install -n 50'* ]]" "failure points at a diagnosis command" || all_passed=1
+
+    rm -rf "$temp_root"
+    return $all_passed
+}
+
+test_installer_unit_stop_issues_stop_and_reset_failed() {
+    # shellcheck source=../lib/installer.sh
+    source "$LIB_DIR/installer.sh"
+
+    local all_passed=0
+    local systemctl_log
+
+    systemctl_log=$(mktemp)
+    check_root() { :; }
+    installer_systemctl() {
+        printf '%s\n' "$*" >> "$systemctl_log"
+        return 0
+    }
+
+    installer_unit_stop
+    assert_equals "stop vmangos-install.service
+reset-failed vmangos-install.service" "$(cat "$systemctl_log")" "stop path issues stop then reset-failed" || all_passed=1
+
+    rm -f "$systemctl_log"
+    return $all_passed
+}
+
+test_installer_unit_start_requires_secrets_file() {
+    # shellcheck source=../lib/installer.sh
+    source "$LIB_DIR/installer.sh"
+
+    local all_passed=0
+    local temp_root setup_script output rc
+
+    temp_root=$(mktemp -d)
+    setup_script="$temp_root/vmangos_setup.sh"
+    printf '#!/bin/bash\nexit 0\n' > "$setup_script"
+
+    check_root() { :; }
+    installer_unit_active() { return 1; }
+    installer_systemd_run() { return 0; }
+
+    rc=0
+    output=$(installer_unit_start "$temp_root/missing.conf" "$setup_script" 2>&1) || rc=$?
+    assert_equals "1" "$rc" "missing secrets file is rejected" || all_passed=1
+    assert_true "[[ \"\$output\" == *'secrets file not found'* ]]" "rejection names the missing secrets file" || all_passed=1
+
+    rm -rf "$temp_root"
+    return $all_passed
+}
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -4694,7 +4922,13 @@ main() {
     run_test "Backup: Metadata failure preserves dump" test_backup_now_metadata_failure_preserves_dump
     run_test "Backup: List tolerates legacy metadata" test_backup_list_tolerates_legacy_metadata
     run_test "Backup: Metadata carries real commit" test_backup_metadata_carries_real_commit
-    
+    run_test "Installer: Unit name and state queries" test_installer_unit_name_and_state_queries
+    run_test "Installer: Start builds systemd-run env" test_installer_unit_start_builds_systemd_run_env
+    run_test "Installer: Start rejects double start" test_installer_unit_start_rejects_double_start
+    run_test "Installer: Start surfaces systemd-run failure" test_installer_unit_start_surfaces_systemd_run_failure
+    run_test "Installer: Stop issues stop and reset-failed" test_installer_unit_stop_issues_stop_and_reset_failed
+    run_test "Installer: Start requires secrets file" test_installer_unit_start_requires_secrets_file
+
     local unregistered_failed=0
     if ! report_unregistered_tests; then
         unregistered_failed=1
