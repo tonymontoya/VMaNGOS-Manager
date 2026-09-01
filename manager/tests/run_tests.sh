@@ -4821,6 +4821,138 @@ test_installer_unit_start_requires_secrets_file() {
 }
 
 # ============================================================================
+# Install wizard (#102): CLI dispatch + existing-install gate
+# ============================================================================
+
+test_cli_install_requires_root() {
+    local all_passed=0
+    local output rc lines
+
+    if [[ "$EUID" -eq 0 ]]; then
+        log_info "running as root; skipping non-root refusal check"
+        return $all_passed
+    fi
+
+    rc=0
+    output=$(bash "$MANAGER_DIR/bin/vmangos-manager" install 2>&1) || rc=$?
+    lines=$(printf '%s\n' "$output" | wc -l)
+
+    assert_true "[[ \"\$output\" == *'Run this with sudo: sudo vmangos-manager install'* ]]" \
+        "install refusal names the sudo command" || all_passed=1
+    assert_equals 1 "$lines" "install refusal is a single line" || all_passed=1
+    assert_equals 1 "$rc" "install non-root refusal exits 1" || all_passed=1
+
+    return $all_passed
+}
+
+test_cli_install_dispatch_fast_fails_without_python() {
+    # VMANGOS_WIZARD_PYTHON seam: a missing python must fail fast with the
+    # bootstrap hint, before any gate evaluation or wizard startup.
+    local all_passed=0
+    local output rc
+
+    rc=0
+    output=$(
+        cd "$MANAGER_DIR"
+        VMANGOS_WIZARD_PYTHON=/nonexistent \
+            bash -c 'source lib/wizard.sh; CONFIG_FILE=/dev/null; wizard_run /bin/true /nonexistent/secrets /nonexistent/setup.sh false' 2>&1
+    ) || rc=$?
+
+    assert_true "[[ \"\$output\" == *'Wizard dependencies are not installed'* ]]" \
+        "dispatch reports missing wizard dependencies" || all_passed=1
+    assert_true "[[ \"\$output\" == *'install --bootstrap'* ]]" \
+        "dispatch names the bootstrap fix" || all_passed=1
+    assert_equals 1 "$rc" "dispatch exits 1 when the wizard python is missing" || all_passed=1
+
+    return $all_passed
+}
+
+test_cli_install_reports_active_unit() {
+    # A still-running install unit gets a one-line pointer and exit 0
+    # (the attach experience is #103).
+    local all_passed=0
+    local output rc
+
+    rc=0
+    output=$(
+        cd "$MANAGER_DIR"
+        VMANGOS_WIZARD_PYTHON=/nonexistent \
+            bash -c 'source lib/wizard.sh; CONFIG_FILE=/dev/null; installer_unit_active() { return 0; }; wizard_run /bin/true /nonexistent/secrets /nonexistent/setup.sh false' 2>&1
+    ) || rc=$?
+
+    assert_true "[[ \"\$output\" == *'Install already running'* ]]" \
+        "active unit gets a pointer line" || all_passed=1
+    assert_true "[[ \"\$output\" == *'journalctl -u vmangos-install -f'* ]]" \
+        "pointer names the follow command" || all_passed=1
+    assert_equals 0 "$rc" "active unit exits 0" || all_passed=1
+
+    return $all_passed
+}
+
+test_wizard_gate_action_table() {
+    # The gate evaluates exactly as auto_install.sh does: the real
+    # vmangos_setup.sh existing_install_action against a temp install root.
+    # shellcheck source=../lib/wizard.sh
+    source "$LIB_DIR/wizard.sh"
+
+    local all_passed=0
+    local workdir root secrets setup_script output checkpoint
+
+    workdir=$(mktemp -d)
+    root="$workdir/opt/mangos"
+    secrets="$workdir/setup.conf"
+    setup_script="$MANAGER_DIR/../vmangos_setup.sh"
+
+    # clean: no install root
+    rm -rf "$root"
+    printf 'INSTALLROOT="%s"\n' "$root" > "$secrets"
+    output=$(wizard_gate_action "$secrets" "$setup_script" 2>&1)
+    assert_equals "clean" "$(printf '%s' "$output" | tail -1)" "gate: no install root -> clean" || all_passed=1
+
+    # resume: install root with a checkpoint
+    mkdir -p "$root/.install-checkpoints"
+    echo "SOURCE_DONE" > "$root/.install-checkpoints/checkpoint"
+    output=$(wizard_gate_action "$secrets" "$setup_script" 2>&1)
+    assert_equals "resume" "$(printf '%s' "$output" | tail -1)" "gate: checkpoint present -> resume" || all_passed=1
+
+    # abort: full install, policy abort (default)
+    rm -rf "$root/.install-checkpoints"
+    printf 'INSTALLROOT="%s"\n' "$root" > "$secrets"
+    output=$(wizard_gate_action "$secrets" "$setup_script" 2>&1)
+    assert_equals "abort" "$(printf '%s' "$output" | tail -1)" "gate: full install, policy default -> abort" || all_passed=1
+
+    # replace: full install, policy replace
+    printf 'INSTALLROOT="%s"\nREINSTALL_POLICY="replace"\n' "$root" > "$secrets"
+    output=$(wizard_gate_action "$secrets" "$setup_script" 2>&1)
+    assert_equals "replace" "$(printf '%s' "$output" | tail -1)" "gate: full install, policy replace -> replace" || all_passed=1
+
+    # checkpoint helper reads the resume point
+    mkdir -p "$root/.install-checkpoints"
+    echo "BUILD_DONE" > "$root/.install-checkpoints/checkpoint"
+    checkpoint=$(wizard_checkpoint "$root")
+    assert_equals "BUILD_DONE" "$checkpoint" "checkpoint helper reads the checkpoint file" || all_passed=1
+
+    rm -rf "$workdir"
+    return $all_passed
+}
+
+test_wizard_gate_action_rejects_missing_setup_script() {
+    # shellcheck source=../lib/wizard.sh
+    source "$LIB_DIR/wizard.sh"
+
+    local all_passed=0
+    local output rc
+
+    rc=0
+    output=$(wizard_gate_action /nonexistent/secrets /nonexistent/vmangos_setup.sh 2>&1) || rc=$?
+    assert_equals 1 "$rc" "gate fails when the setup script is missing" || all_passed=1
+    assert_true "[[ \"\$output\" == *'Setup script not found'* ]]" \
+        "gate names the missing setup script" || all_passed=1
+
+    return $all_passed
+}
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -4928,6 +5060,11 @@ main() {
     run_test "Installer: Start surfaces systemd-run failure" test_installer_unit_start_surfaces_systemd_run_failure
     run_test "Installer: Stop issues stop and reset-failed" test_installer_unit_stop_issues_stop_and_reset_failed
     run_test "Installer: Start requires secrets file" test_installer_unit_start_requires_secrets_file
+    run_test "Wizard: install requires root (single line, exit 1)" test_cli_install_requires_root
+    run_test "Wizard: dispatch fast-fails without wizard python" test_cli_install_dispatch_fast_fails_without_python
+    run_test "Wizard: active install unit gets a pointer" test_cli_install_reports_active_unit
+    run_test "Wizard: gate action table (clean/resume/abort/replace)" test_wizard_gate_action_table
+    run_test "Wizard: gate rejects missing setup script" test_wizard_gate_action_rejects_missing_setup_script
 
     local unregistered_failed=0
     if ! report_unregistered_tests; then

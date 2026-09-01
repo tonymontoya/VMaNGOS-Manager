@@ -4,7 +4,7 @@
 SCRIPTS := $(wildcard bin/*) install_manager.sh $(wildcard lib/*.sh) $(wildcard tests/*.sh)
 
 # Python files to lint (syntax + undefined names)
-PYTHON_FILES := lib/dashboard.py
+PYTHON_FILES := lib/dashboard.py lib/wizard.py
 RUFF_RULES := E9,F63,F7,F82
 
 PREFIX ?= /opt/mangos/manager
@@ -37,14 +37,14 @@ test:
 	@echo "========================================"
 	@bash tests/run_tests.sh
 
-# Run the Textual dashboard pilot tests (needs textual + pytest; CI installs
-# them from dashboard-requirements.txt)
+# Run the Textual dashboard + wizard pilot tests (needs textual + pytest; CI
+# installs them from dashboard-requirements.txt)
 test-dashboard:
 	@echo "========================================"
-	@echo "Running dashboard pilot tests..."
+	@echo "Running Textual pilot tests..."
 	@echo "========================================"
-	@python3 -m pytest tests/test_dashboard.py -q
-	@echo "✓ Dashboard pilot tests passed"
+	@python3 -m pytest tests/test_dashboard.py tests/test_wizard.py -q
+	@echo "✓ Textual pilot tests passed"
 
 # Install to system
 install:

@@ -49,6 +49,7 @@ COMMANDS:
       restart options: [--timeout SECONDS]
       status options: [--format text|json] [--watch] [--interval SECONDS]
     dashboard [--refresh SECONDS] [--theme dark|light] [--bootstrap]   (default refresh: 5s)
+    install [--bootstrap]   (root; one-time install wizard — forms, review, launch)
     logs [status|rotate|test-config|recent] [OPTIONS]
       recent options: [--source all|auth|world] [--window 15m|1h|1d] [--severity all|debug|info|notice|warning|error|critical|alert] [--limit N] [--watch|--follow] [--interval SECONDS] [--format text|json]
     account [create|list|setgm|ban|unban|password] [OPTIONS]
@@ -142,6 +143,8 @@ source "$LIB_DIR/backup.sh"
 source "$LIB_DIR/logs.sh"
 # shellcheck source=lib/dashboard.sh
 source "$LIB_DIR/dashboard.sh"
+# shellcheck source=lib/wizard.sh
+source "$LIB_DIR/wizard.sh"
 
 # Export globals for library use
 export VERBOSE
@@ -509,6 +512,44 @@ cmd_dashboard() {
     done
 
     dashboard_run "$SCRIPT_DIR/vmangos-manager" "$refresh" "$theme" "$bootstrap"
+}
+
+cmd_install() {
+    local bootstrap=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --bootstrap)
+                bootstrap=true
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                echo "Unknown option: $1" >&2
+                exit 2
+                ;;
+            *)
+                echo "Error: install does not accept positional arguments" >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    # The wizard writes root-owned secrets and starts a systemd unit: it is
+    # a root command, and the refusal is a single line naming the fix.
+    if [[ "$(id -u)" -ne 0 ]]; then
+        echo "Run this with sudo: sudo vmangos-manager install"
+        exit 1
+    fi
+
+    local secrets_file setup_script
+    secrets_file="${VMANGOS_WIZARD_SECRETS_FILE:-/root/.vmangos-secrets/setup.conf}"
+    setup_script="$(cd "$(wizard_manager_root)/.." && pwd)/vmangos_setup.sh"
+
+    wizard_run "$SCRIPT_DIR/vmangos-manager" "$secrets_file" "$setup_script" "$bootstrap"
 }
 
 cmd_schedule() {
@@ -1317,6 +1358,9 @@ main() {
             ;;
         dashboard)
             cmd_dashboard "$@"
+            ;;
+        install)
+            cmd_install "$@"
             ;;
         logs)
             cmd_logs "$@"
