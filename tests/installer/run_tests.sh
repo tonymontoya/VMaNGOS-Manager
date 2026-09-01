@@ -799,6 +799,276 @@ EOF
     return "$failed"
 }
 
+test_marker_protocol_format() {
+    local tmp_dir output failed=0
+    tmp_dir="$(mktemp -d)"
+
+    output="$(
+        INSTALL_LOG="$tmp_dir/install.log" \
+        REPO_ROOT="$REPO_ROOT" \
+        bash -c '
+            set -euo pipefail
+            source "$REPO_ROOT/vmangos_setup.sh"
+            log_marker build start
+            log_marker build progress "percent=42" "step=Compiling the core"
+            log_marker build "done"
+            log_marker build error "msg=it failed badly" "hint=fix the thing"
+        ' 2>/dev/null
+    )"
+    rm -rf "$tmp_dir"
+
+    assert_equals "@@VMANGOS v1 phase=build event=start" \
+        "$(printf '%s\n' "$output" | sed -n 1p)" \
+        "start marker is the protocol prefix plus phase and event" || failed=1
+    assert_equals "@@VMANGOS v1 phase=build event=progress percent=42 step=\"Compiling the core\"" \
+        "$(printf '%s\n' "$output" | sed -n 2p)" \
+        "progress marker quotes values that contain spaces" || failed=1
+    assert_equals "@@VMANGOS v1 phase=build event=done" \
+        "$(printf '%s\n' "$output" | sed -n 3p)" \
+        "done marker carries phase and event only" || failed=1
+    assert_equals "@@VMANGOS v1 phase=build event=error msg=\"it failed badly\" hint=\"fix the thing\"" \
+        "$(printf '%s\n' "$output" | sed -n 4p)" \
+        "error marker carries msg and hint" || failed=1
+    return "$failed"
+}
+
+test_prerequisites_markers() {
+    local tmp_dir root failed=0 markers order
+    tmp_dir="$(mktemp -d)"
+    root="$tmp_dir/root"
+    mkdir -p "$tmp_dir/bin" "$root/.install-checkpoints"
+
+    cat > "$tmp_dir/bin/apt-get" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${APT_MODE:-ok}" == "fail" ]]; then exit 1; fi
+exit 0
+EOF
+    cat > "$tmp_dir/bin/id" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/apt-get" "$tmp_dir/bin/id"
+
+    # phase_prerequisites never toggles set -e, so the failing run can be
+    # captured from inside the script (unlike phase_build, which re-enables
+    # set -e inside its failure branch).
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        MANGOSOSUSER="mangos"
+        refresh_runtime_paths
+        phase_prerequisites
+        export APT_MODE=fail
+        set +e
+        phase_prerequisites
+        rc=$?
+        set -e
+        printf "RC=%s\n" "$rc"
+    ' > "$tmp_dir/phase.out" 2>/dev/null
+
+    markers="$(grep '^@@VMANGOS v1 ' "$tmp_dir/phase.out" || true)"
+
+    assert_equals "2" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=prerequisites event=start' || true)" \
+        "every prerequisites run opens with a start marker" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=prerequisites event=done' || true)" \
+        "prerequisites emits a done marker on success" || failed=1
+    order="$(printf '%s\n' "$markers" | awk '
+        /phase=prerequisites event=start/ && s == 0 { s = NR }
+        /phase=prerequisites event=done/ && d == 0 { d = NR }
+        END { if (s && d && s < d) print "ok"; else print "bad" }
+    ')"
+    assert_equals "ok" "$order" "prerequisites start marker precedes its done marker" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=prerequisites event=error' || true)" \
+        "prerequisites failure emits an error marker" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep 'phase=prerequisites event=error' | grep -c 'msg="apt-get update failed"' || true)" \
+        "prerequisites error marker names the failing step" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep 'phase=prerequisites event=error' | grep -c 'hint=' || true)" \
+        "prerequisites error marker carries a hint" || failed=1
+    assert_equals "1" "$(sed -n 's/^RC=//p' "$tmp_dir/phase.out")" \
+        "prerequisites failure still returns 1" || failed=1
+    assert_equals "0" \
+        "$(grep -c '@@VMANGOS' "$tmp_dir/install.log" || true)" \
+        "markers never enter the install log" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
+test_build_markers() {
+    local tmp_dir root failed=0 markers order
+    tmp_dir="$(mktemp -d)"
+    root="$tmp_dir/root"
+    mkdir -p "$tmp_dir/bin" "$root/.install-checkpoints"
+
+    cat > "$tmp_dir/bin/cmake" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$tmp_dir/bin/make" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${MAKE_MODE:-ok}" == "fail" ]]; then exit 1; fi
+if [[ "$1" == "install" ]]; then
+    mkdir -p "$INSTALLROOT/run/etc"
+    touch "$INSTALLROOT/run/etc/mangosd.conf.dist"
+    exit 0
+fi
+printf '[  5%%] Building CXX object CMakeFiles/core.dir/a.cpp.o\n'
+printf '[ 50%%] Linking CXX executable mangosd\n'
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/cmake" "$tmp_dir/bin/make"
+
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        export INSTALLROOT
+        refresh_runtime_paths
+        phase_build
+        printf "CHECKPOINT=%s\n" "$(get_checkpoint)"
+    ' > "$tmp_dir/phase.out" 2>/dev/null
+
+    markers="$(grep '^@@VMANGOS v1 ' "$tmp_dir/phase.out" || true)"
+
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=build event=start' || true)" \
+        "build opens with a start marker" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=build event=progress percent=33 step=Configure' || true)" \
+        "build reports the Configure milestone" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=build event=progress percent=66 step=Compile' || true)" \
+        "build reports the Compile milestone" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=build event=done' || true)" \
+        "build closes with a done marker" || failed=1
+    order="$(printf '%s\n' "$markers" | awk '
+        /phase=build event=start/ && s == 0 { s = NR }
+        /percent=33/ && a == 0 { a = NR }
+        /percent=66/ && b == 0 { b = NR }
+        /phase=build event=done/ && d == 0 { d = NR }
+        END { if (s && a && b && d && s < a && a < b && b < d) print "ok"; else print "bad" }
+    ')"
+    assert_equals "ok" "$order" "build markers arrive in start, Configure, Compile, done order" || failed=1
+    assert_equals "BUILD_DONE" "$(sed -n 's/^CHECKPOINT=//p' "$tmp_dir/phase.out")" \
+        "build success checkpoints BUILD_DONE" || failed=1
+    assert_equals "0" \
+        "$(grep -c '@@VMANGOS' "$tmp_dir/install.log" || true)" \
+        "build markers never enter the install log" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
+test_build_failure_marker() {
+    local tmp_dir root failed=0 markers run_rc
+    tmp_dir="$(mktemp -d)"
+    root="$tmp_dir/root"
+    mkdir -p "$tmp_dir/bin" "$root/.install-checkpoints"
+
+    cat > "$tmp_dir/bin/cmake" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$tmp_dir/bin/make" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${MAKE_MODE:-ok}" == "fail" ]]; then exit 1; fi
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/cmake" "$tmp_dir/bin/make"
+
+    # The phase re-enables set -e inside its failure branch, so the failing
+    # run is captured from the process exit code (suite convention).
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        export INSTALLROOT
+        export MAKE_MODE=fail
+        refresh_runtime_paths
+        phase_build
+    ' > "$tmp_dir/phase.out" 2>/dev/null || run_rc=$?
+
+    markers="$(grep '^@@VMANGOS v1 ' "$tmp_dir/phase.out" || true)"
+
+    assert_equals "1" "${run_rc:-0}" "build failure still exits 1" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=build event=error' || true)" \
+        "build failure emits an error marker" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep 'phase=build event=error' | grep -c 'msg="Compilation failed"' || true)" \
+        "build error marker names the failing step" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep 'phase=build event=error' | grep -c 'hint=' || true)" \
+        "build error marker carries a hint" || failed=1
+    assert_equals "0" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=build event=done' || true)" \
+        "no done marker when the build fails" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
+test_extraction_no_client_data_marker() {
+    local tmp_dir root failed=0 markers
+    tmp_dir="$(mktemp -d)"
+    root="$tmp_dir/root"
+    mkdir -p "$root"
+
+    INSTALL_LOG="$tmp_dir/install.log" \
+    REPO_ROOT="$REPO_ROOT" \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        refresh_runtime_paths
+        CLIENT_DATA=""
+        set +e
+        phase_data_extraction
+        rc=$?
+        set -e
+        printf "RC=%s\n" "$rc"
+    ' > "$tmp_dir/phase.out" 2>/dev/null
+
+    markers="$(grep '^@@VMANGOS v1 ' "$tmp_dir/phase.out" || true)"
+
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=extraction event=start' || true)" \
+        "extraction opens with a start marker" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=extraction event=error' || true)" \
+        "missing client data emits an error marker" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep 'phase=extraction event=error' | grep -c 'msg="No client data found"' || true)" \
+        "extraction error marker names the missing input" || failed=1
+    assert_equals "1" \
+        "$(printf '%s\n' "$markers" | grep 'phase=extraction event=error' | grep -c 'hint=' || true)" \
+        "extraction error marker carries a hint" || failed=1
+    assert_equals "0" \
+        "$(printf '%s\n' "$markers" | grep -c 'phase=extraction event=done' || true)" \
+        "no done marker when extraction fails" || failed=1
+    assert_equals "1" "$(sed -n 's/^RC=//p' "$tmp_dir/phase.out")" \
+        "extraction failure still returns 1" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
 main() {
     echo "========================================"
     echo "VMANGOS Installer Test Suite"
@@ -815,6 +1085,11 @@ main() {
     run_test "Installer: Download retry" test_download_retry_honesty
     run_test "Installer: World DB URLs" test_world_db_url_resolution
     run_test "Installer: Config local DB host" test_config_phase_local_db_host
+    run_test "Installer: Marker protocol format" test_marker_protocol_format
+    run_test "Installer: Prerequisites markers" test_prerequisites_markers
+    run_test "Installer: Build markers" test_build_markers
+    run_test "Installer: Build failure marker" test_build_failure_marker
+    run_test "Installer: Extraction no client data marker" test_extraction_no_client_data_marker
 
     echo ""
     echo "========================================"
