@@ -76,6 +76,15 @@ wget https://raw.githubusercontent.com/tonymontoya/VMaNGOS-Manager/main/vmangos_
 sudo bash vmangos_setup.sh
 ```
 
+**Recommended (v0.5.0):** once the manager is on the host, run the one-time
+install wizard instead of the raw guided script — it walks you through the
+forms, shows a review, and launches the install in a detachable systemd unit:
+
+```bash
+sudo /opt/mangos/manager/bin/vmangos-manager install --bootstrap  # one-time (Textual deps)
+sudo /opt/mangos/manager/bin/vmangos-manager install              # the wizard
+```
+
 ### Option B — Existing VMANGOS Host
 
 ```bash
@@ -98,6 +107,8 @@ Launch the UI in two commands:
 sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap  # one-time
 sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2  # run
 ```
+
+(First install the realm with `vmangos-manager install` — see Option A above.)
 
 ### Dashboard Views
 
