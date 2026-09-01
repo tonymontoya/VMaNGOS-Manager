@@ -278,16 +278,44 @@ def write_setup_conf(path: str | Path, values: InstallValues, generated_at: str 
 # ---------------------------------------------------------------------------
 
 
-def build_launch_command(installer_lib: str, secrets_file: str, setup_script: str) -> list[str]:
+def build_launch_command(
+    installer_lib: str,
+    secrets_file: str,
+    setup_script: str,
+    fresh: bool = False,
+    install_root: str = "",
+) -> list[str]:
     """The bash command that starts the install unit through the runner.
 
     ``installer_lib`` is manager/lib/installer.sh; the runner's
     installer_unit_start does the systemd-run work.
+
+    For a destructive launch (replace / start over) the existing install
+    root is removed first via ``installer_clear_install`` — the same
+    auto_install.sh replace semantics — so the setup script starts from
+    START instead of resuming the old checkpoint.
     """
+    if fresh and install_root:
+        script = (
+            'source "$1" >/dev/null 2>&1 && '
+            'installer_clear_install "$2" && '
+            'installer_unit_start "$3" "$4"'
+        )
+        return [
+            "bash",
+            "-c",
+            script,
+            "installer",
+            installer_lib,
+            install_root,
+            secrets_file,
+            setup_script,
+        ]
+    script = 'source "$1" >/dev/null 2>&1 && installer_unit_start "$2" "$3"'
     return [
         "bash",
         "-c",
-        'source "$1" >/dev/null 2>&1 && installer_unit_start "$2" "$3"',
+        script,
         "installer",
         installer_lib,
         secrets_file,
@@ -299,13 +327,22 @@ def launch_install(
     installer_lib: str,
     secrets_file: str,
     setup_script: str,
+    fresh: bool = False,
+    install_root: str = "",
     runner: Callable[..., Any] | None = None,
 ) -> tuple[int, str, str]:
-    """Start the install unit. Returns (returncode, stdout, stderr).
+    """Start the install unit (clearing the root first when destructive).
 
-    ``runner`` is the monkeypatch seam for tests (defaults to subprocess.run).
+    Returns (returncode, stdout, stderr). ``runner`` is the monkeypatch
+    seam for tests (defaults to subprocess.run).
     """
-    command = build_launch_command(installer_lib, secrets_file, setup_script)
+    command = build_launch_command(
+        installer_lib,
+        secrets_file,
+        setup_script,
+        fresh=fresh,
+        install_root=install_root,
+    )
     run = runner or subprocess.run
     completed = run(command, capture_output=True, text=True, check=False)
     return int(completed.returncode), completed.stdout or "", completed.stderr or ""
@@ -557,8 +594,11 @@ def create_wizard_app(
             if st.resume:
                 yield Static(f"Resuming from checkpoint {st.checkpoint or 'unknown'}.", classes="wizard-note")
             elif st.fresh:
-                yield Static(f"Fresh install into {st.values.install_root} (existing install deleted first by the setup script).",
-                             classes="wizard-note")
+                yield Static(
+                    f"Fresh install into {st.values.install_root} "
+                    "(the existing install root is deleted before the unit starts).",
+                    classes="wizard-note",
+                )
             yield Static("", id="form-errors", classes="wizard-error")
             for field_id, label in self.FIELD_IDS:
                 yield Static(label, classes="wizard-field-label")
@@ -681,7 +721,14 @@ def create_wizard_app(
             try:
                 write_setup_conf(secrets_file, st.values)
                 status.update(f"Secrets written to {secrets_file}")
-                rc, out, err = launch_install(installer_lib, secrets_file, setup_script, runner=runner)
+                rc, out, err = launch_install(
+                    installer_lib,
+                    secrets_file,
+                    setup_script,
+                    fresh=st.fresh,
+                    install_root=st.values.install_root,
+                    runner=runner,
+                )
                 if rc == 0:
                     detail.update(
                         "Install started in systemd unit vmangos-install.\n"
@@ -690,10 +737,20 @@ def create_wizard_app(
                     )
                     self.app.code = 0
                 else:
-                    # The runner already names the diagnosis (journalctl -n 50);
-                    # show its output verbatim (secrets redacted) as the failure.
+                    # Show the runner's output verbatim (secrets redacted), and
+                    # always name the fix: the journalctl pointer and how to
+                    # retry. If the runner already included the diagnosis
+                    # (installer.sh appends it on failure) don't duplicate it.
                     combined = (out or "") + ("\n" + err if err else "")
-                    detail.update(redact_secrets(combined, st.values) or "Install unit failed to start.")
+                    body = redact_secrets(combined, st.values).strip()
+                    if not body:
+                        body = "Install unit failed to start."
+                    if "journalctl -u vmangos-install" not in body:
+                        body += (
+                            "\nDiagnosis: journalctl -u vmangos-install -n 50"
+                            "\nRetry: sudo vmangos-manager install"
+                        )
+                    detail.update(body)
                     self.app.code = 1
             except Exception as exc:  # noqa: BLE001 - surface any failure on the exit screen
                 detail.update(redact_secrets(str(exc), st.values))

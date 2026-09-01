@@ -540,9 +540,11 @@ cmd_install() {
 
     # The wizard writes root-owned secrets and starts a systemd unit: it is
     # a root command, and the refusal is a single line naming the fix.
+    # Refusal goes to stderr (like the other root refusals) and exits with
+    # the named E_ERROR code (1), per the install ticket's spec.
     if [[ "$(id -u)" -ne 0 ]]; then
-        echo "Run this with sudo: sudo vmangos-manager install"
-        exit 1
+        echo "Run this with sudo: sudo vmangos-manager install" >&2
+        exit "${E_ERROR:-1}"
     fi
 
     local secrets_file setup_script

@@ -4952,6 +4952,122 @@ test_wizard_gate_action_rejects_missing_setup_script() {
     return $all_passed
 }
 
+test_installer_clear_install_resets_to_clean() {
+    # The destructive path: after clearing the install root the gate must
+    # flip from resume to clean — a post-replace launch starts from START,
+    # not the old checkpoint.
+    # shellcheck source=../lib/installer.sh
+    source "$LIB_DIR/installer.sh"
+    # shellcheck source=../lib/wizard.sh
+    source "$LIB_DIR/wizard.sh"
+
+    local all_passed=0
+    local workdir root secrets setup_script output
+
+    workdir=$(mktemp -d)
+    root="$workdir/opt/mangos"
+    secrets="$workdir/setup.conf"
+    setup_script="$MANAGER_DIR/../vmangos_setup.sh"
+
+    # Establish a resume-state install: root with a checkpoint.
+    mkdir -p "$root/.install-checkpoints"
+    echo "SOURCE_DONE" > "$root/.install-checkpoints/checkpoint"
+    printf 'INSTALLROOT="%s"\n' "$root" > "$secrets"
+
+    output=$(wizard_gate_action "$secrets" "$setup_script" 2>&1)
+    assert_equals "resume" "$(printf '%s' "$output" | tail -1)" "pre-clear gate is resume" || all_passed=1
+
+    # Clear it — the destructive verb the wizard's typed confirmation leads to.
+    installer_clear_install "$root" || all_passed=1
+    assert_true "[[ ! -e \"$root\" ]]" "clear removes the install root" || all_passed=1
+
+    # Post-clear: the gate must be clean — a fresh start from START.
+    output=$(wizard_gate_action "$secrets" "$setup_script" 2>&1)
+    assert_equals "clean" "$(printf '%s' "$output" | tail -1)" "post-clear gate is clean (starts from START)" || all_passed=1
+
+    rm -rf "$workdir"
+    return $all_passed
+}
+
+test_installer_clear_install_refuses_unsafe_root() {
+    # shellcheck source=../lib/installer.sh
+    source "$LIB_DIR/installer.sh"
+
+    local all_passed=0
+    local output rc
+
+    # Empty root
+    rc=0
+    output=$(installer_clear_install "" 2>&1) || rc=$?
+    assert_equals 1 "$rc" "clear refuses an empty root" || all_passed=1
+    assert_true "[[ \"\$output\" == *'Refusing to clear an unsafe install root'* ]]" \
+        "clear names the refusal" || all_passed=1
+
+    # Relative root
+    rc=0
+    output=$(installer_clear_install "opt/mangos" 2>&1) || rc=$?
+    assert_equals 1 "$rc" "clear refuses a relative root" || all_passed=1
+
+    # Root filesystem
+    rc=0
+    output=$(installer_clear_install "/" 2>&1) || rc=$?
+    assert_equals 1 "$rc" "clear refuses the root filesystem" || all_passed=1
+
+    return $all_passed
+}
+
+test_wizard_gate_action_ignores_noisy_secrets() {
+    # A secrets file that prints to stdout/stderr when sourced must not leak
+    # into the gate result or the error output.
+    # shellcheck source=../lib/wizard.sh
+    source "$LIB_DIR/wizard.sh"
+
+    local all_passed=0
+    local workdir root secrets setup_script output
+
+    workdir=$(mktemp -d)
+    root="$workdir/opt/mangos"
+    secrets="$workdir/setup.conf"
+    setup_script="$MANAGER_DIR/../vmangos_setup.sh"
+
+    rm -rf "$root"
+    {
+        echo 'echo "leak-stdout-marker"'
+        echo 'echo "leak-stderr-marker" >&2'
+        printf 'INSTALLROOT="%s"\n' "$root"
+    } > "$secrets"
+
+    output=$(wizard_gate_action "$secrets" "$setup_script" 2>&1)
+    assert_equals "clean" "$(printf '%s' "$output" | tail -1)" "noisy secrets still gate clean" || all_passed=1
+    assert_true "! printf '%s' \"$output\" | grep -q leak-stdout-marker" "stdout noise not captured" || all_passed=1
+    assert_true "! printf '%s' \"$output\" | grep -q leak-stderr-marker" "stderr noise not captured" || all_passed=1
+
+    rm -rf "$workdir"
+    return $all_passed
+}
+
+test_cli_install_bootstrap_during_active_unit() {
+    # --bootstrap must run before the active-unit check (mirrors
+    # dashboard_run): an active unit must not short-circuit bootstrap.
+    local all_passed=0
+    local output rc
+
+    rc=0
+    output=$(
+        cd "$MANAGER_DIR"
+        VMANGOS_WIZARD_PYTHON=/nonexistent \
+            bash -c 'source lib/wizard.sh; CONFIG_FILE=/dev/null; installer_unit_active() { return 0; }; wizard_bootstrap() { echo "BOOTSTRAPPED"; return 0; }; wizard_run /bin/true /nonexistent/secrets /nonexistent/setup.sh true' 2>&1
+    ) || rc=$?
+
+    assert_true "! printf '%s' \"$output\" | grep -q 'Install already running'" \
+        "bootstrap is not short-circuited by an active unit" || all_passed=1
+    assert_true "printf '%s' \"$output\" | grep -q BOOTSTRAPPED" \
+        "bootstrap runs despite an active unit" || all_passed=1
+    assert_equals 0 "$rc" "bootstrap exits 0" || all_passed=1
+
+    return $all_passed
+}
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -5065,6 +5181,10 @@ main() {
     run_test "Wizard: active install unit gets a pointer" test_cli_install_reports_active_unit
     run_test "Wizard: gate action table (clean/resume/abort/replace)" test_wizard_gate_action_table
     run_test "Wizard: gate rejects missing setup script" test_wizard_gate_action_rejects_missing_setup_script
+    run_test "Installer: clear removes root and flips gate to clean" test_installer_clear_install_resets_to_clean
+    run_test "Installer: clear refuses unsafe roots" test_installer_clear_install_refuses_unsafe_root
+    run_test "Wizard: gate ignores noisy secrets file" test_wizard_gate_action_ignores_noisy_secrets
+    run_test "Wizard: bootstrap runs before the active-unit check" test_cli_install_bootstrap_during_active_unit
 
     local unregistered_failed=0
     if ! report_unregistered_tests; then

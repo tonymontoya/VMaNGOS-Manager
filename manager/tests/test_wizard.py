@@ -227,7 +227,22 @@ def test_build_launch_command():
     assert cmd[0] == "bash"
     assert cmd[1] == "-c"
     assert "installer_unit_start" in cmd[2]
+    assert "installer_clear_install" not in cmd[2]
     assert "/lib/installer.sh" in cmd
+    assert "/sec" in cmd
+    assert "/setup.sh" in cmd
+
+
+def test_build_launch_command_fresh_clears_before_start():
+    cmd = w.build_launch_command(
+        "/lib/installer.sh", "/sec", "/setup.sh", fresh=True, install_root="/opt/mangos"
+    )
+    script = cmd[2]
+    assert "installer_clear_install" in script
+    assert "installer_unit_start" in script
+    # The clear must happen before the start.
+    assert script.index("installer_clear_install") < script.index("installer_unit_start")
+    assert "/opt/mangos" in cmd
     assert "/sec" in cmd
     assert "/setup.sh" in cmd
 
@@ -545,6 +560,54 @@ def test_start_over_requires_typed_confirmation(tmp_path):
     assert calls == []
 
 
+def test_start_over_launch_clears_root_before_start(tmp_path):
+    """Destructive path: after typed confirm, launch clears the root first."""
+    fake_runner, calls = make_fake_runner(rc=0, stdout="ok\n")
+    root = os.path.join(str(tmp_path), "installroot")
+    app, _ = build_wizard(tmp_path, gate="resume", checkpoint="SOURCE_DONE", runner=fake_runner)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await focus_widget(pilot, app, "gate-start-over")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert screen_name(app) == "ConfirmScreen"
+            await pilot.press(*root)
+            await focus_widget(pilot, app, "confirm-yes")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert screen_name(app) == "FormScreen"
+
+            await focus_widget(pilot, app, "form-review")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert screen_name(app) == "ReviewScreen"
+            assert "REPLACING" in screen_text(app)
+
+            await focus_widget(pilot, app, "review-start")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert screen_name(app) == "LaunchScreen"
+            detail = app.query_one("#launch-detail")
+            await wait_for(
+                lambda: "Install started in systemd unit vmangos-install" in str(detail.renderable),
+                message="launch success text",
+            )
+            assert app.code == 0
+
+    asyncio.run(scenario())
+
+    assert len(calls) == 1
+    command = calls[0]
+    script = command[2]
+    # The destructive launch must clear the root, then start the unit.
+    assert "installer_clear_install" in script
+    assert "installer_unit_start" in script
+    assert script.index("installer_clear_install") < script.index("installer_unit_start")
+    assert root in command
+
+
 def test_runner_failure_is_shown_and_exits_nonzero(tmp_path):
     stderr = "systemd-run failed to start vmangos-install.service\nDiagnosis: journalctl -u vmangos-install -n 50\n"
     fake_runner, _ = make_fake_runner(rc=1, stderr=stderr)
@@ -593,5 +656,36 @@ def test_runner_output_with_passwords_is_redacted(tmp_path):
             text = str(detail.renderable)
             assert "M4ng0s!Pass" not in text
             assert "Adm1n!Pass" not in text
+
+    asyncio.run(scenario())
+
+
+def test_runner_empty_failure_still_names_the_fix(tmp_path):
+    """Even with no runner output, the failure screen must name the fix."""
+    fake_runner, _ = make_fake_runner(rc=1, stdout="", stderr="")
+    app, _ = build_wizard(tmp_path, gate="clean", runner=fake_runner)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            await focus_widget(pilot, app, "form-review")
+            await pilot.press("enter")
+            await pilot.pause()
+            await focus_widget(pilot, app, "review-start")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert screen_name(app) == "LaunchScreen"
+            detail = app.query_one("#launch-detail")
+            await wait_for(
+                lambda: "Install unit failed to start" in str(detail.renderable),
+                message="fallback text",
+            )
+            text = str(detail.renderable)
+            # The fix must be named even when the runner produced no output.
+            assert "journalctl -u vmangos-install" in text
+            assert "Retry: sudo vmangos-manager install" in text
+            assert app.code == 1
 
     asyncio.run(scenario())

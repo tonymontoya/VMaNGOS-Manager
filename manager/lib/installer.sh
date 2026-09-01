@@ -44,6 +44,25 @@ installer_unit_stop() {
     installer_systemctl reset-failed "$INSTALLER_UNIT_NAME.service" >/dev/null 2>&1 || true
 }
 
+# Remove an existing installation before a fresh (replace / start-over)
+# launch. This is the destructive verb the wizard's confirmation gate leads
+# to: it deletes INSTALLROOT exactly as auto_install.sh's replace path does
+# (auto_install.sh:153), so the checkpoint file is gone and the setup script
+# starts from START instead of resuming the old checkpoint.
+#
+# Safety: refuses empty, relative, or root-level paths.
+installer_clear_install() {
+    local install_root="${1:-}"
+
+    if [[ -z "$install_root" || "$install_root" != /* || "$install_root" == "/" || "$install_root" == "/*" ]]; then
+        log_error "Refusing to clear an unsafe install root: ${install_root:-<none>}"
+        return 1
+    fi
+
+    log_info "Removing existing installation at $install_root"
+    rm -rf -- "$install_root"
+}
+
 installer_journal_cmd() {
     printf 'journalctl -u %s\n' "$INSTALLER_UNIT_NAME"
 }

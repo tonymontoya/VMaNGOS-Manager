@@ -113,7 +113,7 @@ wizard_gate_action() {
     if ! action=$(bash -c '
         if [[ -n "$2" && -f "$2" ]]; then
             # shellcheck source=/dev/null
-            source "$2"
+            source "$2" >/dev/null 2>&1
         fi
         VMANGOS_INSTALL_ROOT="${INSTALLROOT:-/opt/mangos}"
         REINSTALL_POLICY="${REINSTALL_POLICY:-abort}"
@@ -162,15 +162,17 @@ wizard_run() {
         return 1
     fi
 
+    # --bootstrap is a one-shot environment setup; handle it first (mirroring
+    # dashboard_run) so a still-running install unit can't shadow it.
+    if [[ "$bootstrap" == "true" ]]; then
+        wizard_bootstrap || return 1
+        return 0
+    fi
+
     # A launch from a previous run may still be active: attaching is the
     # viewer ticket (#103); for now the contract is a one-line pointer.
     if installer_unit_active; then
         log_info "Install already running — follow with: journalctl -u vmangos-install -f"
-        return 0
-    fi
-
-    if [[ "$bootstrap" == "true" ]]; then
-        wizard_bootstrap || return 1
         return 0
     fi
 
@@ -192,7 +194,7 @@ wizard_run() {
     # The wizard needs the install root the gate evaluated against; it is
     # either the secrets file's INSTALLROOT or the default.
     if [[ -f "$secrets_file" ]]; then
-        checkpoint=$(wizard_checkpoint "$(bash -c 'source "$1" 2>/dev/null; printf "%s\n" "${INSTALLROOT:-}"' _ "$secrets_file")")
+        checkpoint=$(wizard_checkpoint "$(bash -c 'source "$1" >/dev/null 2>&1; printf "%s\n" "${INSTALLROOT:-}"' _ "$secrets_file")")
     else
         checkpoint=""
     fi
