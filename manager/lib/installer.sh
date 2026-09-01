@@ -50,12 +50,46 @@ installer_unit_stop() {
 # (auto_install.sh:153), so the checkpoint file is gone and the setup script
 # starts from START instead of resuming the old checkpoint.
 #
-# Safety: refuses empty, relative, or root-level paths.
+# Safety — defense in depth, because the wizard feeds this the install-root
+# form field (user-controlled):
+#   * the path must be absolute, not the filesystem root, not a bare /name,
+#     and must have at least two path components — so /tmp, /home, /opt,
+#     /var, /etc, ... can never be cleared;
+#   * if the directory exists and is non-empty it must carry the VMaNGOS
+#     installer marker (.install-checkpoints). A non-empty directory that is
+#     not an installation is never deleted.
 installer_clear_install() {
     local install_root="${1:-}"
 
     if [[ -z "$install_root" || "$install_root" != /* || "$install_root" == "/" || "$install_root" == "/*" ]]; then
         log_error "Refusing to clear an unsafe install root: ${install_root:-<none>}"
+        return 1
+    fi
+
+    # Depth floor: require at least two path components so a single top-level
+    # directory (/tmp, /home, /opt, ...) can never be cleared.
+    local stripped="${install_root#/}"
+    local components=0
+    local part
+    local -a parts
+    IFS='/' read -ra parts <<< "$stripped"
+    for part in "${parts[@]}"; do
+        if [[ -n "$part" ]]; then
+            components=$((components + 1))
+        fi
+    done
+    if (( components < 2 )); then
+        log_error "Refusing to clear a top-level directory: $install_root"
+        return 1
+    fi
+
+    # Marker check: a non-empty directory must be a VMaNGOS install root
+    # (carry .install-checkpoints) before it may be removed. This protects
+    # any non-empty directory that is not an installation.
+    local entries
+    entries=$(ls -A -- "$install_root" 2>/dev/null)
+    if [[ -n "$entries" && ! -d "$install_root/.install-checkpoints" ]]; then
+        log_error "Refusing to clear $install_root: non-empty without the .install-checkpoints marker"
         return 1
     fi
 

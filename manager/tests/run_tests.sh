@@ -5013,6 +5013,67 @@ test_installer_clear_install_refuses_unsafe_root() {
     output=$(installer_clear_install "/" 2>&1) || rc=$?
     assert_equals 1 "$rc" "clear refuses the root filesystem" || all_passed=1
 
+    # Top-level single-component directories must never be clearable.
+    # (rc==1 guarantees rm -rf was never reached — it returns before it.)
+    local top
+    for top in /tmp /home /opt /var /etc /usr; do
+        rc=0
+        output=$(installer_clear_install "$top" 2>&1) || rc=$?
+        assert_equals 1 "$rc" "clear refuses the top-level directory $top" || all_passed=1
+        assert_true "[[ \"\$output\" == *'Refusing to clear a top-level directory'* ]]" \
+            "clear names the top-level refusal for $top" || all_passed=1
+    done
+
+    return $all_passed
+}
+
+test_installer_clear_install_marker_guard() {
+    # A non-empty directory is only deletable when it is a VMaNGOS install
+    # root (carries .install-checkpoints). Empty or missing directories are
+    # fine; a non-empty non-install directory must be refused.
+    # shellcheck source=../lib/installer.sh
+    source "$LIB_DIR/installer.sh"
+
+    local all_passed=0
+    local workdir output rc
+
+    workdir=$(mktemp -d)
+
+    # 1) Non-empty directory WITHOUT the marker -> refused, and left intact.
+    local data="$workdir/somedata"
+    mkdir -p "$data"
+    echo "precious" > "$data/file.txt"
+    rc=0
+    output=$(installer_clear_install "$data" 2>&1) || rc=$?
+    assert_equals 1 "$rc" "clear refuses a non-empty non-install directory" || all_passed=1
+    assert_true "[[ \"\$output\" == *'.install-checkpoints marker'* ]]" \
+        "clear names the marker guard" || all_passed=1
+    assert_true "[[ -f \"$data/file.txt\" ]]" "non-install directory left intact" || all_passed=1
+
+    # 2) Non-empty directory WITH the marker (a real install root) -> allowed.
+    local installroot="$workdir/opt/mangos"
+    mkdir -p "$installroot/.install-checkpoints"
+    echo "SOURCE_DONE" > "$installroot/.install-checkpoints/checkpoint"
+    rc=0
+    output=$(installer_clear_install "$installroot" 2>&1) || rc=$?
+    assert_equals 0 "$rc" "clear removes a real install root" || all_passed=1
+    assert_true "[[ ! -e \"$installroot\" ]]" "install root removed" || all_passed=1
+
+    # 3) Empty directory -> allowed (nothing to protect).
+    local empty="$workdir/opt/empty"
+    mkdir -p "$empty"
+    rc=0
+    output=$(installer_clear_install "$empty" 2>&1) || rc=$?
+    assert_equals 0 "$rc" "clear removes an empty directory" || all_passed=1
+    assert_true "[[ ! -e \"$empty\" ]]" "empty directory removed" || all_passed=1
+
+    # 4) Missing directory -> allowed (fresh-install case, rm -rf is a no-op).
+    local missing="$workdir/opt/missing"
+    rc=0
+    output=$(installer_clear_install "$missing" 2>&1) || rc=$?
+    assert_equals 0 "$rc" "clear tolerates a missing directory" || all_passed=1
+
+    rm -rf "$workdir"
     return $all_passed
 }
 
@@ -5183,6 +5244,7 @@ main() {
     run_test "Wizard: gate rejects missing setup script" test_wizard_gate_action_rejects_missing_setup_script
     run_test "Installer: clear removes root and flips gate to clean" test_installer_clear_install_resets_to_clean
     run_test "Installer: clear refuses unsafe roots" test_installer_clear_install_refuses_unsafe_root
+    run_test "Installer: clear marker guard (non-empty needs marker)" test_installer_clear_install_marker_guard
     run_test "Wizard: gate ignores noisy secrets file" test_wizard_gate_action_ignores_noisy_secrets
     run_test "Wizard: bootstrap runs before the active-unit check" test_cli_install_bootstrap_during_active_unit
 
