@@ -839,28 +839,76 @@ def test_read_checkpoint_missing_is_empty(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def make_fake_journalctl(tmp_path, lines, delay=0.05):
+def make_fake_journalctl(tmp_path, lines, delay=0.05, args_log=None):
     """An executable 'journalctl' that emits the given lines, then exits.
 
     Returns the bin dir to prepend to PATH so the viewer's Popen(["journalctl", ...])
-    resolves to this stub instead of a real journalctl.
+    resolves to this stub instead of a real journalctl. If ``args_log`` is given,
+    every invocation's argv is appended to it (one per line) so a test can assert
+    on the flags used (e.g. that a retry re-attach used ``-n 0``).
     """
     bin_dir = os.path.join(str(tmp_path), "fakebin")
     os.makedirs(bin_dir, exist_ok=True)
     script_path = os.path.join(bin_dir, "journalctl")
     data_path = os.path.join(str(tmp_path), "journalctl_lines.txt")
+    if args_log is None:
+        args_log = os.path.join(str(tmp_path), "journalctl_args.log")
     with open(data_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
     with open(script_path, "w", encoding="utf-8") as handle:
         handle.write("#!/usr/bin/env bash\n")
         handle.write(f'DATA="{data_path}"\n')
         handle.write(f'DELAY="{delay}"\n')
+        handle.write(f'ARGS_LOG="{args_log}"\n')
+        handle.write('printf "%s\\n" "$*" >> "$ARGS_LOG"\n')
         handle.write("while IFS= read -r line; do\n")
         handle.write('    printf "%s\\n" "$line"\n')
         handle.write('    sleep "$DELAY"\n')
         handle.write('done < "$DATA"\n')
     os.chmod(script_path, 0o755)
     return bin_dir
+
+
+def make_fake_systemctl(tmp_path, state):
+    """An executable 'systemctl' that reports a scripted ActiveState.
+
+    ``state`` may be a single string (constant) or a list of strings (returned
+    in order, then the last one repeats). This lets a test model a unit that is
+    active and then dies without a marker (marker-less failure detection).
+    """
+    bin_dir = os.path.join(str(tmp_path), "fakebin")
+    os.makedirs(bin_dir, exist_ok=True)
+    script_path = os.path.join(bin_dir, "systemctl")
+    state_file = os.path.join(str(tmp_path), "systemctl_states.txt")
+    counter = os.path.join(str(tmp_path), "systemctl_counter.txt")
+    states = [state] if isinstance(state, str) else list(state)
+    with open(state_file, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(states) + "\n")
+    with open(counter, "w", encoding="utf-8") as handle:
+        handle.write("1\n")
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write("#!/usr/bin/env bash\n")
+        handle.write(f'STATES="{state_file}"\n')
+        handle.write(f'COUNTER="{counter}"\n')
+        handle.write('total=$(wc -l < "$STATES" | tr -d " ")\n')
+        handle.write('n=$(cat "$COUNTER" 2>/dev/null || echo 1)\n')
+        handle.write('if [ "$n" -gt "$total" ]; then n="$total"; fi\n')
+        handle.write('line=$(sed -n "${n}p" "$STATES")\n')
+        handle.write('echo "$((n + 1))" > "$COUNTER"\n')
+        handle.write('printf "ActiveState=%s\\n" "$line"\n')
+    os.chmod(script_path, 0o755)
+    return bin_dir
+
+
+def journalctl_args_log(tmp_path):
+    """The journalctl argv log the fake wrote (last line = last invocation)."""
+    path = os.path.join(str(tmp_path), "journalctl_args.log")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = [line for line in handle.read().splitlines() if line.strip()]
+    except OSError:
+        return []
+    return lines
 
 
 def with_path_prepended(bin_dir):
@@ -933,9 +981,15 @@ def test_viewer_completion_shows_address_and_realmlist(tmp_path):
                 await wait_for(lambda: screen_name(app) == "CompletionScreen", message="completion screen")
                 text = screen_text(app)
                 assert "10.0.0.5" in text
-                assert "SET REALMLIST 10.0.0.5 3724" in text
+                # The realmlist line has no port (the installer prints
+                # 'set realmlist $SERVERIP'); a port would break the client.
+                assert "set realmlist 10.0.0.5" in text
+                assert "SET REALMLIST 10.0.0.5 3724" not in text
                 assert "Next steps" in text
                 assert "world port 8085" in text
+                # The unprivileged follow-up is named (dashboard + grant).
+                assert "vmangos-manager" in text
+                assert "config grant --user" in text
 
         asyncio.run(scenario())
 
@@ -963,10 +1017,11 @@ def test_viewer_failure_shows_phase_hint_tail_and_retry(tmp_path):
                 assert "free up disk space on /opt" in text
                 assert "disk full" in text  # last raw log lines are shown
 
-                # Retry issues stop -> start (resume from checkpoint).
+                # Retry issues stop -> start (resume from checkpoint), then
+                # re-attaches to a fresh viewer with no history.
                 await focus_widget(pilot, app, "failure-retry")
                 await pilot.press("enter")
-                await pilot.pause()
+                await wait_for(lambda: screen_name(app) == "ViewerScreen", message="re-attach after retry")
 
         asyncio.run(scenario())
 
@@ -974,6 +1029,15 @@ def test_viewer_failure_shows_phase_hint_tail_and_retry(tmp_path):
     assert len(retry_calls) == 1
     script = retry_calls[0][2]
     assert script.index("installer_unit_stop") < script.index("installer_unit_start")
+
+    # The re-attach must have used -n 0 (no history) so the prior failure's
+    # markers are not replayed (which would immediately fail again).
+    args = journalctl_args_log(tmp_path)
+    assert args, "the re-attached viewer should have started a journal tail"
+    tokens = args[-1].split()
+    assert "-n" in tokens and tokens[tokens.index("-n") + 1] == "0", (
+        f"retry re-attach must use -n 0, got: {args[-1]!r}"
+    )
 
 
 def test_viewer_detach_never_stops_the_unit(tmp_path):
@@ -1081,3 +1145,135 @@ def test_launch_success_offers_follow_to_viewer(tmp_path):
     assert len(calls) == 1
     assert "installer_unit_start" in calls[0][2]
     assert "installer_unit_stop" not in calls[0][2]
+
+
+def test_viewer_detects_unit_failure_without_markers(tmp_path):
+    # A unit that dies without emitting event=error (kill -9, or a crash): the
+    # viewer polls the unit state and detects the failure, instead of spinning
+    # "in progress" forever. The unit is active first (seen_active) then fails.
+    lines = ["plain log: doing work"]  # no markers at all
+    make_fake_journalctl(tmp_path, lines, delay=0.05)
+    make_fake_systemctl(tmp_path, ["active", "failed"])  # active, then dies
+    fake_runner, calls = make_fake_runner(rc=0)
+    app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                # The unit dies without a marker; the state checker catches it
+                # (the poll is every 2s, so allow generous time).
+                await wait_for(
+                    lambda: screen_name(app) == "FailureScreen",
+                    message="marker-less failure detected",
+                    timeout=20.0,
+                )
+                text = screen_text(app)
+                assert "stopped without finishing" in text
+
+        asyncio.run(scenario())
+
+    # The failure was detected from the unit state, not a marker; no retry yet.
+    assert calls == []
+
+
+def test_viewer_redacts_secrets_in_log_pane(tmp_path):
+    # A journal line that echoes a secret (a password on a command line) must
+    # be redacted in the live log pane.
+    lines = ["mysql -pM4ng0s!Pass -e 'SELECT 1'"]
+    make_fake_journalctl(tmp_path, lines, delay=0.1)
+    app, _ = build_wizard(tmp_path, attach=True)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await wait_for(lambda: "mysql" in screen_text(app), message="log line")
+                text = screen_text(app)
+                assert "M4ng0s!Pass" not in text  # the secret is redacted
+                assert "******" in text
+
+        asyncio.run(scenario())
+
+
+def test_failure_tail_redacts_secrets(tmp_path):
+    # The failure tail (raw log lines) can echo a secret; it must be redacted.
+    lines = [
+        "mysql -pM4ng0s!Pass -e 'SELECT 1'",
+        "fatal: db down",
+        "@@VMANGOS v1 phase=database event=error msg=\"db down\" hint=\"check the db\"",
+    ]
+    make_fake_journalctl(tmp_path, lines, delay=0.1)
+    app, _ = build_wizard(tmp_path, attach=True)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await wait_for(lambda: screen_name(app) == "FailureScreen", message="failure screen")
+                text = screen_text(app)
+                assert "M4ng0s!Pass" not in text  # the tail is redacted
+                assert "******" in text
+
+        asyncio.run(scenario())
+
+
+def test_viewer_detach_with_q_key(tmp_path):
+    # Ctrl+C / q detaches (kills the journal child only, never the unit).
+    lines = ["@@VMANGOS v1 phase=build event=progress percent=40 step=\"Compiling\""]
+    make_fake_journalctl(tmp_path, lines, delay=0.2)
+    fake_runner, calls = make_fake_runner(rc=0)
+    app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                await wait_for(lambda: "40%" in screen_text(app), message="progress shown")
+                # Detach with the q key (not the button).
+                await pilot.press("q")
+                await pilot.pause()
+
+        asyncio.run(scenario())
+
+    # Detaching must not have issued any unit stop (or any) runner command.
+    assert calls == []
+
+
+def test_viewer_retry_failure_shows_error(tmp_path):
+    # If the retry command fails (non-zero rc), the error is shown and the
+    # viewer stays on the failure screen (no re-attach).
+    lines = ["@@VMANGOS v1 phase=build event=error msg=\"boom\" hint=\"fix it\""]
+    make_fake_journalctl(tmp_path, lines, delay=0.1)
+    fake_runner, calls = make_fake_runner(rc=1, stderr="Failed to start vmangos-install.service\n")
+    app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await wait_for(lambda: screen_name(app) == "FailureScreen", message="failure screen")
+                await focus_widget(pilot, app, "failure-retry")
+                await pilot.press("enter")
+                # The retry failed: the error is shown, and we stay on the
+                # failure screen (no re-attach).
+                await wait_for(
+                    lambda: "Failed to start" in screen_text(app),
+                    message="retry error shown",
+                )
+                assert screen_name(app) == "FailureScreen"
+
+        asyncio.run(scenario())
+
+    # The retry command was issued (stop -> start), even though it failed.
+    retry_calls = [c for c in calls if "installer_unit_stop" in " ".join(c)]
+    assert len(retry_calls) == 1
+    script = retry_calls[0][2]
+    assert script.index("installer_unit_stop") < script.index("installer_unit_start")

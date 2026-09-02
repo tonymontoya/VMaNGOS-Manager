@@ -15,6 +15,7 @@ launch command) lives at module level and is tested without a TTY.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import collections
 import os
 import re
@@ -22,6 +23,7 @@ import secrets as _secrets
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -454,6 +456,16 @@ CHECKPOINT_DONE_PHASE = {
 
 LOG_PANE_LINES = 200
 FAILURE_TAIL_LINES = 30
+
+# How often the viewer polls the unit's ActiveState to catch a marker-less
+# failure (kill -9, an old script that crashes). 2s is responsive without
+# hammering systemctl.
+UNIT_STATE_POLL_SECONDS = 2.0
+
+# A 'failed' ActiveState is a definitive failure. 'inactive' is deliberately
+# NOT treated as one: a marker-less script that *succeeds* also ends inactive,
+# so only 'failed' (a non-zero exit) is unambiguous.
+UNIT_FAILED_STATES = ("failed",)
 
 
 def _tokenize_marker(rest: str) -> list[tuple[str, str]] | None:
@@ -1088,6 +1100,11 @@ def create_wizard_app(
         after a retry uses 0 so the prior failure's markers are not replayed.
         """
 
+        BINDINGS = [
+            ("q", "detach", "Detach"),
+            ("ctrl+c", "detach", "Detach"),
+        ]
+
         def __init__(self, tail_lines: int = LOG_PANE_LINES) -> None:
             super().__init__()
             self.tail_lines = max(0, int(tail_lines))
@@ -1097,6 +1114,14 @@ def create_wizard_app(
             self._lock = threading.Lock()
             self._finished = False
             self._journal_failed = False
+            # Unit-state failure detection (#103): a marker-less death (kill -9,
+            # an old script) leaves no event=error, so the unit's ActiveState is
+            # the ground truth. Polled by a checker thread, read under the lock.
+            self.unit_state = "unknown"
+            self._seen_active = False  # True once active, to avoid a startup false positive
+            # Delta detection: skip the re-render when nothing changed (the 0.5s
+            # tick must not churn the widgets on an idle install).
+            self._last_render = ""
 
         def compose(self) -> ComposeResult:
             yield Static("Install Progress", classes="wizard-title")
@@ -1108,6 +1133,7 @@ def create_wizard_app(
 
         def on_mount(self) -> None:
             self._start_journal()
+            self._start_unit_state_checker()
             self.set_interval(0.5, self._refresh)
 
         def _start_journal(self) -> None:
@@ -1123,10 +1149,11 @@ def create_wizard_app(
                 self._journal_failed = True
                 return
 
+            proc = self._proc  # capture locally: _kill_journal() may null self._proc
+
             def reader() -> None:
-                assert self._proc is not None
                 try:
-                    for line in self._proc.stdout:
+                    for line in proc.stdout:
                         text = line.rstrip("\n")
                         with self._lock:
                             self.log_buffer.append(text)
@@ -1134,37 +1161,101 @@ def create_wizard_app(
                             if marker is not None:
                                 self.tracker.apply(marker)
                 finally:
-                    self._proc.wait()
+                    # Reap the child. proc is a local, so a concurrent detach
+                    # (which nulls self._proc) cannot turn this into an error.
+                    proc.wait()
 
             threading.Thread(target=reader, daemon=True).start()
+
+        def _start_unit_state_checker(self) -> None:
+            """Poll the unit's ActiveState (marker-less failure detection, #103).
+
+            Runs in a daemon thread, updating shared state under the lock. The
+            UI reads it in _refresh. Stopped when the viewer finishes.
+            """
+
+            def checker() -> None:
+                while True:
+                    if self._finished:
+                        return
+                    state = self._query_unit_state()
+                    with self._lock:
+                        self.unit_state = state
+                        if state in ("active", "activating"):
+                            self._seen_active = True
+                    time.sleep(UNIT_STATE_POLL_SECONDS)
+
+            threading.Thread(target=checker, daemon=True).start()
+
+        def _query_unit_state(self) -> str:
+            """The unit's ActiveState, or 'unknown'.
+
+            Calls ``systemctl`` directly (resolved from PATH) so tests can stub
+            it. Never raises: a failed query is reported as 'unknown'.
+            """
+            try:
+                completed = subprocess.run(
+                    ["systemctl", "show", "-p", "ActiveState", f"{INSTALLER_UNIT_NAME}.service"],
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return "unknown"
+            output = (completed.stdout or "").strip()
+            if "=" in output:
+                output = output.split("=", 1)[1].strip()
+            return output or "unknown"
 
         def _refresh(self) -> None:
             with self._lock:
                 tracker = self.tracker
                 log_lines = list(self.log_buffer)
+                unit_state = self.unit_state
+                seen_active = self._seen_active
 
-            checklist_widget = self.query_one("#viewer-checklist", Static)
-            progress_widget = self.query_one("#viewer-progress", Static)
-            log_widget = self.query_one("#viewer-log", Static)
-            log_text = "\n".join(log_lines[-LOG_PANE_LINES:])
+            # The journal can echo a secret (a password on a command line);
+            # every other path in the wizard redacts, so the log pane must too.
+            values = self.values().values
+            log_text = redact_secrets("\n".join(log_lines[-LOG_PANE_LINES:]), values)
 
             if tracker.marker_count == 0:
                 # Marker starvation: checkpoint-file polling + raw log pane.
                 checkpoint = read_checkpoint(effective_install_root)
-                checklist_widget.update(checkpoint_progress_text(checkpoint))
-                progress_widget.update("")
-                log_widget.update(log_text or "No log output yet.")
+                checklist_text = checkpoint_progress_text(checkpoint)
+                progress_text = ""
             else:
-                checklist_widget.update(render_checklist(tracker))
-                progress_widget.update(render_progress(tracker))
-                log_widget.update(log_text)
+                checklist_text = render_checklist(tracker)
+                progress_text = render_progress(tracker)
+
+            # Delta detection: the 0.5s tick must not churn the widgets when
+            # nothing changed (an idle install re-rendered 2x a second for no
+            # reason is wasted work and can flicker the terminal).
+            render_key = (checklist_text, progress_text, log_text, tracker.marker_count)
+            if render_key != self._last_render:
+                self.query_one("#viewer-checklist", Static).update(checklist_text)
+                self.query_one("#viewer-progress", Static).update(progress_text)
+                self.query_one("#viewer-log", Static).update(log_text or "No log output yet.")
+                self._last_render = render_key
 
             if self._finished:
                 return
             if tracker.completed:
                 self._finish("done", tracker.install_done, log_lines)
-            elif tracker.failed:
+                return
+            if tracker.failed:
                 self._finish("failed", tracker.failure, log_lines)
+                return
+            # Marker-less failure: the unit died (non-zero exit) without ever
+            # emitting event=error — e.g. kill -9, or an old script that crashes.
+            if unit_state in UNIT_FAILED_STATES and seen_active:
+                self._finish(
+                    "failed",
+                    (
+                        "unknown",
+                        "The install unit stopped without finishing.",
+                        "Check the log above for the cause, then retry.",
+                    ),
+                    log_lines,
+                )
 
         def _finish(self, kind: str, data: Any, log_lines: list[str]) -> None:
             self._finished = True
@@ -1187,10 +1278,17 @@ def create_wizard_app(
             # is left running — detaching never stops the install.
             self._kill_journal()
 
+        def action_detach(self) -> None:
+            # Ctrl+C / q: the spec names the keys, not just the button.
+            self._detach()
+
+        def _detach(self) -> None:
+            self._kill_journal()
+            self.app.close_with_code(0)
+
         def on_button_pressed(self, event) -> None:
             if event.button.id == "viewer-detach":
-                self._kill_journal()
-                self.app.close_with_code(0)
+                self._detach()
 
     class CompletionScreen(WizardScreen):
         """Install succeeded: server address, realmlist line, next steps."""
@@ -1209,14 +1307,18 @@ def create_wizard_app(
             else:
                 yield Static("Your server is up.", classes="wizard-note")
             yield Static("")
-            realmlist = f"SET REALMLIST {server_ip or '<server-ip>'} {auth_port}"
-            yield Static("Add this realmlist line to your client's realmlist.wtf:", classes="wizard-note")
+            # The realmlist.wtf line carries no port — the client uses the
+            # default ports. This matches what the installer already printed
+            # (set realmlist $SERVERIP); a space-separated port breaks the client.
+            realmlist = f"set realmlist {server_ip or '<server-ip>'}"
+            yield Static("Add this line to your client's realmlist.wtf:", classes="wizard-note")
             yield Static(realmlist, classes="wizard-review")
             yield Static("")
             yield Static("Next steps:", classes="wizard-note")
-            yield Static(f"1. Log in — auth port {auth_port}, world port {world_port}.")
+            yield Static(f"1. Log in with a character — auth port {auth_port}, world port {world_port}.")
             yield Static("2. Add the realmlist line above to your client.")
-            yield Static("3. Follow the install with: journalctl -u vmangos-install -f")
+            yield Static("3. Manage the server from the dashboard: vmangos-manager")
+            yield Static("4. Give a non-root user access (as root): vmangos-manager config grant --user <user>")
             yield Button("Close", id="completion-close")
 
         def on_button_pressed(self, event) -> None:
@@ -1232,34 +1334,45 @@ def create_wizard_app(
             self.log_lines = log_lines
 
         def compose(self) -> ComposeResult:
+            # The failure text and the raw tail can echo a secret (a password on
+            # a command line); redact before it can reach the screen.
+            values = self.values().values
             phase, msg, hint = self.failure or ("unknown", "", "")
             phase_label = PHASE_LABELS.get(phase, phase)
             yield Static("Install Failed", classes="wizard-title")
             yield Static(f"Phase: {phase_label}", classes="wizard-review")
             if msg:
-                yield Static(f"Error: {msg}", classes="wizard-error")
+                yield Static(f"Error: {redact_secrets(msg, values)}", classes="wizard-error")
             if hint:
-                yield Static(f"Fix: {hint}", classes="wizard-note")
+                yield Static(f"Fix: {redact_secrets(hint, values)}", classes="wizard-note")
             yield Static("")
             yield Static("Last log lines:", classes="wizard-note")
-            tail = "\n".join(self.log_lines[-FAILURE_TAIL_LINES:]) or "(no log output)"
-            yield Static(tail, classes="wizard-review")
+            tail = redact_secrets("\n".join(self.log_lines[-FAILURE_TAIL_LINES:]), values)
+            yield Static(tail or "(no log output)", classes="wizard-review")
             yield Static("", id="retry-status", classes="wizard-note")
             yield Button("Retry", variant="primary", id="failure-retry")
             yield Button("Quit", id="failure-quit")
 
-        def on_button_pressed(self, event) -> None:
+        async def on_button_pressed(self, event) -> None:
             if event.button.id == "failure-quit":
                 # Quit leaves the unit failed; a later rerun resumes from the
                 # checkpoint. Detach never stops the unit.
                 self.app.close_with_code(1)
             elif event.button.id == "failure-retry":
-                self._retry()
+                await self._retry()
 
-        def _retry(self) -> None:
+        async def _retry(self) -> None:
             # Retry = stop + reset-failed, then start (the setup script resumes
             # from its checkpoint). No password re-entry — the wizard is root.
-            rc, out, err = retry_install(installer_lib, secrets_file, setup_script, runner=runner)
+            #
+            # Run off the event loop: the systemctl calls can take a couple of
+            # seconds and must not freeze the UI (unlike the launch path, this
+            # is a user-initiated action on an already-shown screen).
+            self.query_one("#retry-status", Static).update("Retrying — restarting the install unit…")
+            loop = asyncio.get_running_loop()
+            rc, out, err = await loop.run_in_executor(
+                None, retry_install, installer_lib, secrets_file, setup_script, runner
+            )
             if rc == 0:
                 self.app.code = 0
                 self.query_one("#retry-status", Static).update("Retry issued — install resuming.")
