@@ -4889,6 +4889,41 @@ test_cli_install_reports_active_unit() {
     return $all_passed
 }
 
+test_cli_install_attaches_active_unit() {
+    # An active install unit + an available Textual python → dispatch launches
+    # the viewer with --attach (not the gate/form flow, not the pointer).
+    local all_passed=0
+    local output rc
+    local fake_python
+    fake_python=$(mktemp "${TMPDIR:-/tmp}/vmangos_fake_python.XXXXXX")
+    # The fake python passes the 'import textual' check and records its args.
+    cat > "$fake_python" <<'PYEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "-c" ]]; then
+    exit 0
+fi
+echo "FAKE_PYTHON_ARGS: $*"
+PYEOF
+    chmod +x "$fake_python"
+
+    rc=0
+    output=$(
+        cd "$MANAGER_DIR"
+        VMANGOS_WIZARD_PYTHON="$fake_python" \
+            bash -c 'source lib/wizard.sh; CONFIG_FILE=/dev/null; installer_unit_active() { return 0; }; wizard_run /bin/true /nonexistent/secrets /nonexistent/setup.sh false' 2>&1
+    ) || rc=$?
+
+    assert_true "[[ \"\$output\" == *'--attach'* ]]" \
+        "active unit dispatch launches the viewer with --attach" || all_passed=1
+    assert_true "printf '%s' \"$output\" | grep -q 'FAKE_PYTHON_ARGS'" \
+        "attach dispatch invokes the python app" || all_passed=1
+    assert_true "! printf '%s' \"$output\" | grep -q 'Install already running'" \
+        "attach with python does not fall back to the pointer" || all_passed=1
+
+    rm -f "$fake_python"
+    return $all_passed
+}
+
 test_wizard_gate_action_table() {
     # The gate evaluates exactly as auto_install.sh does: the real
     # vmangos_setup.sh existing_install_action against a temp install root.
@@ -5240,6 +5275,7 @@ main() {
     run_test "Wizard: install requires root (single line, exit 1)" test_cli_install_requires_root
     run_test "Wizard: dispatch fast-fails without wizard python" test_cli_install_dispatch_fast_fails_without_python
     run_test "Wizard: active install unit gets a pointer" test_cli_install_reports_active_unit
+    run_test "Wizard: active install unit attaches the viewer" test_cli_install_attaches_active_unit
     run_test "Wizard: gate action table (clean/resume/abort/replace)" test_wizard_gate_action_table
     run_test "Wizard: gate rejects missing setup script" test_wizard_gate_action_rejects_missing_setup_script
     run_test "Installer: clear removes root and flips gate to clean" test_installer_clear_install_resets_to_clean

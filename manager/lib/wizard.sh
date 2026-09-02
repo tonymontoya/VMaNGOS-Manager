@@ -169,22 +169,33 @@ wizard_run() {
         return 0
     fi
 
-    # A launch from a previous run may still be active: attaching is the
-    # viewer ticket (#103); for now the contract is a one-line pointer.
+    # Resolve the wizard python and check Textual once; both the attach
+    # (viewer) path and the wizard flow need it.
+    python_bin=$(wizard_python_bin)
+    python_ok=0
+    if [[ -x "$python_bin" ]] && wizard_textual_available "$python_bin"; then
+        python_ok=1
+    fi
+
+    # A launch from a previous run may still be active: attach as the live
+    # viewer (#103). When the viewer can't run (no Textual), fall back to a
+    # one-line pointer so the user can still follow from the shell.
     if installer_unit_active; then
+        if (( python_ok )); then
+            "$python_bin" "$app_path" \
+                --manager-bin "$manager_bin" \
+                --config "$CONFIG_FILE" \
+                --secrets-file "$secrets_file" \
+                --setup-script "$setup_script" \
+                --attach
+            return $?
+        fi
         log_info "Install already running — follow with: journalctl -u vmangos-install -f"
         return 0
     fi
 
-    python_bin=$(wizard_python_bin)
-    if [[ ! -x "$python_bin" ]]; then
+    if (( ! python_ok )); then
         log_error "Wizard dependencies are not installed"
-        log_info "Run '$manager_bin install --bootstrap' to install Textual support"
-        return 1
-    fi
-
-    if ! wizard_textual_available "$python_bin"; then
-        log_error "Wizard environment is missing the Textual dependency"
         log_info "Run '$manager_bin install --bootstrap' to install Textual support"
         return 1
     fi
