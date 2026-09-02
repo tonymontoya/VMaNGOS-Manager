@@ -1256,12 +1256,21 @@ def create_wizard_app(
                     ),
                     log_lines,
                 )
+                return
+            # The unit ended (zero exit) but never reported completion (an older
+            # script that doesn't emit the final marker). We can't claim success
+            # (no server_ip) and can't claim failure (zero exit) — point the
+            # user at the journal to verify.
+            if unit_state == "inactive" and seen_active and not tracker.completed:
+                self._finish("ended", None, log_lines)
 
         def _finish(self, kind: str, data: Any, log_lines: list[str]) -> None:
             self._finished = True
             self._kill_journal()
             if kind == "done":
                 self.app.push_completion(data)  # type: ignore[attr-defined]
+            elif kind == "ended":
+                self.app.push_ended()  # type: ignore[attr-defined]
             else:
                 self.app.push_failure(data, log_lines)  # type: ignore[attr-defined]
 
@@ -1323,6 +1332,35 @@ def create_wizard_app(
 
         def on_button_pressed(self, event) -> None:
             if event.button.id == "completion-close":
+                self.app.close_with_code(0)
+
+    class EndedScreen(WizardScreen):
+        """The unit ended (zero exit) without reporting a final status.
+
+        An older, marker-less script that succeeds ends `inactive` with no
+        ``phase=install event=done`` marker. We can't claim success (no
+        server_ip) and can't claim failure (zero exit) — so we point the user
+        at the journal to verify, and offer the dashboard.
+        """
+
+        def compose(self) -> ComposeResult:
+            yield Static("Install Unit Ended", classes="wizard-title")
+            yield Static(
+                "The install unit stopped, but it never reported a final status "
+                "(an older script, or an unexpected stop).",
+                classes="wizard-note",
+            )
+            yield Static("")
+            yield Static("Verify the result in the journal:", classes="wizard-note")
+            yield Static("journalctl -u vmangos-install", classes="wizard-review")
+            yield Static("")
+            yield Static("Next steps:", classes="wizard-note")
+            yield Static("1. Confirm the install finished (look for the last lines).")
+            yield Static("2. Manage the server from the dashboard: vmangos-manager")
+            yield Button("Close", id="ended-close")
+
+        def on_button_pressed(self, event) -> None:
+            if event.button.id == "ended-close":
                 self.app.close_with_code(0)
 
     class FailureScreen(WizardScreen):
@@ -1417,6 +1455,9 @@ def create_wizard_app(
 
         def push_failure(self, failure: tuple[str, str, str] | None, log_lines: list[str]) -> None:
             self.push_screen(FailureScreen(failure, log_lines))
+
+        def push_ended(self) -> None:
+            self.push_screen(EndedScreen())
 
         def on_mount(self) -> None:
             if attach:

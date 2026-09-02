@@ -1179,6 +1179,40 @@ def test_viewer_detects_unit_failure_without_markers(tmp_path):
     assert calls == []
 
 
+def test_viewer_detects_unit_ended_without_completion(tmp_path):
+    # A unit that ends (zero exit) without emitting the completion marker (an
+    # older script): the viewer shows "ended" (not success, not failure) and
+    # points the user at the journal to verify.
+    lines = ["plain log: doing work", "plain log: done"]  # no completion marker
+    make_fake_journalctl(tmp_path, lines, delay=0.05)
+    make_fake_systemctl(tmp_path, ["active", "inactive"])  # active, then ends
+    fake_runner, calls = make_fake_runner(rc=0)
+    app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                # The unit ends without a completion marker; the state checker
+                # catches it (the poll is every 2s, so allow generous time).
+                await wait_for(
+                    lambda: screen_name(app) == "EndedScreen",
+                    message="unit-ended detected",
+                    timeout=20.0,
+                )
+                text = screen_text(app)
+                assert "Install Unit Ended" in text
+                assert "journalctl" in text  # the journal pointer is shown
+                assert "vmangos-manager" in text  # the dashboard follow-up
+
+        asyncio.run(scenario())
+
+    # No retry was issued (the unit already ended; the user verifies manually).
+    assert calls == []
+
+
 def test_viewer_redacts_secrets_in_log_pane(tmp_path):
     # A journal line that echoes a secret (a password on a command line) must
     # be redacted in the live log pane.
