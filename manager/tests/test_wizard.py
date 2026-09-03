@@ -335,7 +335,15 @@ async def wait_for(predicate, timeout=10.0, message="condition"):
     raise AssertionError(f"timed out waiting for {message}")
 
 
-def build_wizard(tmp_path, gate="clean", checkpoint="", secrets=None, runner=None):
+def build_wizard(
+    tmp_path,
+    gate="clean",
+    checkpoint="",
+    secrets=None,
+    runner=None,
+    attach=False,
+    install_root="",
+):
     if secrets is None:
         os.makedirs(os.path.join(tmp_path, "clientdata"), exist_ok=True)
         secrets = w.parse_secrets_file(write_fixture_secrets(tmp_path))
@@ -352,6 +360,8 @@ def build_wizard(tmp_path, gate="clean", checkpoint="", secrets=None, runner=Non
         setup_script=setup_script,
         installer_lib=installer_lib,
         runner=runner,
+        attach=attach,
+        install_root=install_root,
     )
     return app, secrets_file
 
@@ -689,3 +699,632 @@ def test_runner_empty_failure_still_names_the_fix(tmp_path):
             assert app.code == 1
 
     asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Viewer (#103): marker parsing, tracking, retry — pure logic
+# ---------------------------------------------------------------------------
+
+
+def test_parse_marker_well_formed():
+    m = w.parse_marker("@@VMANGOS v1 phase=build event=progress percent=42 step=\"Compiling the core\"")
+    assert m == {
+        "phase": "build",
+        "event": "progress",
+        "percent": "42",
+        "step": "Compiling the core",
+    }
+
+
+def test_parse_marker_quoted_and_escaped():
+    # A marker whose value is quoted and contains escaped quotes.
+    m = w.parse_marker("@@VMANGOS v1 phase=build event=error msg=\"it failed \\\"badly\\\"\" hint=\"fix it\"")
+    assert m["phase"] == "build"
+    assert m["event"] == "error"
+    assert m["msg"] == 'it failed "badly"'
+    assert m["hint"] == "fix it"
+
+
+def test_parse_marker_requires_phase_and_event():
+    # Missing event -> not a usable marker.
+    assert w.parse_marker("@@VMANGOS v1 phase=build") is None
+    # Wrong protocol version -> ignored.
+    assert w.parse_marker("@@VMANGOS v2 phase=build event=start") is None
+    # A non-marker log line -> ignored.
+    assert w.parse_marker("some ordinary journal line") is None
+    # An unterminated quoted value -> malformed, ignored (never crash).
+    assert w.parse_marker("@@VMANGOS v1 phase=build event=progress step=\"unterminated") is None
+    # A token without '=' -> malformed, ignored.
+    assert w.parse_marker("@@VMANGOS v1 phase=build event=start garbage") is None
+    # A value with no key -> malformed, ignored.
+    assert w.parse_marker("@@VMANGOS v1 =value") is None
+
+
+def test_marker_tracker_states_and_progress():
+    t = w.MarkerTracker()
+    for line in (
+        "@@VMANGOS v1 phase=prerequisites event=start",
+        "@@VMANGOS v1 phase=prerequisites event=done",
+        "@@VMANGOS v1 phase=build event=progress percent=30 step=\"Compiling\"",
+        "@@VMANGOS v1 phase=build event=progress percent=90 step=\"Linking\"",
+        "@@VMANGOS v1 phase=build event=done",
+        "@@VMANGOS v1 phase=services event=start",
+    ):
+        m = w.parse_marker(line)
+        assert m is not None
+        t.apply(m)
+    assert t.phase_state["prerequisites"] == "done"
+    assert t.phase_state["build"] == "done"
+    assert t.phase_state["services"] == "running"
+    assert t.current_phase == "services"
+    assert t.progress["build"] == ("90", "Linking")
+    assert not t.completed and not t.failed
+
+
+def test_marker_tracker_failure_and_completion():
+    t = w.MarkerTracker()
+    t.apply(w.parse_marker("@@VMANGOS v1 phase=build event=error msg=\"boom\" hint=\"check disk\""))
+    assert t.failed
+    assert t.failure == ("build", "boom", "check disk")
+    assert t.phase_state["build"] == "failed"
+
+    t2 = w.MarkerTracker()
+    t2.apply(w.parse_marker("@@VMANGOS v1 phase=install event=done server_ip=1.2.3.4"))
+    assert t2.completed
+    assert t2.install_done["server_ip"] == "1.2.3.4"
+
+
+def test_render_progress_honest_bar():
+    t = w.MarkerTracker()
+    t.apply(w.parse_marker("@@VMANGOS v1 phase=build event=progress percent=50 step=\"Compiling\""))
+    rendered = w.render_progress(t)
+    assert "50%" in rendered and "Compiling" in rendered
+    assert "\u2588" in rendered  # a bar is drawn when the phase emits progress
+
+    # A phase that emits no progress markers shows no bar.
+    t2 = w.MarkerTracker()
+    t2.apply(w.parse_marker("@@VMANGOS v1 phase=prerequisites event=start"))
+    rendered2 = w.render_progress(t2)
+    assert "\u2588" not in rendered2 and "Working on Prerequisites" in rendered2
+
+
+def test_build_retry_command_stop_then_start():
+    cmd = w.build_retry_command("/lib/installer.sh", "/sec", "/setup.sh")
+    script = cmd[2]
+    assert "installer_unit_stop" in script
+    assert "installer_unit_start" in script
+    assert script.index("installer_unit_stop") < script.index("installer_unit_start")
+    assert "/sec" in cmd and "/setup.sh" in cmd
+
+
+def test_retry_install_uses_runner_seam():
+    calls = []
+
+    def fake_runner(command, **kwargs):
+        calls.append(command)
+
+        class Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Completed()
+
+    rc, out, err = w.retry_install("/lib/installer.sh", "/sec", "/setup.sh", runner=fake_runner)
+    assert rc == 0 and out == "" and err == ""
+    assert len(calls) == 1
+    assert "installer_unit_stop" in calls[0][2]
+
+
+def test_checkpoint_progress_text():
+    assert w.checkpoint_progress_text("") == "Install starting..."
+    assert w.checkpoint_progress_text("START") == "Install starting..."
+    assert "Build complete" in w.checkpoint_progress_text("BUILD_DONE")
+    assert "Configuration in progress" in w.checkpoint_progress_text("BUILD_DONE")
+    assert "finishing up" in w.checkpoint_progress_text("SERVICES_DONE")
+    assert "CHECKPOINT_XYZ" in w.checkpoint_progress_text("CHECKPOINT_XYZ")
+
+
+def test_read_checkpoint_missing_is_empty(tmp_path):
+    root = str(tmp_path / "installroot")
+    assert w.read_checkpoint(root) == ""
+    os.makedirs(os.path.join(root, ".install-checkpoints"), exist_ok=True)
+    with open(os.path.join(root, ".install-checkpoints", "checkpoint"), "w") as handle:
+        handle.write("BUILD_DONE\n")
+    assert w.read_checkpoint(root) == "BUILD_DONE"
+
+
+# ---------------------------------------------------------------------------
+# Viewer (#103): fake-worker scenarios (stub journalctl on PATH, no systemd)
+# ---------------------------------------------------------------------------
+
+
+def make_fake_journalctl(tmp_path, lines, delay=0.05, args_log=None):
+    """An executable 'journalctl' that emits the given lines, then exits.
+
+    Returns the bin dir to prepend to PATH so the viewer's Popen(["journalctl", ...])
+    resolves to this stub instead of a real journalctl. If ``args_log`` is given,
+    every invocation's argv is appended to it (one per line) so a test can assert
+    on the flags used (e.g. that a retry re-attach used ``-n 0``).
+    """
+    bin_dir = os.path.join(str(tmp_path), "fakebin")
+    os.makedirs(bin_dir, exist_ok=True)
+    script_path = os.path.join(bin_dir, "journalctl")
+    data_path = os.path.join(str(tmp_path), "journalctl_lines.txt")
+    if args_log is None:
+        args_log = os.path.join(str(tmp_path), "journalctl_args.log")
+    with open(data_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write("#!/usr/bin/env bash\n")
+        handle.write(f'DATA="{data_path}"\n')
+        handle.write(f'DELAY="{delay}"\n')
+        handle.write(f'ARGS_LOG="{args_log}"\n')
+        handle.write('printf "%s\\n" "$*" >> "$ARGS_LOG"\n')
+        handle.write("while IFS= read -r line; do\n")
+        handle.write('    printf "%s\\n" "$line"\n')
+        handle.write('    sleep "$DELAY"\n')
+        handle.write('done < "$DATA"\n')
+    os.chmod(script_path, 0o755)
+    return bin_dir
+
+
+def make_fake_systemctl(tmp_path, state):
+    """An executable 'systemctl' that reports a scripted ActiveState.
+
+    ``state`` may be a single string (constant) or a list of strings (returned
+    in order, then the last one repeats). This lets a test model a unit that is
+    active and then dies without a marker (marker-less failure detection).
+    """
+    bin_dir = os.path.join(str(tmp_path), "fakebin")
+    os.makedirs(bin_dir, exist_ok=True)
+    script_path = os.path.join(bin_dir, "systemctl")
+    state_file = os.path.join(str(tmp_path), "systemctl_states.txt")
+    counter = os.path.join(str(tmp_path), "systemctl_counter.txt")
+    states = [state] if isinstance(state, str) else list(state)
+    with open(state_file, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(states) + "\n")
+    with open(counter, "w", encoding="utf-8") as handle:
+        handle.write("1\n")
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write("#!/usr/bin/env bash\n")
+        handle.write(f'STATES="{state_file}"\n')
+        handle.write(f'COUNTER="{counter}"\n')
+        handle.write('total=$(wc -l < "$STATES" | tr -d " ")\n')
+        handle.write('n=$(cat "$COUNTER" 2>/dev/null || echo 1)\n')
+        handle.write('if [ "$n" -gt "$total" ]; then n="$total"; fi\n')
+        handle.write('line=$(sed -n "${n}p" "$STATES")\n')
+        handle.write('echo "$((n + 1))" > "$COUNTER"\n')
+        handle.write('printf "ActiveState=%s\\n" "$line"\n')
+    os.chmod(script_path, 0o755)
+    return bin_dir
+
+
+def journalctl_args_log(tmp_path):
+    """The journalctl argv log the fake wrote (last line = last invocation)."""
+    path = os.path.join(str(tmp_path), "journalctl_args.log")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = [line for line in handle.read().splitlines() if line.strip()]
+    except OSError:
+        return []
+    return lines
+
+
+def with_path_prepended(bin_dir):
+    """Context manager that prepends bin_dir to PATH for the viewer's child."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _manager():
+        old = os.environ.get("PATH", "")
+        os.environ["PATH"] = bin_dir + os.pathsep + old
+        try:
+            yield
+        finally:
+            os.environ["PATH"] = old
+
+    return _manager()
+
+
+def test_viewer_checklist_renders_from_markers(tmp_path):
+    # Phase markers (no terminal marker) -> the checklist renders states and
+    # the running phase shows in progress.
+    lines = [
+        "@@VMANGOS v1 phase=prerequisites event=done",
+        "@@VMANGOS v1 phase=build event=progress percent=60 step=\"Compiling\"",
+        "@@VMANGOS v1 phase=build event=done",
+        "@@VMANGOS v1 phase=config event=start",
+    ]
+    bin_dir = make_fake_journalctl(tmp_path, lines, delay=0.1)
+    app, _ = build_wizard(tmp_path, attach=True)
+
+    with with_path_prepended(bin_dir):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                await wait_for(
+                    lambda: "Prerequisites" in screen_text(app)
+                    and "Build" in screen_text(app)
+                    and "Configuration" in screen_text(app),
+                    message="checklist rendered",
+                )
+                text = screen_text(app)
+                # The running phase is marked in progress.
+                assert "Configuration" in text and "in progress" in text
+                # The completed build is not pending.
+                build_line = next(line for line in text.splitlines() if "Build" in line)
+                assert "pending" not in build_line
+
+        asyncio.run(scenario())
+
+
+def test_viewer_completion_shows_address_and_realmlist(tmp_path):
+    # The install-done marker transitions to the completion screen, which
+    # shows the server address, the realmlist line, and the next steps.
+    lines = [
+        "@@VMANGOS v1 phase=prerequisites event=done",
+        "@@VMANGOS v1 phase=build event=done",
+        "@@VMANGOS v1 phase=install event=done server_ip=10.0.0.5 auth_port=3724 world_port=8085",
+    ]
+    bin_dir = make_fake_journalctl(tmp_path, lines, delay=0.1)
+    app, _ = build_wizard(tmp_path, attach=True)
+
+    with with_path_prepended(bin_dir):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                await wait_for(lambda: screen_name(app) == "CompletionScreen", message="completion screen")
+                text = screen_text(app)
+                assert "10.0.0.5" in text
+                # The realmlist line has no port (the installer prints
+                # 'set realmlist $SERVERIP'); a port would break the client.
+                assert "set realmlist 10.0.0.5" in text
+                assert "SET REALMLIST 10.0.0.5 3724" not in text
+                assert "Next steps" in text
+                assert "world port 8085" in text
+                # The unprivileged follow-up is named (dashboard + grant).
+                assert "vmangos-manager" in text
+                assert "config grant --user" in text
+
+        asyncio.run(scenario())
+
+
+def test_viewer_failure_shows_phase_hint_tail_and_retry(tmp_path):
+    lines = [
+        "@@VMANGOS v1 phase=build event=progress percent=55 step=\"Compiling\"",
+        "fatal: disk full",
+        "@@VMANGOS v1 phase=build event=error msg=\"out of space\" hint=\"free up disk space on /opt\"",
+    ]
+    bin_dir = make_fake_journalctl(tmp_path, lines)
+    fake_runner, calls = make_fake_runner(rc=0, stdout="restarted\n")
+    app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
+
+    with with_path_prepended(bin_dir):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await wait_for(lambda: screen_name(app) == "FailureScreen", message="failure screen")
+                text = screen_text(app)
+                # What failed / why / the fix, plus the raw tail.
+                assert "Build" in text
+                assert "out of space" in text
+                assert "free up disk space on /opt" in text
+                assert "disk full" in text  # last raw log lines are shown
+
+                # Retry issues stop -> start (resume from checkpoint), then
+                # re-attaches to a fresh viewer with no history.
+                await focus_widget(pilot, app, "failure-retry")
+                await pilot.press("enter")
+                await wait_for(lambda: screen_name(app) == "ViewerScreen", message="re-attach after retry")
+
+        asyncio.run(scenario())
+
+    retry_calls = [c for c in calls if "installer_unit_stop" in " ".join(c)]
+    assert len(retry_calls) == 1
+    script = retry_calls[0][2]
+    assert script.index("installer_unit_stop") < script.index("installer_unit_start")
+
+    # The re-attach must have used -n 0 (no history) so the prior failure's
+    # markers are not replayed (which would immediately fail again).
+    args = journalctl_args_log(tmp_path)
+    assert args, "the re-attached viewer should have started a journal tail"
+    tokens = args[-1].split()
+    assert "-n" in tokens and tokens[tokens.index("-n") + 1] == "0", (
+        f"retry re-attach must use -n 0, got: {args[-1]!r}"
+    )
+
+
+def test_viewer_detach_never_stops_the_unit(tmp_path):
+    # The install is still running (a progress marker, no terminal marker).
+    lines = ["@@VMANGOS v1 phase=build event=progress percent=40 step=\"Compiling\""]
+    bin_dir = make_fake_journalctl(tmp_path, lines, delay=0.2)
+    fake_runner, calls = make_fake_runner(rc=0)
+    app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
+
+    with with_path_prepended(bin_dir):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                await wait_for(lambda: "40%" in screen_text(app), message="progress shown")
+                # Detach: kills the journal child only, never the unit.
+                await focus_widget(pilot, app, "viewer-detach")
+                await pilot.press("enter")
+
+        asyncio.run(scenario())
+
+    # Detaching must not have issued any unit stop (or any) runner command.
+    assert calls == []
+
+
+def test_viewer_marker_starvation_falls_back_to_checkpoint(tmp_path):
+    # A script that emits no markers: the viewer polls the checkpoint file and
+    # shows the raw log pane, and never crashes.
+    install_root = str(tmp_path / "installroot")
+    os.makedirs(os.path.join(install_root, ".install-checkpoints"), exist_ok=True)
+    with open(os.path.join(install_root, ".install-checkpoints", "checkpoint"), "w") as handle:
+        handle.write("SOURCE_DONE\n")
+    lines = [
+        "plain log: fetching source",
+        "plain log: extracting",
+        "@@VMANGOS v1 malformed marker without event",
+    ]
+    bin_dir = make_fake_journalctl(tmp_path, lines, delay=0.1)
+    app, _ = build_wizard(tmp_path, attach=True, install_root=install_root)
+
+    with with_path_prepended(bin_dir):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                # The checkpoint fallback is shown (SOURCE_DONE -> source done,
+                # build in progress), and the raw log pane is present.
+                await wait_for(
+                    lambda: "Source" in screen_text(app) and "Build in progress" in screen_text(app),
+                    message="checkpoint fallback",
+                )
+                await wait_for(
+                    lambda: "plain log: extracting" in screen_text(app),
+                    message="raw log pane",
+                )
+                # The malformed marker line is shown in the log but never crashed.
+                assert screen_name(app) == "ViewerScreen"
+
+        asyncio.run(scenario())
+
+
+def test_launch_success_offers_follow_to_viewer(tmp_path):
+    # Straight after the launch flow, the success screen offers to attach.
+    fake_runner, calls = make_fake_runner(rc=0, stdout="started\n")
+    bin_dir = make_fake_journalctl(
+        tmp_path,
+        [
+            "@@VMANGOS v1 phase=build event=progress percent=10 step=\"Compiling\"",
+            "@@VMANGOS v1 phase=install event=done server_ip=10.1.1.1",
+        ],
+    )
+    app, _ = build_wizard(tmp_path, gate="clean", runner=fake_runner)
+
+    with with_path_prepended(bin_dir):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                await focus_widget(pilot, app, "form-review")
+                await pilot.press("enter")
+                await pilot.pause()
+                await focus_widget(pilot, app, "review-start")
+                await pilot.press("enter")
+                await pilot.pause()
+                assert screen_name(app) == "LaunchScreen"
+                # The Follow button appears on success.
+                await wait_for(
+                    lambda: any(b.id == "launch-follow" for b in app.screen.query(Button)),
+                    message="follow button",
+                )
+                await focus_widget(pilot, app, "launch-follow")
+                await pilot.press("enter")
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                await wait_for(lambda: screen_name(app) == "CompletionScreen", message="completion after follow")
+                assert "10.1.1.1" in screen_text(app)
+
+        asyncio.run(scenario())
+
+    # The launch itself started the unit (one runner call, no stop).
+    assert len(calls) == 1
+    assert "installer_unit_start" in calls[0][2]
+    assert "installer_unit_stop" not in calls[0][2]
+
+
+def test_viewer_detects_unit_failure_without_markers(tmp_path):
+    # A unit that dies without emitting event=error (kill -9, or a crash): the
+    # viewer polls the unit state and detects the failure, instead of spinning
+    # "in progress" forever. The unit is active first (seen_active) then fails.
+    lines = ["plain log: doing work"]  # no markers at all
+    make_fake_journalctl(tmp_path, lines, delay=0.05)
+    make_fake_systemctl(tmp_path, ["active", "failed"])  # active, then dies
+    fake_runner, calls = make_fake_runner(rc=0)
+    app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                # The unit dies without a marker; the state checker catches it
+                # (the poll is every 2s, so allow generous time).
+                await wait_for(
+                    lambda: screen_name(app) == "FailureScreen",
+                    message="marker-less failure detected",
+                    timeout=20.0,
+                )
+                text = screen_text(app)
+                assert "stopped without finishing" in text
+
+        asyncio.run(scenario())
+
+    # The failure was detected from the unit state, not a marker; no retry yet.
+    assert calls == []
+
+
+def test_viewer_detects_unit_ended_without_completion(tmp_path):
+    # A unit that ends (zero exit) without emitting the completion marker (an
+    # older script): the viewer shows "ended" (not success, not failure) and
+    # points the user at the journal to verify.
+    lines = ["plain log: doing work", "plain log: done"]  # no completion marker
+    make_fake_journalctl(tmp_path, lines, delay=0.05)
+    make_fake_systemctl(tmp_path, ["active", "inactive"])  # active, then ends
+    fake_runner, calls = make_fake_runner(rc=0)
+    app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                # The unit ends without a completion marker; the state checker
+                # catches it (the poll is every 2s, so allow generous time).
+                await wait_for(
+                    lambda: screen_name(app) == "EndedScreen",
+                    message="unit-ended detected",
+                    timeout=20.0,
+                )
+                text = screen_text(app)
+                assert "Install Unit Ended" in text
+                assert "journalctl" in text  # the journal pointer is shown
+                assert "vmangos-manager" in text  # the dashboard follow-up
+
+        asyncio.run(scenario())
+
+    # No retry was issued (the unit already ended; the user verifies manually).
+    assert calls == []
+
+
+def test_viewer_redacts_secrets_in_log_pane(tmp_path):
+    # A journal line that echoes a secret (a password on a command line) must
+    # be redacted in the live log pane.
+    lines = ["mysql -pM4ng0s!Pass -e 'SELECT 1'"]
+    make_fake_journalctl(tmp_path, lines, delay=0.1)
+    app, _ = build_wizard(tmp_path, attach=True)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await wait_for(lambda: "mysql" in screen_text(app), message="log line")
+                text = screen_text(app)
+                assert "M4ng0s!Pass" not in text  # the secret is redacted
+                assert "******" in text
+
+        asyncio.run(scenario())
+
+
+def test_failure_tail_redacts_secrets(tmp_path):
+    # The failure tail (raw log lines) can echo a secret; it must be redacted.
+    lines = [
+        "mysql -pM4ng0s!Pass -e 'SELECT 1'",
+        "fatal: db down",
+        "@@VMANGOS v1 phase=database event=error msg=\"db down\" hint=\"check the db\"",
+    ]
+    make_fake_journalctl(tmp_path, lines, delay=0.1)
+    app, _ = build_wizard(tmp_path, attach=True)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await wait_for(lambda: screen_name(app) == "FailureScreen", message="failure screen")
+                text = screen_text(app)
+                assert "M4ng0s!Pass" not in text  # the tail is redacted
+                assert "******" in text
+
+        asyncio.run(scenario())
+
+
+def test_viewer_detach_with_q_key(tmp_path):
+    # Ctrl+C / q detaches (kills the journal child only, never the unit).
+    lines = ["@@VMANGOS v1 phase=build event=progress percent=40 step=\"Compiling\""]
+    make_fake_journalctl(tmp_path, lines, delay=0.2)
+    fake_runner, calls = make_fake_runner(rc=0)
+    app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                await wait_for(lambda: "40%" in screen_text(app), message="progress shown")
+                # Detach with the q key (not the button).
+                await pilot.press("q")
+                await pilot.pause()
+
+        asyncio.run(scenario())
+
+    # Detaching must not have issued any unit stop (or any) runner command.
+    assert calls == []
+
+
+def test_viewer_retry_failure_shows_error(tmp_path):
+    # If the retry command fails (non-zero rc), the error is shown and the
+    # viewer stays on the failure screen (no re-attach).
+    lines = ["@@VMANGOS v1 phase=build event=error msg=\"boom\" hint=\"fix it\""]
+    make_fake_journalctl(tmp_path, lines, delay=0.1)
+    fake_runner, calls = make_fake_runner(rc=1, stderr="Failed to start vmangos-install.service\n")
+    app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
+
+    with with_path_prepended(os.path.join(str(tmp_path), "fakebin")):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await wait_for(lambda: screen_name(app) == "FailureScreen", message="failure screen")
+                await focus_widget(pilot, app, "failure-retry")
+                await pilot.press("enter")
+                # The retry failed: the error is shown, and we stay on the
+                # failure screen (no re-attach).
+                await wait_for(
+                    lambda: "Failed to start" in screen_text(app),
+                    message="retry error shown",
+                )
+                assert screen_name(app) == "FailureScreen"
+
+        asyncio.run(scenario())
+
+    # The retry command was issued (stop -> start), even though it failed.
+    retry_calls = [c for c in calls if "installer_unit_stop" in " ".join(c)]
+    assert len(retry_calls) == 1
+    script = retry_calls[0][2]
+    assert script.index("installer_unit_stop") < script.index("installer_unit_start")
+
+
+def test_installer_unit_name_single_source_of_truth():
+    # Declined review point 9 keeps the unit name defined in both layers
+    # (bash runner + python viewer) to avoid a per-attach subprocess. This
+    # guard makes drift loud: renaming the unit in one file without the
+    # other would make the viewer silently watch the wrong journal.
+    import re
+    from pathlib import Path
+
+    lib_dir = Path(w.__file__).resolve().parent
+    bash = (lib_dir / "installer.sh").read_text()
+    py = (lib_dir / "wizard.py").read_text()
+    bash_name = re.search(r'INSTALLER_UNIT_NAME="([^"]+)"', bash)
+    py_name = re.search(r'INSTALLER_UNIT_NAME = "([^"]+)"', py)
+    assert bash_name and py_name, "INSTALLER_UNIT_NAME definitions not found"
+    assert bash_name.group(1) == py_name.group(1)

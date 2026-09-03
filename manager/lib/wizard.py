@@ -15,11 +15,15 @@ launch command) lives at module level and is tested without a TTY.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import collections
 import os
 import re
 import secrets as _secrets
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -399,6 +403,307 @@ def validate_values(values: InstallValues, resume: bool, checkpoint: str) -> lis
 
 
 # ---------------------------------------------------------------------------
+# Viewer: marker parsing, phase tracking, retry, checkpoint polling
+# ---------------------------------------------------------------------------
+#
+# The viewer attaches to the running install unit and renders its progress
+# from the structured markers the setup script emits (protocol "@@VMANGOS v1",
+# see vmangos_setup.sh's log_marker). Everything below is pure logic — parsed
+# markers in, rendered text / command lists out — so it is tested without a
+# TTY or systemd. The Textual layer (below) only renders this state and drives
+# the journal reader + retry command.
+
+# The literal marker prefix; parsers grep for it.
+MARKER_PREFIX = "@@VMANGOS v1"
+
+# The install phases in the order the setup script runs them. The final
+# "install" marker (event=done) is the completion signal, not a checklist row.
+PHASE_ORDER = (
+    "prerequisites",
+    "database",
+    "source",
+    "build",
+    "config",
+    "extraction",
+    "db-import",
+    "services",
+)
+INSTALL_DONE_PHASE = "install"
+
+# Plain-noun labels (ui-copy standard: no jargon, titles are plain nouns).
+PHASE_LABELS = {
+    "prerequisites": "Prerequisites",
+    "database": "Database",
+    "source": "Source",
+    "build": "Build",
+    "config": "Configuration",
+    "extraction": "Data extraction",
+    "db-import": "Database import",
+    "services": "Services",
+}
+
+# Checkpoint names (vmangos_setup.sh) map to "this phase has finished".
+CHECKPOINT_DONE_PHASE = {
+    "PREREQS_DONE": "prerequisites",
+    "DATABASE_DONE": "database",
+    "SOURCE_DONE": "source",
+    "BUILD_DONE": "build",
+    "CONFIG_DONE": "config",
+    "DATA_DONE": "extraction",
+    "DB_IMPORT_DONE": "db-import",
+    "SERVICES_DONE": "services",
+}
+
+LOG_PANE_LINES = 200
+FAILURE_TAIL_LINES = 30
+
+# How often the viewer polls the unit's ActiveState to catch a marker-less
+# failure (kill -9, an old script that crashes). 2s is responsive without
+# hammering systemctl.
+UNIT_STATE_POLL_SECONDS = 2.0
+
+# A 'failed' ActiveState is a definitive failure. 'inactive' is deliberately
+# NOT treated as one: a marker-less script that *succeeds* also ends inactive,
+# so only 'failed' (a non-zero exit) is unambiguous.
+UNIT_FAILED_STATES = ("failed",)
+
+
+def _tokenize_marker(rest: str) -> list[tuple[str, str]] | None:
+    """Split ``key=value key2="quoted value"`` into [(key, value), ...].
+
+    Returns None on a malformed pair (a token without ``=``, a key with a
+    space, or an unterminated quoted value). Quoted values may contain spaces
+    and escaped quotes (``\\"``), matching log_marker's encoding.
+    """
+    pairs: list[tuple[str, str]] = []
+    i = 0
+    n = len(rest)
+    while i < n:
+        while i < n and rest[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        eq = rest.find("=", i)
+        if eq == -1:
+            return None
+        key = rest[i:eq]
+        if not key or any(c.isspace() for c in key):
+            return None
+        j = eq + 1
+        if j < n and rest[j] == '"':
+            j += 1
+            chars: list[str] = []
+            terminated = False
+            while j < n:
+                c = rest[j]
+                if c == "\\" and j + 1 < n and rest[j + 1] == '"':
+                    chars.append('"')
+                    j += 2
+                    continue
+                if c == '"':
+                    terminated = True
+                    j += 1
+                    break
+                chars.append(c)
+                j += 1
+            if not terminated:
+                return None
+            pairs.append((key, "".join(chars)))
+            i = j
+        else:
+            space = rest.find(" ", j)
+            if space == -1:
+                pairs.append((key, rest[j:]))
+                i = n
+            else:
+                pairs.append((key, rest[j:space]))
+                i = space
+    return pairs
+
+
+def parse_marker(line: str) -> dict[str, str] | None:
+    """Parse one ``@@VMANGOS v1`` marker line into a dict.
+
+    Returns None for anything that is not a well-formed marker — non-marker
+    journal lines and malformed markers are both ignored (the viewer must
+    never crash on either). A well-formed marker has at least ``phase=`` and
+    ``event=``.
+    """
+    line = line.strip()
+    if not line.startswith(MARKER_PREFIX + " "):
+        return None
+    pairs = _tokenize_marker(line[len(MARKER_PREFIX):])
+    if pairs is None:
+        return None
+    fields = dict(pairs)
+    if "phase" not in fields or "event" not in fields:
+        return None
+    return fields
+
+
+class MarkerTracker:
+    """Fold a stream of markers into per-phase state + progress.
+
+    States: pending -> running -> done | failed. The "current phase" is the
+    most recent phase that started and has not finished. Completion is the
+    ``phase=install event=done`` marker; failure is any ``event=error``.
+    """
+
+    def __init__(self) -> None:
+        self.phase_state: dict[str, str] = {p: "pending" for p in PHASE_ORDER}
+        self.progress: dict[str, tuple[str, str]] = {}
+        self.current_phase: str | None = None
+        self.completed = False
+        self.failed = False
+        self.failure: tuple[str, str, str] | None = None
+        self.install_done: dict[str, str] | None = None
+        self.marker_count = 0
+
+    def apply(self, marker: dict[str, str]) -> None:
+        phase = marker.get("phase", "")
+        event = marker.get("event", "")
+        self.marker_count += 1
+
+        if phase == INSTALL_DONE_PHASE:
+            if event == "done":
+                self.completed = True
+                self.install_done = marker
+            return
+
+        if phase not in self.phase_state:
+            return  # unknown phase: ignore, never crash
+
+        if event == "start":
+            self.phase_state[phase] = "running"
+            self.current_phase = phase
+        elif event == "progress":
+            self.phase_state[phase] = "running"
+            self.current_phase = phase
+            self.progress[phase] = (marker.get("percent", ""), marker.get("step", ""))
+        elif event == "done":
+            self.phase_state[phase] = "done"
+            if self.current_phase == phase:
+                self.current_phase = None
+        elif event == "error":
+            self.phase_state[phase] = "failed"
+            self.failed = True
+            self.failure = (phase, marker.get("msg", ""), marker.get("hint", ""))
+            if self.current_phase == phase:
+                self.current_phase = None
+
+
+def render_checklist(tracker: MarkerTracker) -> str:
+    """The phase checklist: done / running / failed / pending, in order."""
+    marks = {"done": "\u2713", "running": "\u25b6", "failed": "\u2717", "pending": "\u00b7"}
+    suffix = {"running": "  in progress", "failed": "  FAILED", "pending": "  pending"}
+    lines = []
+    for phase in PHASE_ORDER:
+        state = tracker.phase_state[phase]
+        label = PHASE_LABELS[phase]
+        line = f"{marks[state]}  {label}"
+        if state in suffix:
+            line += suffix[state]
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def render_progress(tracker: MarkerTracker) -> str:
+    """The running phase's progress: an honest bar when it emits one.
+
+    A phase that emits no progress markers (prerequisites, database, source,
+    config, services) shows a plain "working" line — no fake bar.
+    """
+    phase = tracker.current_phase
+    if phase is None:
+        return ""
+    label = PHASE_LABELS.get(phase, phase)
+    if phase not in tracker.progress:
+        return f"Working on {label}..."
+    percent_raw, step = tracker.progress[phase]
+    try:
+        percent = int(percent_raw)
+    except (TypeError, ValueError):
+        return f"{label}: {step}" if step else f"Working on {label}..."
+    percent = max(0, min(100, percent))
+    width = 30
+    filled = round(width * percent / 100)
+    bar = "\u2588" * filled + "\u2591" * (width - filled)
+    head = f"{label}  {percent}%"
+    if step:
+        head += f"  {step}"
+    return f"{head}\n{bar}"
+
+
+def build_retry_command(installer_lib: str, secrets_file: str, setup_script: str) -> list[str]:
+    """The bash command that retries a failed install.
+
+    Retry = stop + reset-failed (the runner's installer_unit_stop) then start
+    (installer_unit_start); the setup script resumes from its checkpoint.
+    """
+    script = (
+        'source "$1" >/dev/null 2>&1'
+        " && installer_unit_stop"
+        ' && installer_unit_start "$2" "$3"'
+    )
+    return ["bash", "-c", script, "installer", installer_lib, secrets_file, setup_script]
+
+
+def retry_install(
+    installer_lib: str,
+    secrets_file: str,
+    setup_script: str,
+    runner: Callable[[list[str]], Any] | None = None,
+) -> tuple[int, str, str]:
+    """Issue the retry command. ``runner`` is the test seam (defaults to
+    subprocess.run). Returns (returncode, stdout, stderr)."""
+    command = build_retry_command(installer_lib, secrets_file, setup_script)
+    run = runner if runner is not None else _subprocess_run
+    completed = run(command, capture_output=True, text=True, check=False)
+    return int(completed.returncode), completed.stdout or "", completed.stderr or ""
+
+
+def read_checkpoint(install_root: str) -> str:
+    """The checkpoint an in-flight install has reached (empty when none).
+
+    Reads ``$INSTALLROOT/.install-checkpoints/checkpoint`` — the fallback
+    progress signal when a script emits no markers. Never raises.
+    """
+    if not install_root:
+        return ""
+    checkpoint_file = os.path.join(install_root, ".install-checkpoints", "checkpoint")
+    try:
+        with open(checkpoint_file, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def checkpoint_progress_text(checkpoint: str) -> str:
+    """Human-readable fallback progress from a checkpoint name.
+
+    A checkpoint means that phase has finished; the next phase is the one
+    running. Empty/unknown checkpoints say so plainly.
+    """
+    if not checkpoint or checkpoint == "START":
+        return "Install starting..."
+    done_phase = CHECKPOINT_DONE_PHASE.get(checkpoint)
+    if done_phase is None:
+        return f"Checkpoint: {checkpoint}"
+    label = PHASE_LABELS[done_phase]
+    index = PHASE_ORDER.index(done_phase)
+    if index + 1 < len(PHASE_ORDER):
+        next_label = PHASE_LABELS[PHASE_ORDER[index + 1]]
+        return f"{label} complete — {next_label} in progress"
+    return f"{label} complete — finishing up"
+
+
+def _subprocess_run(command: list[str], **kwargs: Any) -> Any:
+    """Indirection over subprocess.run so retry_install has a single,
+    seam-able call site (mirrors the dashboard's run_manager_subprocess)."""
+    return subprocess.run(command, **kwargs)
+
+
+# ---------------------------------------------------------------------------
 # Textual wizard
 # ---------------------------------------------------------------------------
 
@@ -411,8 +716,14 @@ def create_wizard_app(
     setup_script: str,
     installer_lib: str,
     runner: Callable[..., Any] | None = None,
+    attach: bool = False,
+    install_root: str = "",
 ):
-    """Build the wizard App. Kept behind a factory so tests never import it."""
+    """Build the wizard App. Kept behind a factory so tests never import it.
+
+    With ``attach`` the app starts on the live install viewer instead of the
+    gate/form flow (the "follow an already-running install" path, #103).
+    """
     from textual.app import App, ComposeResult
     from textual.screen import Screen
     from textual.widgets import Button, Input, Static
@@ -427,6 +738,9 @@ def create_wizard_app(
             self.fresh = False  # set when the user chose start-over / replace
 
     state = WizardState()
+    # Where the install lives — used by the viewer to poll the checkpoint file
+    # as a fallback progress signal when a script emits no markers.
+    effective_install_root = install_root or secrets.get("INSTALLROOT", "") or DEFAULT_INSTALL_ROOT
 
     WIZARD_CSS = """
     .wizard-body {
@@ -732,10 +1046,14 @@ def create_wizard_app(
                 if rc == 0:
                     detail.update(
                         "Install started in systemd unit vmangos-install.\n"
-                        "Re-run sudo vmangos-manager install to attach.\n"
-                        "journalctl -u vmangos-install -f to watch."
+                        "Follow the install to watch it live, or close and re-run "
+                        "sudo vmangos-manager install to attach."
                     )
                     self.app.code = 0
+                    self.mount(
+                        Button("Follow the install", variant="primary", id="launch-follow"),
+                        before=self.query_one("#launch-close"),
+                    )
                 else:
                     # Show the runner's output verbatim (secrets redacted), and
                     # always name the fix: the journalctl pointer and how to
@@ -759,6 +1077,350 @@ def create_wizard_app(
         def on_button_pressed(self, event) -> None:
             if event.button.id == "launch-close":
                 self.app.close_with_code(self.app.code)
+            elif event.button.id == "launch-follow":
+                # Attach straight after the launch flow (#103).
+                self.app.push_viewer()  # type: ignore[attr-defined]
+
+    # -- Viewer (follow a running install, #103) ----------------------------
+    #
+    # The viewer attaches to the running install unit and renders its progress
+    # from the markers in the unit journal. A reader thread tails
+    # ``journalctl -u vmangos-install`` and folds each line into a shared
+    # MarkerTracker + log buffer; the UI is driven by a set_interval on the
+    # event loop (no call_from_thread needed). Detaching kills only the
+    # journal child — never the install unit.
+
+    INSTALLER_UNIT_NAME = "vmangos-install"
+
+    class ViewerScreen(WizardScreen):
+        """Live view of the running install: checklist, progress, log tail.
+
+        ``tail_lines`` controls how much journal history the tail shows. A
+        cold attach uses the default (the last LOG_PANE_LINES); a re-attach
+        after a retry uses 0 so the prior failure's markers are not replayed.
+        """
+
+        BINDINGS = [
+            ("q", "detach", "Detach"),
+            ("ctrl+c", "detach", "Detach"),
+        ]
+
+        def __init__(self, tail_lines: int = LOG_PANE_LINES) -> None:
+            super().__init__()
+            self.tail_lines = max(0, int(tail_lines))
+            self.tracker = MarkerTracker()
+            self.log_buffer = collections.deque(maxlen=LOG_PANE_LINES)
+            self._proc: subprocess.Popen | None = None
+            self._lock = threading.Lock()
+            self._finished = False
+            self._journal_failed = False
+            # Unit-state failure detection (#103): a marker-less death (kill -9,
+            # an old script) leaves no event=error, so the unit's ActiveState is
+            # the ground truth. Polled by a checker thread, read under the lock.
+            self.unit_state = "unknown"
+            self._seen_active = False  # True once active, to avoid a startup false positive
+            # Delta detection: skip the re-render when nothing changed (the 0.5s
+            # tick must not churn the widgets on an idle install).
+            self._last_render = ""
+
+        def compose(self) -> ComposeResult:
+            yield Static("Install Progress", classes="wizard-title")
+            yield Static("Waiting for the install to report progress...", id="viewer-checklist")
+            yield Static("", id="viewer-progress")
+            yield Static("Log", classes="wizard-note")
+            yield Static("Waiting for the install to emit progress...", id="viewer-log")
+            yield Button("Detach", id="viewer-detach")
+
+        def on_mount(self) -> None:
+            self._start_journal()
+            self._start_unit_state_checker()
+            self.set_interval(0.5, self._refresh)
+
+        def _start_journal(self) -> None:
+            # journalctl is resolved from PATH so tests can stub it. tail_lines
+            # is 0 after a retry so the prior failure's markers are not replayed.
+            command = ["journalctl", "-u", INSTALLER_UNIT_NAME, "-n", str(self.tail_lines), "-f"]
+            try:
+                self._proc = subprocess.Popen(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+                )
+            except OSError:
+                # No journalctl: fall back to checkpoint polling. Never crash.
+                self._journal_failed = True
+                return
+
+            proc = self._proc  # capture locally: _kill_journal() may null self._proc
+
+            def reader() -> None:
+                try:
+                    for line in proc.stdout:
+                        text = line.rstrip("\n")
+                        with self._lock:
+                            self.log_buffer.append(text)
+                            marker = parse_marker(text)
+                            if marker is not None:
+                                self.tracker.apply(marker)
+                finally:
+                    # Reap the child. proc is a local, so a concurrent detach
+                    # (which nulls self._proc) cannot turn this into an error.
+                    proc.wait()
+
+            threading.Thread(target=reader, daemon=True).start()
+
+        def _start_unit_state_checker(self) -> None:
+            """Poll the unit's ActiveState (marker-less failure detection, #103).
+
+            Runs in a daemon thread, updating shared state under the lock. The
+            UI reads it in _refresh. Stopped when the viewer finishes.
+            """
+
+            def checker() -> None:
+                while True:
+                    if self._finished:
+                        return
+                    state = self._query_unit_state()
+                    with self._lock:
+                        self.unit_state = state
+                        if state in ("active", "activating"):
+                            self._seen_active = True
+                    time.sleep(UNIT_STATE_POLL_SECONDS)
+
+            threading.Thread(target=checker, daemon=True).start()
+
+        def _query_unit_state(self) -> str:
+            """The unit's ActiveState, or 'unknown'.
+
+            Calls ``systemctl`` directly (resolved from PATH) so tests can stub
+            it. Never raises: a failed query is reported as 'unknown'.
+            """
+            try:
+                completed = subprocess.run(
+                    ["systemctl", "show", "-p", "ActiveState", f"{INSTALLER_UNIT_NAME}.service"],
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return "unknown"
+            output = (completed.stdout or "").strip()
+            if "=" in output:
+                output = output.split("=", 1)[1].strip()
+            return output or "unknown"
+
+        def _refresh(self) -> None:
+            with self._lock:
+                tracker = self.tracker
+                log_lines = list(self.log_buffer)
+                unit_state = self.unit_state
+                seen_active = self._seen_active
+
+            # The journal can echo a secret (a password on a command line);
+            # every other path in the wizard redacts, so the log pane must too.
+            values = self.values().values
+            log_text = redact_secrets("\n".join(log_lines[-LOG_PANE_LINES:]), values)
+
+            if tracker.marker_count == 0:
+                # Marker starvation: checkpoint-file polling + raw log pane.
+                checkpoint = read_checkpoint(effective_install_root)
+                checklist_text = checkpoint_progress_text(checkpoint)
+                progress_text = ""
+            else:
+                checklist_text = render_checklist(tracker)
+                progress_text = render_progress(tracker)
+
+            # Delta detection: the 0.5s tick must not churn the widgets when
+            # nothing changed (an idle install re-rendered 2x a second for no
+            # reason is wasted work and can flicker the terminal).
+            render_key = (checklist_text, progress_text, log_text, tracker.marker_count)
+            if render_key != self._last_render:
+                self.query_one("#viewer-checklist", Static).update(checklist_text)
+                self.query_one("#viewer-progress", Static).update(progress_text)
+                self.query_one("#viewer-log", Static).update(log_text or "No log output yet.")
+                self._last_render = render_key
+
+            if self._finished:
+                return
+            if tracker.completed:
+                self._finish("done", tracker.install_done, log_lines)
+                return
+            if tracker.failed:
+                self._finish("failed", tracker.failure, log_lines)
+                return
+            # Marker-less failure: the unit died (non-zero exit) without ever
+            # emitting event=error — e.g. kill -9, or an old script that crashes.
+            if unit_state in UNIT_FAILED_STATES and seen_active:
+                self._finish(
+                    "failed",
+                    (
+                        "unknown",
+                        "The install unit stopped without finishing.",
+                        "Check the log above for the cause, then retry.",
+                    ),
+                    log_lines,
+                )
+                return
+            # The unit ended (zero exit) but never reported completion (an older
+            # script that doesn't emit the final marker). We can't claim success
+            # (no server_ip) and can't claim failure (zero exit) — point the
+            # user at the journal to verify.
+            if unit_state == "inactive" and seen_active and not tracker.completed:
+                self._finish("ended", None, log_lines)
+
+        def _finish(self, kind: str, data: Any, log_lines: list[str]) -> None:
+            self._finished = True
+            self._kill_journal()
+            if kind == "done":
+                self.app.push_completion(data)  # type: ignore[attr-defined]
+            elif kind == "ended":
+                self.app.push_ended()  # type: ignore[attr-defined]
+            else:
+                self.app.push_failure(data, log_lines)  # type: ignore[attr-defined]
+
+        def _kill_journal(self) -> None:
+            if self._proc is not None:
+                try:
+                    self._proc.kill()
+                except OSError:
+                    pass
+                self._proc = None
+
+        def on_unmount(self) -> None:
+            # Detach / app exit: kill the journal child only. The install unit
+            # is left running — detaching never stops the install.
+            self._kill_journal()
+
+        def action_detach(self) -> None:
+            # Ctrl+C / q: the spec names the keys, not just the button.
+            self._detach()
+
+        def _detach(self) -> None:
+            self._kill_journal()
+            self.app.close_with_code(0)
+
+        def on_button_pressed(self, event) -> None:
+            if event.button.id == "viewer-detach":
+                self._detach()
+
+    class CompletionScreen(WizardScreen):
+        """Install succeeded: server address, realmlist line, next steps."""
+
+        def __init__(self, marker: dict[str, str] | None) -> None:
+            super().__init__()
+            self.marker = marker or {}
+
+        def compose(self) -> ComposeResult:
+            server_ip = self.marker.get("server_ip", "")
+            auth_port = self.marker.get("auth_port", "3724")
+            world_port = self.marker.get("world_port", "8085")
+            yield Static("Install Complete", classes="wizard-title")
+            if server_ip:
+                yield Static(f"Your server is up at {server_ip}.", classes="wizard-note")
+            else:
+                yield Static("Your server is up.", classes="wizard-note")
+            yield Static("")
+            # The realmlist.wtf line carries no port — the client uses the
+            # default ports. This matches what the installer already printed
+            # (set realmlist $SERVERIP); a space-separated port breaks the client.
+            realmlist = f"set realmlist {server_ip or '<server-ip>'}"
+            yield Static("Add this line to your client's realmlist.wtf:", classes="wizard-note")
+            yield Static(realmlist, classes="wizard-review")
+            yield Static("")
+            yield Static("Next steps:", classes="wizard-note")
+            yield Static(f"1. Log in with a character — auth port {auth_port}, world port {world_port}.")
+            yield Static("2. Add the realmlist line above to your client.")
+            yield Static("3. Manage the server from the dashboard: vmangos-manager")
+            yield Static("4. Give a non-root user access (as root): vmangos-manager config grant --user <user>")
+            yield Button("Close", id="completion-close")
+
+        def on_button_pressed(self, event) -> None:
+            if event.button.id == "completion-close":
+                self.app.close_with_code(0)
+
+    class EndedScreen(WizardScreen):
+        """The unit ended (zero exit) without reporting a final status.
+
+        An older, marker-less script that succeeds ends `inactive` with no
+        ``phase=install event=done`` marker. We can't claim success (no
+        server_ip) and can't claim failure (zero exit) — so we point the user
+        at the journal to verify, and offer the dashboard.
+        """
+
+        def compose(self) -> ComposeResult:
+            yield Static("Install Unit Ended", classes="wizard-title")
+            yield Static(
+                "The install unit stopped, but it never reported a final status "
+                "(an older script, or an unexpected stop).",
+                classes="wizard-note",
+            )
+            yield Static("")
+            yield Static("Verify the result in the journal:", classes="wizard-note")
+            yield Static("journalctl -u vmangos-install", classes="wizard-review")
+            yield Static("")
+            yield Static("Next steps:", classes="wizard-note")
+            yield Static("1. Confirm the install finished (look for the last lines).")
+            yield Static("2. Manage the server from the dashboard: vmangos-manager")
+            yield Button("Close", id="ended-close")
+
+        def on_button_pressed(self, event) -> None:
+            if event.button.id == "ended-close":
+                self.app.close_with_code(0)
+
+    class FailureScreen(WizardScreen):
+        """Install failed: what failed, why, the tail, and the two actions."""
+
+        def __init__(self, failure: tuple[str, str, str] | None, log_lines: list[str]) -> None:
+            super().__init__()
+            self.failure = failure
+            self.log_lines = log_lines
+
+        def compose(self) -> ComposeResult:
+            # The failure text and the raw tail can echo a secret (a password on
+            # a command line); redact before it can reach the screen.
+            values = self.values().values
+            phase, msg, hint = self.failure or ("unknown", "", "")
+            phase_label = PHASE_LABELS.get(phase, phase)
+            yield Static("Install Failed", classes="wizard-title")
+            yield Static(f"Phase: {phase_label}", classes="wizard-review")
+            if msg:
+                yield Static(f"Error: {redact_secrets(msg, values)}", classes="wizard-error")
+            if hint:
+                yield Static(f"Fix: {redact_secrets(hint, values)}", classes="wizard-note")
+            yield Static("")
+            yield Static("Last log lines:", classes="wizard-note")
+            tail = redact_secrets("\n".join(self.log_lines[-FAILURE_TAIL_LINES:]), values)
+            yield Static(tail or "(no log output)", classes="wizard-review")
+            yield Static("", id="retry-status", classes="wizard-note")
+            yield Button("Retry", variant="primary", id="failure-retry")
+            yield Button("Quit", id="failure-quit")
+
+        async def on_button_pressed(self, event) -> None:
+            if event.button.id == "failure-quit":
+                # Quit leaves the unit failed; a later rerun resumes from the
+                # checkpoint. Detach never stops the unit.
+                self.app.close_with_code(1)
+            elif event.button.id == "failure-retry":
+                await self._retry()
+
+        async def _retry(self) -> None:
+            # Retry = stop + reset-failed, then start (the setup script resumes
+            # from its checkpoint). No password re-entry — the wizard is root.
+            #
+            # Run off the event loop: the systemctl calls can take a couple of
+            # seconds and must not freeze the UI (unlike the launch path, this
+            # is a user-initiated action on an already-shown screen).
+            self.query_one("#retry-status", Static).update("Retrying — restarting the install unit…")
+            loop = asyncio.get_running_loop()
+            rc, out, err = await loop.run_in_executor(
+                None, retry_install, installer_lib, secrets_file, setup_script, runner
+            )
+            if rc == 0:
+                self.app.code = 0
+                self.query_one("#retry-status", Static).update("Retry issued — install resuming.")
+                # Re-attach with no history so the prior failure's markers are
+                # not replayed (which would immediately fail again).
+                self.app.push_viewer(0)  # type: ignore[attr-defined]
+                return
+            combined = (out or "") + ("\n" + err if err else "")
+            body = redact_secrets(combined, self.values().values).strip() or "Retry failed to start the install unit."
+            self.query_one("#retry-status", Static).update(body)
 
     class InstallWizardApp(App[None]):
         CSS = WIZARD_CSS
@@ -785,8 +1447,25 @@ def create_wizard_app(
         def push_launch(self) -> None:
             self.push_screen(LaunchScreen())
 
+        def push_viewer(self, tail_lines: int = LOG_PANE_LINES) -> None:
+            self.push_screen(ViewerScreen(tail_lines))
+
+        def push_completion(self, marker: dict[str, str] | None) -> None:
+            self.push_screen(CompletionScreen(marker))
+
+        def push_failure(self, failure: tuple[str, str, str] | None, log_lines: list[str]) -> None:
+            self.push_screen(FailureScreen(failure, log_lines))
+
+        def push_ended(self) -> None:
+            self.push_screen(EndedScreen())
+
         def on_mount(self) -> None:
-            self.push_screen(GateScreen())
+            if attach:
+                # Cold attach: a launch is already running — go straight to the
+                # live viewer (no gate, no forms).
+                self.push_screen(ViewerScreen())
+            else:
+                self.push_screen(GateScreen())
 
     return InstallWizardApp()
 
@@ -805,6 +1484,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gate", choices=GATE_ACTIONS, default="clean", help="Existing-install gate action")
     parser.add_argument("--checkpoint", default="", help="Resume checkpoint name (if any)")
     parser.add_argument("--installer-lib", default=None, help="Path to installer.sh (runner)")
+    parser.add_argument("--attach", action="store_true", help="Attach as a live viewer of the running install")
+    parser.add_argument("--install-root", default=None, help="Install root (checkpoint polling fallback)")
     return parser.parse_args(argv)
 
 
@@ -825,6 +1506,8 @@ def main(argv: list[str] | None = None) -> int:
         secrets_file=args.secrets_file,
         setup_script=args.setup_script,
         installer_lib=installer_lib,
+        attach=args.attach,
+        install_root=args.install_root or "",
     )
     app.run()
     return int(getattr(app, "code", 1) or 0)
