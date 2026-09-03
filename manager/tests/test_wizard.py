@@ -1311,3 +1311,20 @@ def test_viewer_retry_failure_shows_error(tmp_path):
     assert len(retry_calls) == 1
     script = retry_calls[0][2]
     assert script.index("installer_unit_stop") < script.index("installer_unit_start")
+
+
+def test_installer_unit_name_single_source_of_truth():
+    # Declined review point 9 keeps the unit name defined in both layers
+    # (bash runner + python viewer) to avoid a per-attach subprocess. This
+    # guard makes drift loud: renaming the unit in one file without the
+    # other would make the viewer silently watch the wrong journal.
+    import re
+    from pathlib import Path
+
+    lib_dir = Path(w.__file__).resolve().parent
+    bash = (lib_dir / "installer.sh").read_text()
+    py = (lib_dir / "wizard.py").read_text()
+    bash_name = re.search(r'INSTALLER_UNIT_NAME="([^"]+)"', bash)
+    py_name = re.search(r'INSTALLER_UNIT_NAME = "([^"]+)"', py)
+    assert bash_name and py_name, "INSTALLER_UNIT_NAME definitions not found"
+    assert bash_name.group(1) == py_name.group(1)
