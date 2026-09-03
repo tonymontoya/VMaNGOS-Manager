@@ -76,6 +76,31 @@ log_section() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ==========================================" | tee -a "$INSTALL_LOG"
 }
 
+# =============================================================================
+# STRUCTURED PROGRESS MARKERS (protocol "@@VMANGOS v1")
+#
+# Markers are stdout-only: the journal (systemd-run) is the marker channel,
+# never the install log. One marker per line; values containing spaces are
+# double-quoted. Parsers grep for the literal prefix "@@VMANGOS v1".
+# =============================================================================
+
+log_marker() {
+    local phase="$1" event="$2"
+    shift 2
+    local out="@@VMANGOS v1 phase=${phase} event=${event}"
+    local kv key value
+    for kv in "$@"; do
+        key="${kv%%=*}"
+        value="${kv#*=}"
+        if [[ "$value" == *' '* || "$value" == *'"'* ]]; then
+            value="${value//\"/\\\"}"
+            value="\"${value}\""
+        fi
+        out="${out} ${key}=${value}"
+    done
+    printf '%s\n' "$out"
+}
+
 refresh_runtime_paths() {
     CHECKPOINT_DIR="${INSTALLROOT}/.install-checkpoints"
     CHECKPOINT_FILE="${CHECKPOINT_DIR}/checkpoint"
@@ -783,59 +808,81 @@ prepare_extraction_root() {
 
 phase_prerequisites() {
     log_section "PHASE: Installing Prerequisites"
-    
+    log_marker prerequisites start
+
     # Keep prerequisite installs headless-safe on real servers where needrestart
     # may otherwise hold apt open behind a whiptail prompt.
-    DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none apt-get update
+    DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none apt-get update || {
+        log_marker prerequisites error "msg=apt-get update failed" "hint=Check network access and the apt mirror configuration, then re-run the installer"
+        return 1
+    }
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none \
         apt-get install -y build-essential cmake git libmariadb-dev default-libmysqlclient-dev libssl-dev \
             libbz2-dev libreadline-dev libncurses-dev libboost-all-dev \
-            p7zip-full python3 python3-pip python3-venv sysstat wget zlib1g-dev
+            p7zip-full python3 python3-pip python3-venv sysstat wget zlib1g-dev || {
+        log_marker prerequisites error "msg=Failed to install build prerequisites" "hint=Check the apt output in the install log for the failing package"
+        return 1
+    }
 
-    ensure_service_account
+    ensure_service_account || {
+        log_marker prerequisites error "msg=Failed to set up the service account $MANGOSOSUSER" "hint=Check that the user name is available and that useradd succeeded"
+        return 1
+    }
 
+    log_marker prerequisites "done"
     set_checkpoint "PREREQS_DONE"
 }
 
 phase_database_setup() {
     log_section "PHASE: Database Setup"
-    
+    log_marker database start
+
     # Create databases
     mysql -e "CREATE DATABASE IF NOT EXISTS \`$WORLDDB\`;" || true
     mysql -e "CREATE DATABASE IF NOT EXISTS \`$AUTHDB\`;" || true
     mysql -e "CREATE DATABASE IF NOT EXISTS \`$CHARACTERDB\`;" || true
     mysql -e "CREATE DATABASE IF NOT EXISTS \`$LOGSDB\`;" || true
-    
+
     # Create user
     mysql -e "CREATE USER IF NOT EXISTS '$MANGOSDBUSER'@'$SQLADMINIP' IDENTIFIED BY '$MANGOSDBPASS';" || true
     mysql -e "GRANT ALL PRIVILEGES ON \`$WORLDDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
     mysql -e "GRANT ALL PRIVILEGES ON \`$AUTHDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
     mysql -e "GRANT ALL PRIVILEGES ON \`$CHARACTERDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
     mysql -e "GRANT ALL PRIVILEGES ON \`$LOGSDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
-    mysql -e "FLUSH PRIVILEGES;"
-    
+    mysql -e "FLUSH PRIVILEGES;" || {
+        log_marker database error "msg=Failed to apply database grants" "hint=Check that MariaDB or MySQL is running, then re-run the installer"
+        return 1
+    }
+
+    log_marker database "done"
     set_checkpoint "DATABASE_DONE"
 }
 
 phase_source_download() {
     log_section "PHASE: Downloading Source Code"
-    
+    log_marker source start
+
     mkdir -p "$INSTALLROOT"
     cd "$INSTALLROOT"
-    
+
     # Clone VMaNGOS core
     if [ ! -d "source" ]; then
-        git_clone_with_retry "https://github.com/vmangos/core" "source"
+        git_clone_with_retry "https://github.com/vmangos/core" "source" || {
+            log_marker source error "msg=Failed to clone the VMaNGOS core repository" "hint=Check network access to github.com, then re-run the installer"
+            return 1
+        }
     else
         log_info "Source directory exists, skipping clone"
     fi
-    
+
+    log_marker source "done"
     set_checkpoint "SOURCE_DONE"
 }
 
 phase_build() {
     log_section "PHASE: Building VMaNGOS from Source"
-    
+    log_marker build start
+
     cd "$INSTALLROOT"
     CPU=$(nproc)
     
@@ -882,9 +929,11 @@ phase_build() {
         set -e
         log_error "CMake configuration failed (exit $CMAKE_RC)"
         log_error "Check $INSTALL_LOG for the cmake error output"
+        log_marker build error "msg=CMake configuration failed" "hint=Check the cmake error output in the install log for the failing component"
         return 1
     fi
     log_info "CMake configuration complete."
+    log_marker build progress "percent=33" "step=Configure"
 
     # Build - with background support if enabled
     log_info ""
@@ -896,6 +945,7 @@ phase_build() {
             set -e
             log_error "Background build failed"
             log_error "Check $INSTALL_LOG and $CHECKPOINT_DIR/build-status"
+            log_marker build error "msg=Compilation failed" "hint=Check the build log and build-status file for the failing target"
             return 1
         fi
     else
@@ -909,11 +959,13 @@ phase_build() {
         if [ "$MAKE_RC" -ne 0 ]; then
             set -e
             log_error "Compilation failed (exit $MAKE_RC) - full output in $INSTALL_LOG"
+            log_marker build error "msg=Compilation failed" "hint=Check the install log for the compiler error"
             return 1
         fi
         log_info ""
         log_info "Compilation complete!"
     fi
+    log_marker build progress "percent=66" "step=Compile"
 
     # Install
     log_info ""
@@ -923,10 +975,12 @@ phase_build() {
     set -e
     if [ "$INSTALL_RC" -ne 0 ]; then
         log_error "make install failed (exit $INSTALL_RC)"
+        log_marker build error "msg=make install failed" "hint=Check the install log for the failing install step"
         return 1
     fi
     if [ ! -f "$INSTALLROOT/run/etc/mangosd.conf.dist" ]; then
         log_error "Build artifacts missing after install (expected $INSTALLROOT/run/etc/mangosd.conf.dist)"
+        log_marker build error "msg=Build artifacts missing after install" "hint=Re-run the build phase; the compiled output was not produced"
         return 1
     fi
     log_info "Installation of binaries complete."
@@ -935,18 +989,26 @@ phase_build() {
     log_info "====================================================================="
     log_info "BUILD COMPLETED at $(date '+%H:%M:%S')"
     log_info "====================================================================="
-    
+    log_marker build "done"
+
     set_checkpoint "BUILD_DONE"
 }
 
 phase_config_setup() {
     log_section "PHASE: Configuration Setup"
-    
+    log_marker config start
+
     cd "$INSTALLROOT"
-    
+
     # Copy config files
-    cp "$INSTALLROOT/run/etc/mangosd.conf.dist" "$INSTALLROOT/run/etc/mangosd.conf"
-    cp "$INSTALLROOT/run/etc/realmd.conf.dist" "$INSTALLROOT/run/etc/realmd.conf"
+    cp "$INSTALLROOT/run/etc/mangosd.conf.dist" "$INSTALLROOT/run/etc/mangosd.conf" || {
+        log_marker config error "msg=Build artifacts are missing (mangosd.conf.dist)" "hint=Re-run the installer so the build phase completes first"
+        return 1
+    }
+    cp "$INSTALLROOT/run/etc/realmd.conf.dist" "$INSTALLROOT/run/etc/realmd.conf" || {
+        log_marker config error "msg=Build artifacts are missing (realmd.conf.dist)" "hint=Re-run the installer so the build phase completes first"
+        return 1
+    }
     
     log_info "Configuring realmd.conf..."
 
@@ -1065,7 +1127,8 @@ EOF
     else
         log_info "Provisioning target excludes VMANGOS Manager; bundled manager setup skipped."
     fi
-    
+    log_marker config "done"
+
     set_checkpoint "CONFIG_DONE"
 }
 
@@ -1088,9 +1151,10 @@ ensure_realmlist_entry() {
 
 phase_data_extraction() {
     log_section "PHASE: Data Extraction from Client Data"
-    
+    log_marker extraction start
+
     cd "$INSTALLROOT"
-    
+
     # The server cannot boot without DBC files and base maps, so do NOT
     # checkpoint DATA_DONE here — stop and tell the user how to resume.
     if [ -z "$CLIENT_DATA" ] || [ ! -d "$CLIENT_DATA" ]; then
@@ -1107,6 +1171,7 @@ phase_data_extraction() {
         log_info ""
         log_info "To extract manually instead, place the client Data folder and run:"
         log_info "  sudo $INSTALLROOT/run/bin/Extractors/mapextractor --silent -i <client_root_with_Data>"
+        log_marker extraction error "msg=No client data found" "hint=Provide a WoW 1.12.1 (build 5875) client Data folder and set VMANGOS_CLIENT_DATA, then re-run the installer"
         return 1
     fi
 
@@ -1166,6 +1231,7 @@ phase_data_extraction() {
 
         if [ "$MAPEXTRACT_RC" -eq 0 ] && [ -n "$(ls -A "$INSTALLROOT/dbc" 2>/dev/null)" ] && [ -n "$(ls -A "$INSTALLROOT/maps" 2>/dev/null)" ]; then
             log_info "DBC and map extraction completed successfully"
+            log_marker extraction progress "percent=10" "step=Extract DBC and maps"
         else
             log_error "Map extraction failed (exit status $MAPEXTRACT_RC or missing dbc/maps output)"
             EXTRACTION_FAILED=1
@@ -1194,6 +1260,7 @@ phase_data_extraction() {
         sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmapextractor --silent -d '$CLIENT_DATA_EXTRACT_ROOT'" 2>&1 | tee -a "$INSTALL_LOG"
         if [ "${PIPESTATUS[0]}" -eq 0 ] && [ -n "$(ls -A "$INSTALLROOT/Buildings" 2>/dev/null)" ]; then
             log_info "VMap extraction completed"
+            log_marker extraction progress "percent=25" "step=Extract vmaps"
         else
             log_warn "VMap extractor failed or produced no Buildings output"
             VMAPS_FAILED=1
@@ -1223,6 +1290,7 @@ phase_data_extraction() {
         sudo -u "$MANGOSOSUSER" bash -c "cd '$INSTALLROOT' && ./vmap_assembler --silent '$INSTALLROOT/Buildings' '$INSTALLROOT/vmaps'" 2>&1 | tee -a "$INSTALL_LOG"
         if [ "${PIPESTATUS[0]}" -eq 0 ] && [ -n "$(ls -A "$INSTALLROOT/vmaps" 2>/dev/null)" ]; then
             log_info "VMap assembly completed"
+            log_marker extraction progress "percent=40" "step=Assemble vmaps"
         else
             log_warn "VMap assembler had issues - server will run without vmaps"
             VMAPS_FAILED=1
@@ -1284,6 +1352,7 @@ phase_data_extraction() {
         log_info "====================================================================="
         if [ "$MOVEMAP_RC" -eq 0 ] && [ -n "$(ls -A "$INSTALLROOT/mmaps" 2>/dev/null)" ]; then
             log_info "Movement map generation completed at $(date '+%H:%M:%S')"
+            log_marker extraction progress "percent=90" "step=Generate movement maps"
         else
             log_warn "MoveMapGen exited with status $MOVEMAP_RC at $(date '+%H:%M:%S')"
             log_warn "Server will run without mmaps (NPC pathfinding disabled)"
@@ -1316,6 +1385,7 @@ phase_data_extraction() {
         log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/vmap_assembler --silent buildings vmaps"
         log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/MoveMapGenerator --silent"
         log_error ""
+        log_marker extraction error "msg=Data extraction failed" "hint=Verify the client data is WoW 1.12.1 (build 5875) and complete, then re-run the installer to resume from this phase"
         return 1
     else
         if [ $VMAPS_FAILED -eq 1 ] || [ $MMAPS_FAILED -eq 1 ]; then
@@ -1357,7 +1427,8 @@ phase_data_extraction() {
         chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT/5875" 2>/dev/null || true
         log_info "Versioned directory structure created."
     fi
-    
+    log_marker extraction "done"
+
     set_checkpoint "DATA_DONE"
 }
 
@@ -1386,6 +1457,7 @@ resolve_world_db_urls() {
 
 phase_database_import() {
     log_section "PHASE: Database Import"
+    log_marker db-import start
 
     cd "$INSTALLROOT"
 
@@ -1417,23 +1489,39 @@ phase_database_import() {
                     # Import in correct order: logon -> characters -> logs -> mangos (world)
                     if [ -f "mysql-dump/logon.sql" ]; then
                         log_info "Importing auth database (logon.sql)..."
-                        mysql "$AUTHDB" < "mysql-dump/logon.sql"
+                        mysql "$AUTHDB" < "mysql-dump/logon.sql" || {
+                            log_marker db-import error "msg=Failed to import the auth database" "hint=Check the MariaDB log for the failing statement, then re-run the installer"
+                            return 1
+                        }
+                        log_marker db-import progress "percent=20" "step=Import auth database"
                     fi
                     
                     if [ -f "mysql-dump/characters.sql" ]; then
                         log_info "Importing characters database..."
-                        mysql "$CHARACTERDB" < "mysql-dump/characters.sql"
+                        mysql "$CHARACTERDB" < "mysql-dump/characters.sql" || {
+                            log_marker db-import error "msg=Failed to import the characters database" "hint=Check the MariaDB log for the failing statement, then re-run the installer"
+                            return 1
+                        }
+                        log_marker db-import progress "percent=40" "step=Import characters database"
                     fi
                     
                     if [ -f "mysql-dump/logs.sql" ]; then
                         log_info "Importing logs database..."
-                        mysql "$LOGSDB" < "mysql-dump/logs.sql"
+                        mysql "$LOGSDB" < "mysql-dump/logs.sql" || {
+                            log_marker db-import error "msg=Failed to import the logs database" "hint=Check the MariaDB log for the failing statement, then re-run the installer"
+                            return 1
+                        }
+                        log_marker db-import progress "percent=60" "step=Import logs database"
                     fi
                     
                     if [ -f "mysql-dump/mangos.sql" ]; then
                         log_info "Importing world database (this may take a while)..."
-                        mysql "$WORLDDB" < "mysql-dump/mangos.sql"
+                        mysql "$WORLDDB" < "mysql-dump/mangos.sql" || {
+                            log_marker db-import error "msg=Failed to import the world database" "hint=Check the MariaDB log for the failing statement, then re-run the installer"
+                            return 1
+                        }
                         log_info "World database imported successfully"
+                        log_marker db-import progress "percent=80" "step=Import world database"
                     fi
                     
                     WORLD_DB_DOWNLOADED=true
@@ -1445,7 +1533,10 @@ phase_database_import() {
                     WORLD_SQL=$(find . -name "*.sql" -type f | grep -E "(world|mangos)" | head -n1)
                     if [ -n "$WORLD_SQL" ]; then
                         log_info "Importing world database from $WORLD_SQL (this may take a while)..."
-                        mysql "$WORLDDB" < "$WORLD_SQL"
+                        mysql "$WORLDDB" < "$WORLD_SQL" || {
+                            log_marker db-import error "msg=Failed to import the world database" "hint=Check the MariaDB log for the failing statement, then re-run the installer"
+                            return 1
+                        }
                         log_info "World database imported successfully"
                         WORLD_DB_DOWNLOADED=true
                     else
@@ -1511,14 +1602,19 @@ phase_database_import() {
         fi
     fi
 
-    ensure_realmlist_entry
-    
+    ensure_realmlist_entry || {
+        log_marker db-import error "msg=Failed to seed the realmlist" "hint=Check that the auth database exists and the MariaDB log for the failing statement"
+        return 1
+    }
+    log_marker db-import "done"
+
     set_checkpoint "DB_IMPORT_DONE"
 }
 
 phase_service_setup() {
     log_section "PHASE: Service Setup"
-    
+    log_marker services start
+
     # Create systemd services
     cat > /etc/systemd/system/auth.service << EOF
 [Unit]
@@ -1569,11 +1665,17 @@ EOF
     
     # Start services
     log_info "Starting auth service..."
-    systemctl start auth.service
+    systemctl start auth.service || {
+        log_marker services error "msg=Failed to start the auth service" "hint=Check the unit with: journalctl -u auth -n 50, then re-run the installer"
+        return 1
+    }
     sleep 3
-    
+
     log_info "Starting world service (this may take 30-60 seconds to fully load)..."
-    systemctl start world.service
+    systemctl start world.service || {
+        log_marker services error "msg=Failed to start the world service" "hint=Check the unit with: journalctl -u world -n 50, then re-run the installer"
+        return 1
+    }
     sleep 15
     
     # Verify services are running
@@ -1607,6 +1709,7 @@ EOF
 
     if [ "$AUTH_STATUS" != "active" ] || [ "$WORLD_STATUS" != "active" ]; then
         log_error "Service verification failed - not marking installation complete"
+        log_marker services error "msg=Service verification failed" "hint=Check journalctl -u auth and journalctl -u world for the startup failure, then re-run the installer"
         return 1
     fi
 
@@ -1616,7 +1719,8 @@ EOF
             "$INSTALLROOT/logs/mangosd/gm_critical.log" \
             2>/dev/null || true
     fi
-    
+    log_marker services "done"
+
     set_checkpoint "SERVICES_DONE"
 }
 
@@ -1654,6 +1758,7 @@ main() {
     if [ "$CHECKPOINT" = "BUILD_DONE" ] && [ ! -f "$INSTALLROOT/run/etc/mangosd.conf.dist" ]; then
         log_warn "BUILD_DONE checkpoint found but build artifacts are missing"
         log_warn "Resetting to SOURCE_DONE so the build phase runs again"
+        log_marker build progress "percent=0" "step=Self-heal: build artifacts missing, the build phase will run again"
         CHECKPOINT="SOURCE_DONE"
         set_checkpoint "SOURCE_DONE"
     fi
@@ -1711,6 +1816,7 @@ main() {
     fi
 
     if [ "$CHECKPOINT" = "SERVICES_DONE" ]; then
+        log_marker install "done" "server_ip=${SERVERIP:-unknown}" auth_port=3724 world_port=8085
         log_section "Installation Complete!"
         log_info ""
         log_info "========================================"
