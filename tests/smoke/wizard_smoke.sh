@@ -398,8 +398,14 @@ phase_tui_attach() {
     # Give the journal tail a moment to render the checklist/log.
     sleep 15
     capture_screen attach 07-reattach-viewer
-    if ! grep -qF "Prerequisites" "$EVIDENCE_DIR/07-reattach-viewer.txt"; then
+    # Progress rendering is either the marker checklist (a phase label) or,
+    # when the last 200 journal lines predate the newest marker (a long
+    # marker-less apt stretch), the checkpoint fallback line — both honest.
+    if ! grep -qE "Prerequisites|Install starting" "$EVIDENCE_DIR/07-reattach-viewer.txt"; then
         tui_dump_and_fail attach "the attached viewer shows no install progress"
+    fi
+    if grep -q "Waiting for the install to emit progress" "$EVIDENCE_DIR/07-reattach-viewer.txt"; then
+        tui_dump_and_fail attach "the attached viewer's log pane stayed empty"
     fi
 
     log "detaching the viewer (q)"
