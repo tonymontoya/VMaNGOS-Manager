@@ -1159,7 +1159,13 @@ def create_wizard_app(
         def _start_journal(self) -> None:
             # journalctl is resolved from PATH so tests can stub it. tail_lines
             # is 0 after a retry so the prior failure's markers are not replayed.
-            command = ["journalctl", "-u", INSTALLER_UNIT_NAME, "-n", str(self.tail_lines), "-f"]
+            # -o cat: message-only output — parse_marker matches markers at the
+            # START of a line, and the default journal format prefixes every
+            # line with a timestamp/host/proc header that would hide them.
+            command = [
+                "journalctl", "-u", INSTALLER_UNIT_NAME,
+                "-n", str(self.tail_lines), "-f", "-o", "cat",
+            ]
             try:
                 self._proc = subprocess.Popen(
                     command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True

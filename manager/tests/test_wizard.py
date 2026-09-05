@@ -1110,6 +1110,35 @@ def test_viewer_detach_never_stops_the_unit(tmp_path):
     assert calls == []
 
 
+def test_viewer_journal_tail_requests_message_only_output(tmp_path):
+    # The journal tail must run with -o cat: parse_marker matches markers at
+    # the START of a line, and journalctl's default format prefixes every line
+    # with a timestamp/host/proc header — without -o cat the viewer folds zero
+    # markers against a real journal and falls back forever (found by the
+    # #104 TUI smoke). The fake journalctl emits message-only lines, exactly
+    # what -o cat produces, so the rendered progress proves the folding.
+    lines = ["@@VMANGOS v1 phase=build event=progress percent=40 step=\"Compiling\""]
+    bin_dir = make_fake_journalctl(tmp_path, lines, delay=0.2)
+    app, _ = build_wizard(tmp_path, attach=True)
+
+    with with_path_prepended(bin_dir):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                await wait_for(lambda: "40%" in screen_text(app), message="progress shown")
+
+        asyncio.run(scenario())
+
+    args = journalctl_args_log(tmp_path)
+    assert args, "the viewer should have started a journal tail"
+    tokens = args[0].split()
+    assert "-o" in tokens and tokens[tokens.index("-o") + 1] == "cat", (
+        f"journal tail must use -o cat (message-only output), got: {args[0]!r}"
+    )
+
+
 def test_viewer_marker_starvation_falls_back_to_checkpoint(tmp_path):
     # A script that emits no markers: the viewer polls the checkpoint file and
     # shows the raw log pane, and never crashes.
