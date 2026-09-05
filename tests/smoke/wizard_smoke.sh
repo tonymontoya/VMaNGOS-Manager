@@ -292,6 +292,8 @@ phase_tui_launch() {
     if unit_running; then
         fail "tui-launch precondition: an install unit is already running"
     fi
+    # A previous attempt may have left a stale wizard session behind.
+    tux kill-session -t wizard 2>/dev/null || true
     docker_exec "rm -f /root/tui-launch.exit /root/tui-attach.exit" >/dev/null 2>&1 || true
     mkdir -p "$EVIDENCE_DIR"
 
@@ -372,6 +374,9 @@ phase_tui_launch() {
 # running (detaching never stops the install).
 phase_tui_attach() {
     require_unit_running "tui-attach"
+    # A previous attempt may have left a stale attach session behind.
+    tux kill-session -t attach 2>/dev/null || true
+    docker_exec "rm -f /root/tui-attach.exit" >/dev/null 2>&1 || true
     log "re-running 'vmangos-manager install' in a pty (attach path)"
     tui_start attach /root/tui-attach.exit
 
