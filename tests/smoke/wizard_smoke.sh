@@ -170,7 +170,8 @@ checkpoint_rank() {
 
 # Poll until the checkpoint exists and is past the given chain position.
 wait_checkpoint_past() {
-    local rank="$1" timeout="$2" deadline=$(( $(date +%s) + timeout )) cp
+    local rank="$1" timeout="$2"
+    local deadline=$(( $(date +%s) + timeout )) cp
     while (( $(date +%s) < deadline )); do
         cp="$(checkpoint_read)"
         if [[ -n "$cp" ]] && (( $(checkpoint_rank "$cp") > rank )); then
