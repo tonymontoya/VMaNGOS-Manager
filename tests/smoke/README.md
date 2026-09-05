@@ -75,8 +75,9 @@ inside a detached tmux session (a real pty with a fixed 140x60 size), feeds
 keystrokes with `tmux send-keys`, and asserts on the rendered screen text
 (`tmux capture-pane` gives plain text, no ANSI noise). The keystroke script:
 Enter (gate continue) → Tab, type the client-data path, Tab x11, Enter
-(review) → Tab, Enter (confirm & start) → Enter (close). Every screen is
-captured to `/tmp/vmangos-smoke-evidence/` **on the host** (override with
+(review) → Tab, Enter (confirm & start) → Enter (follow the install — the
+viewer attaches) → q (detach). Every screen is captured to
+`/tmp/vmangos-smoke-evidence/` **on the host** (override with
 `SMOKE_EVIDENCE_DIR`) and printed into the smoke log. The wizard itself
 writes the secrets file and starts the unit — the smoke never pre-writes
 secrets or calls the runner directly on the launch path.
@@ -85,7 +86,7 @@ secrets or calls the runner directly on the launch path.
 
 | Scenario | Assertion |
 |---|---|
-| `tui-launch` | Gate → form → review → launch driven in a pty; the TUI writes the secrets (right values, mode 600) and starts the unit (`ActiveState=active`); the app exits 0; screen evidence captured. |
+| `tui-launch` | Gate → form → review → launch → follow (viewer attaches) → q (detach) driven in a pty; the TUI writes the secrets (right values, mode 600) and starts the unit (`ActiveState=active`); the app exits 0 after detaching; screen evidence captured. |
 | `tui-attach` | Re-running `install` while the unit runs attaches the live viewer (checklist renders); `q` detaches, the app exits 0, and the unit **keeps running**. |
 | `kill-reattach` | Kill the viewer's journal session; the unit **keeps running**; re-attach works. |
 | `failure-retry` | Stop the unit after the first phase checkpoint; the runner's retry path (`installer_unit_stop` + `installer_unit_start` — what the FailureScreen's Retry runs) restarts it. Resume is **verified three ways**: the retried invocation logs `Resuming from checkpoint: <captured>`, no completed phase re-ran (prerequisites never starts again), and the checkpoint then advances past the captured one. |

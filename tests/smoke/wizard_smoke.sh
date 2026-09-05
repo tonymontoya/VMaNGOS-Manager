@@ -21,7 +21,8 @@
 #   setup           create the container + wait for systemd
 #   manager         install the manager + bootstrap the venv
 #   tui-launch      drive `vmangos-manager install` in a tmux pty: gate ->
-#                   form (typed answers) -> review -> confirm; the TUI writes
+#                   form (typed answers) -> review -> confirm -> follow the
+#                   install (viewer attaches) -> q detaches; the TUI writes
 #                   the secrets and starts the unit (screen evidence kept)
 #   tui-attach      re-run `install` while the unit runs: the viewer attaches;
 #                   detach with q; the unit keeps running
@@ -340,10 +341,19 @@ phase_tui_launch() {
         || tui_dump_and_fail wizard "the launch screen never reported the unit"
     capture_screen wizard 05-launched
 
-    log "closing the wizard (Close)"
+    # The newly mounted "Follow the install" button takes focus: Enter
+    # follows straight into the live viewer (the launch-flow attach), and q
+    # detaches — both the paths a real user takes from this screen.
+    log "launch: Follow the install (viewer attaches)"
     tux send-keys -t wizard Enter
+    wait_pane_text wizard "Install Progress" \
+        || tui_dump_and_fail wizard "the viewer never attached after Follow"
+    sleep 10
+    capture_screen wizard 06-follow-viewer
+    log "detaching the viewer (q)"
+    tux send-keys -t wizard q
     wait_session_end wizard \
-        || tui_dump_and_fail wizard "the wizard TUI did not exit after Close"
+        || tui_dump_and_fail wizard "the wizard TUI did not exit after detach"
     local exit_code
     exit_code="$(docker_exec "cat /root/tui-launch.exit 2>/dev/null" || echo x)"
     [[ "$exit_code" == "0" ]] \
@@ -386,8 +396,8 @@ phase_tui_attach() {
         || tui_dump_and_fail attach "the viewer never attached"
     # Give the journal tail a moment to render the checklist/log.
     sleep 15
-    capture_screen attach 06-viewer
-    if ! grep -qF "Prerequisites" "$EVIDENCE_DIR/06-viewer.txt"; then
+    capture_screen attach 07-reattach-viewer
+    if ! grep -qF "Prerequisites" "$EVIDENCE_DIR/07-reattach-viewer.txt"; then
         tui_dump_and_fail attach "the attached viewer shows no install progress"
     fi
 
