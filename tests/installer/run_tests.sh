@@ -300,7 +300,10 @@ EOF
                 printf "SYMLINK=0\n"
             fi
 
-            export SUDO_DENY="'"$tmp_dir"'/client-src/dbc.MPQ"
+            # Deny the path the extractor actually reads (via Data/): the
+            # client data is then unreadable from the extractor point of
+            # view, so the staged copy under $INSTALLROOT must be used.
+            export SUDO_DENY="'"$tmp_dir"'/client-src/Data/dbc.MPQ"
             mkdir -p "$INSTALLROOT/client-data"
             touch "$INSTALLROOT/client-data/dbc.MPQ"
             prepare_extraction_root
