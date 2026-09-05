@@ -694,6 +694,96 @@ ensure_service_account() {
     useradd --system --home-dir "$INSTALLROOT" --no-create-home --shell /usr/sbin/nologin "$MANGOSOSUSER"
 }
 
+# ---------------------------------------------------------------------------
+# Database server provisioning
+#
+# The installer assumes a fresh host with no SQL server and installs one
+# (mysql-server, which also provides the mysql client). A server that is
+# already running is adopted only when the installer can actually administer
+# it (root via the local socket) — every later statement in the database
+# phase runs through that exact connection, so adopting a server it cannot
+# reach would fail later at grant time with a misleading error. Each failure
+# path emits its own error marker (the viewer's Retry screen shows it).
+# ---------------------------------------------------------------------------
+
+# A usable server = the mysql client can connect as a privileged user (root
+# via the local socket). This is exactly what phase_database_setup needs.
+db_server_reachable() {
+    command -v mysql >/dev/null 2>&1 || return 1
+    mysql -e "SELECT 1" >/dev/null 2>&1
+}
+
+# A DB server is up at all, independent of whether the mysql client is present.
+db_server_running() {
+    systemctl is-active --quiet mysql 2>/dev/null && return 0
+    systemctl is-active --quiet mariadb 2>/dev/null && return 0
+    return 1
+}
+
+# Wait (bounded) until the server accepts privileged connections.
+wait_for_db_server() {
+    local deadline=$(( $(date +%s) + 90 ))
+    while (( $(date +%s) < deadline )); do
+        if db_server_reachable; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+ensure_database_server() {
+    # 1. Already running and reachable → use it.
+    if db_server_reachable; then
+        log_info "Using existing MySQL/MariaDB server (already reachable)"
+        return 0
+    fi
+
+    # 2. A server is already running → adopt it, without installing a second,
+    #    conflicting one. Install the client when it is missing; then require
+    #    reachability — refusing an unusable server here names the exact
+    #    broken thing instead of failing later inside the SQL statements.
+    if db_server_running; then
+        if ! command -v mysql >/dev/null 2>&1; then
+            log_info "A database server is running but no mysql client is present; installing mysql-client"
+            DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none \
+                apt-get install -y mysql-client || {
+                log_marker database error "msg=Failed to install the mysql client for the running database server" "hint=Check the apt output in the install log, then re-run the installer"
+                return 1
+            }
+        fi
+        if db_server_reachable; then
+            log_info "Using existing MySQL/MariaDB server (client installed)"
+            return 0
+        fi
+        log_error "A database server is running but this installer cannot administer it"
+        log_error "The database phase needs this to work as root: mysql -e \"SELECT 1\""
+        log_marker database error "msg=A database server is running but root cannot connect to it" "hint=Fix root access to the running MySQL/MariaDB server (mysql -e \"SELECT 1\" must work as root), or stop that server so this installer can provision its own, then re-run the installer"
+        return 1
+    fi
+
+    # 3. No server running → install one (server + client), then start it.
+    log_info "No MySQL/MariaDB server detected; installing mysql-server"
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none \
+        apt-get install -y mysql-server || {
+        log_marker database error "msg=Failed to install mysql-server" "hint=Check the apt output in the install log for the failing package, then re-run the installer"
+        return 1
+    }
+    systemctl enable mysql >/dev/null 2>&1 || true
+    systemctl start mysql || {
+        log_error "Failed to start the mysql server after install"
+        log_marker database error "msg=The installed mysql server failed to start" "hint=Check journalctl -u mysql for the startup error, then re-run the installer"
+        return 1
+    }
+    if wait_for_db_server; then
+        log_info "mysql-server installed, started, and reachable"
+        return 0
+    fi
+    log_error "mysql-server installed and started but did not become reachable"
+    log_marker database error "msg=The installed mysql server never became reachable" "hint=Check journalctl -u mysql and the install log, then re-run the installer"
+    return 1
+}
+
 check_client_data() {
     if [ -z "$CLIENT_DATA" ]; then
         # Try to auto-detect
@@ -743,63 +833,142 @@ check_client_data() {
     prepare_extraction_root
 }
 
+# True when $MANGOSOSUSER can read the given path (the extractors run as the
+# service user, so every client-data probe goes through sudo).
+data_readable() {
+    sudo -u "$MANGOSOSUSER" test -r "$1" 2>/dev/null
+}
+
 # Derive CLIENT_DATA_EXTRACT_ROOT from CLIENT_DATA so the extractors can read
 # the MPQs as $MANGOSOSUSER. Called from check_client_data on fresh installs
 # and on demand from phase_data_extraction, because a resumed install re-enters
 # the extraction phase without re-running the earlier phases.
+#
+# The mapextractor resolves every archive through a "Data/" entry: it opens
+# "<root>/Data/<file>.MPQ". A bare top-level MPQ directory therefore needs a
+# "Data -> ." self-symlink — the layout a working install (e.g. the bds realm)
+# ships. This function guarantees that layout is readable by $MANGOSOSUSER,
+# cheapest first:
+#   1. CLIENT_DATA already exposes Data/ and mangos can read through it.
+#   2. CLIENT_DATA is writable: add the "Data -> ." self-symlink in place.
+#   3. CLIENT_DATA is read-only (e.g. a :ro mount): stage a symlink farm in
+#      $INSTALLROOT/client-data instead of copying several GB.
+#   4. mangos cannot read CLIENT_DATA at all: reuse a valid staged root, or
+#      full copy (last resort).
 prepare_extraction_root() {
-    # The extractor expects {path}/Data/ structure
-    # If user provided the Data folder directly, create a Data/Data symlink
-    CLIENT_DATA_EXTRACT_ROOT="$CLIENT_DATA"
-    if [ -f "$CLIENT_DATA/dbc.MPQ" ] && [ -f "$CLIENT_DATA/terrain.MPQ" ]; then
-        # User provided the Data folder directly
-        # Create a symlink Data/Data pointing to itself for extractor compatibility
-        if [ ! -e "$CLIENT_DATA/Data" ]; then
-            log_info "Creating Data/Data symlink for extractor compatibility..."
-            ln -sf . "$CLIENT_DATA/Data" 2>/dev/null || true
-        fi
-    fi
-
-    # Check if mangos user can read the client data
-    # Extraction runs as mangos user for security, so we need readable permissions
-    if sudo -u "$MANGOSOSUSER" test -r "$CLIENT_DATA_EXTRACT_ROOT/dbc.MPQ" 2>/dev/null; then
+    # 1. Data/ already resolvable and readable by mangos.
+    if data_readable "$CLIENT_DATA/Data/dbc.MPQ"; then
+        CLIENT_DATA_EXTRACT_ROOT="$CLIENT_DATA"
+        log_info "Using client data (Data/ resolvable): $CLIENT_DATA"
         return 0
     fi
 
-    # Reuse a copy staged by an earlier (interrupted) run instead of
-    # re-copying several GB of MPQs on every resume.
-    if [ -f "$INSTALLROOT/client-data/dbc.MPQ" ] && \
-        sudo -u "$MANGOSOSUSER" test -r "$INSTALLROOT/client-data/dbc.MPQ" 2>/dev/null; then
+    if data_readable "$CLIENT_DATA/dbc.MPQ"; then
+        # MPQs at the top level. Prefer adding the self-symlink in place...
+        if [ -w "$CLIENT_DATA" ] && [ ! -e "$CLIENT_DATA/Data" ]; then
+            log_info "Creating Data/ self-symlink for extractor compatibility..."
+            ln -sfn . "$CLIENT_DATA/Data" 2>/dev/null || true
+        fi
+        if data_readable "$CLIENT_DATA/Data/dbc.MPQ"; then
+            CLIENT_DATA_EXTRACT_ROOT="$CLIENT_DATA"
+            log_info "Using client data (Data/ symlinked): $CLIENT_DATA"
+            return 0
+        fi
+        # ...but a read-only mount cannot hold the symlink: stage a farm.
+        if stage_client_data_symlink_farm; then
+            return 0
+        fi
+    fi
+
+    # 4a. The client data is unreadable by mangos, but a root staged by an
+    #     earlier run is still valid (repaired in place when it only lacks
+    #     its Data/ entry) — reuse it instead of re-copying.
+    if repair_staged_root; then
         CLIENT_DATA_EXTRACT_ROOT="$INSTALLROOT/client-data"
         log_info "Using previously staged client data: $CLIENT_DATA_EXTRACT_ROOT"
         return 0
     fi
 
+    # 4b. Last resort: copy the client data.
     log_warn "Client data is not accessible by $MANGOSOSUSER user"
     log_info "Copying client data to $INSTALLROOT/client-data for extraction..."
 
-    # Create temp location and copy data
     mkdir -p "$INSTALLROOT/client-data"
-
-    # Copy all MPQ files and required directories
-    cp -r "$CLIENT_DATA_EXTRACT_ROOT"/*.MPQ "$INSTALLROOT/client-data/" 2>/dev/null || true
-    cp -r "$CLIENT_DATA_EXTRACT_ROOT"/*.mpq "$INSTALLROOT/client-data/" 2>/dev/null || true
-
-    # Copy Interface directory if it exists (contains Cinematics, etc)
-    if [ -d "$CLIENT_DATA_EXTRACT_ROOT/Interface" ]; then
-        cp -r "$CLIENT_DATA_EXTRACT_ROOT/Interface" "$INSTALLROOT/client-data/" 2>/dev/null || true
+    cp -r "$CLIENT_DATA"/*.MPQ "$INSTALLROOT/client-data/" 2>/dev/null || true
+    cp -r "$CLIENT_DATA"/*.mpq "$INSTALLROOT/client-data/" 2>/dev/null || true
+    if [ -d "$CLIENT_DATA/Interface" ]; then
+        cp -r "$CLIENT_DATA/Interface" "$INSTALLROOT/client-data/" 2>/dev/null || true
     fi
+    chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT/client-data" 2>/dev/null || true
+    ln -sfn . "$INSTALLROOT/client-data/Data" 2>/dev/null || true
 
-    # Set ownership for mangos user
-    chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT/client-data"
-
-    # Create the Data/Data symlink in the copy
-    if [ ! -e "$INSTALLROOT/client-data/Data" ]; then
-        ln -sf . "$INSTALLROOT/client-data/Data" 2>/dev/null || true
+    if ! data_readable "$INSTALLROOT/client-data/Data/dbc.MPQ"; then
+        log_error "Could not stage readable client data for $MANGOSOSUSER under $INSTALLROOT/client-data"
+        log_marker extraction error "msg=Client data could not be staged for extraction" "hint=Point VMANGOS_CLIENT_DATA at a readable WoW 1.12.1 (build 5875) Data folder containing dbc.MPQ and terrain.MPQ, then re-run the installer"
+        return 1
     fi
 
     CLIENT_DATA_EXTRACT_ROOT="$INSTALLROOT/client-data"
     log_info "Client data copied to: $CLIENT_DATA_EXTRACT_ROOT"
+}
+
+# True when the staging root $INSTALLROOT/client-data already exposes
+# Data/dbc.MPQ to the service user — a valid root an earlier (interrupted)
+# run left behind. Pure check: repairs belong to repair_staged_root.
+staged_root_is_usable() {
+    local STAGED="$INSTALLROOT/client-data"
+    data_readable "$STAGED/Data/dbc.MPQ"
+}
+
+# A staged root that is only missing its Data/ entry (e.g. an older full copy)
+# gets the self-symlink added in place instead of being re-staged.
+repair_staged_root() {
+    local STAGED="$INSTALLROOT/client-data"
+    if [ -f "$STAGED/dbc.MPQ" ] && [ -w "$STAGED" ]; then
+        ln -sfn . "$STAGED/Data" 2>/dev/null || true
+    fi
+    staged_root_is_usable
+}
+
+# Stage a writable "Data/"-resolvable root over a client data directory that
+# cannot hold the self-symlink itself (e.g. a read-only mount): per-MPQ
+# symlinks plus a "Data -> ." entry, under $INSTALLROOT/client-data. Reuses
+# a staging root from an earlier (interrupted) run when it is already valid,
+# instead of re-staging on every resume.
+stage_client_data_symlink_farm() {
+    local STAGED="$INSTALLROOT/client-data"
+
+    if staged_root_is_usable; then
+        CLIENT_DATA_EXTRACT_ROOT="$STAGED"
+        log_info "Using previously staged client data: $STAGED"
+        return 0
+    fi
+
+    log_warn "Client data is read-only and has no Data/ entry; staging a symlink farm at $STAGED"
+    rm -rf "$STAGED"
+    mkdir -p "$STAGED"
+
+    local f base
+    for f in "$CLIENT_DATA"/*.MPQ "$CLIENT_DATA"/*.mpq; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        ln -sfn "$f" "$STAGED/$base"
+    done
+    # Interface/ (Cinematics, etc.) is read via the same Data/ path.
+    if [ -d "$CLIENT_DATA/Interface" ]; then
+        ln -sfn "$CLIENT_DATA/Interface" "$STAGED/Interface"
+    fi
+    # Satisfy the extractor's "Data/" layout with a self-symlink.
+    ln -sfn . "$STAGED/Data"
+
+    if ! data_readable "$STAGED/Data/dbc.MPQ"; then
+        log_error "Staged client data is not readable by $MANGOSOSUSER: $STAGED/Data/dbc.MPQ"
+        return 1
+    fi
+
+    CLIENT_DATA_EXTRACT_ROOT="$STAGED"
+    log_info "Client data staged as symlinks: $STAGED"
+    return 0
 }
 
 # =============================================================================
@@ -816,10 +985,16 @@ phase_prerequisites() {
         log_marker prerequisites error "msg=apt-get update failed" "hint=Check network access and the apt mirror configuration, then re-run the installer"
         return 1
     }
+    # Note: install default-libmysqlclient-dev (the virtual package that
+    # resolves to the system MySQL client library) and NOT libmariadb-dev —
+    # the two conflict in apt (libmariadb-dev Conflicts libmysqlclient-dev,
+    # which default-libmysqlclient-dev Depends on), so requesting both makes
+    # the whole install fail to resolve. The MangOS CMake FindMySQL module
+    # accepts mysqlclient (provided here) as well as libmariadb.
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none \
-        apt-get install -y build-essential cmake git libmariadb-dev default-libmysqlclient-dev libssl-dev \
+        apt-get install -y build-essential cmake git default-libmysqlclient-dev libssl-dev \
             libbz2-dev libreadline-dev libncurses-dev libboost-all-dev \
-            p7zip-full python3 python3-pip python3-venv sysstat wget zlib1g-dev || {
+            p7zip-full python3 python3-pip python3-venv sysstat unzip wget zlib1g-dev || {
         log_marker prerequisites error "msg=Failed to install build prerequisites" "hint=Check the apt output in the install log for the failing package"
         return 1
     }
@@ -836,6 +1011,14 @@ phase_prerequisites() {
 phase_database_setup() {
     log_section "PHASE: Database Setup"
     log_marker database start
+
+    # Ensure a usable MySQL/MariaDB server is available. On a fresh host this
+    # installs mysql-server (server + client) and starts it; a server that is
+    # already running is adopted only when it is reachable as root. Each
+    # failure path inside emits its own specific error marker (the viewer's
+    # Retry screen shows it).
+    log_marker database progress "step=Ensuring database server is available"
+    ensure_database_server || return 1
 
     # Create databases
     mysql -e "CREATE DATABASE IF NOT EXISTS \`$WORLDDB\`;" || true
