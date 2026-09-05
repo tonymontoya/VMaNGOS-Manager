@@ -181,7 +181,10 @@ without re-downloading.
 * **PATH-installed manager needs the setup script beside the install root
   (arranged, this branch):** the wizard resolves `vmangos_setup.sh` one
   directory above the manager prefix (the layout of a repo checkout), so a
-  manager installed to `/opt/mangos/manager` and driven via PATH needs
-  `/opt/mangos/vmangos_setup.sh` to exist. The smoke links the mounted
-  repo's script there; a fresh host running from its checkout already has
-  this layout.
+  manager installed to a prefix and driven via PATH needs
+  `<parent-of-prefix>/vmangos_setup.sh` to exist. The smoke pre-installs the
+  manager to `/opt/vmangos-manager` — deliberately **outside** the install
+  root, because the gate treats an existing `/opt/mangos` as an existing
+  installation — and links the mounted repo's script to
+  `/opt/vmangos_setup.sh`; a fresh host running from its checkout already
+  has this layout.

@@ -52,13 +52,15 @@ REPO_ROOT="$(cd "$SMOKE_DIR/../.." && pwd)"
 CONTAINER_NAME="${SMOKE_CONTAINER_NAME:-vmangos-wizard-smoke}"
 IMAGE_NAME="${SMOKE_IMAGE_NAME:-vmangos-smoke-base}"
 CLIENT_DATA="${SMOKE_CLIENT_DATA:-/home/tony/Data}"
-MANAGER_PREFIX="/opt/mangos/manager"
+# The manager is pre-installed OUTSIDE the install root: the wizard's gate
+# treats an existing $INSTALL_ROOT directory as an existing installation, and
+# the real install later provisions the manager under it itself. The wizard
+# resolves the setup script one directory above the manager prefix (the
+# layout of a repo checkout); the manager phase links it there.
+MANAGER_PREFIX="/opt/vmangos-manager"
 MANAGER_BIN="$MANAGER_PREFIX/bin"
 SECRETS_FILE="/root/.vmangos-secrets/setup.conf"
-# The wizard resolves the setup script one level above the manager prefix
-# (like a repo checkout: <repo>/manager/bin + <repo>/vmangos_setup.sh); the
-# manager phase links it there.
-SETUP_SCRIPT="/opt/mangos/vmangos_setup.sh"
+SETUP_SCRIPT="/opt/vmangos_setup.sh"
 INSTALL_ROOT="/opt/mangos"
 CHECKPOINT_FILE="$INSTALL_ROOT/.install-checkpoints/checkpoint"
 # Where the client data lands inside the container (read-only mount).
@@ -267,7 +269,7 @@ wait_for_systemd() {
 }
 
 phase_manager() {
-    log "installing the manager into $MANAGER_PREFIX"
+    log "installing the manager into $MANAGER_PREFIX (outside the install root)"
     docker exec "$CONTAINER_NAME" bash -c "make -C /src/manager install PREFIX=$MANAGER_PREFIX"
     # The wizard resolves the setup script one directory above the manager
     # prefix (the layout of a repo checkout). Link the mounted repo's script
