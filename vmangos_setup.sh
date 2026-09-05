@@ -1437,6 +1437,15 @@ phase_data_extraction() {
 
     if [ $EXTRACTION_FAILED -eq 0 ] && [ -f ./vmapextractor ]; then
         log_info "Starting vmapextractor..."
+        # An interrupted earlier attempt leaves a partial Buildings dir, and
+        # vmapextractor refuses to run into a polluted directory — which used
+        # to turn the whole resume into a vmap-less, mmap-less install with
+        # only log warnings. Clear it so the step genuinely re-runs (MoveMapGen
+        # resumes tile-by-tile by itself; vmaps have no such mode).
+        if [ -n "$(ls -A "$INSTALLROOT/Buildings" 2>/dev/null)" ]; then
+            log_warn "Clearing partial vmap extraction output from an earlier attempt"
+            rm -rf "$INSTALLROOT/Buildings"
+        fi
         # -d (not -i): vmapextractor's input flag; it expects the MPQ folder itself.
         # --silent: skip its "press enter" prompts.
         # PIPESTATUS: tee would otherwise mask the extractor's exit code.

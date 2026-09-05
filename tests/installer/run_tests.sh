@@ -539,6 +539,102 @@ EOF
     return "$failed"
 }
 
+# An interrupted vmap extraction leaves a partial Buildings dir; the resume
+# must clear it (vmapextractor refuses polluted directories) instead of
+# silently downgrading to a vmap-less install.
+test_extraction_resume_clears_partial_vmaps() {
+    local tmp_dir root client output failed=0
+    tmp_dir="$(mktemp -d)"
+    root="$tmp_dir/root"
+    client="$tmp_dir/client-src"
+    mkdir -p "$tmp_dir/bin" "$client" "$root/run/bin/Extractors" "$root/client-data" "$root/.install-checkpoints" "$root/Buildings"
+
+    cat > "$tmp_dir/bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" ]]; then shift 2; fi
+if [[ "${1:-}" == "test" ]]; then
+    [[ -r "${3:-}" ]] && exit 0
+    exit 1
+fi
+exec "$@"
+EOF
+    cat > "$tmp_dir/bin/id" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$tmp_dir/bin/chown" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/sudo" "$tmp_dir/bin/id" "$tmp_dir/bin/chown"
+
+    touch "$client/dbc.MPQ" "$client/terrain.MPQ" "$root/client-data/dbc.MPQ"
+    # What the killed first attempt left behind.
+    touch "$root/Buildings/partial-from-interrupted-run"
+
+    cat > "$root/run/bin/Extractors/MapExtractor" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p dbc maps
+touch dbc/Map.dbc maps/0004331.map
+exit 0
+EOF
+    cat > "$root/run/bin/Extractors/VMapExtractor" <<EOF
+#!/usr/bin/env bash
+printf 'vmapextractor:%s\n' "\$*" >> '$tmp_dir/capture'
+mkdir -p Buildings
+touch Buildings/fresh-output.wmo
+exit 0
+EOF
+    cat > "$root/run/bin/Extractors/VMapAssembler" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p vmaps
+touch vmaps/000.vmtree
+exit 0
+EOF
+    cat > "$root/run/bin/Extractors/MoveMapGenerator" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p mmaps
+touch mmaps/000.mmap
+exit 0
+EOF
+    chmod +x "$root/run/bin/Extractors/"*
+
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        refresh_runtime_paths
+        CLIENT_DATA="'"$client"'"
+        MANGOSOSUSER="mangos"
+        export SUDO_DENY="'"$client"'/dbc.MPQ"
+
+        phase_data_extraction
+    ' > "$tmp_dir/phase.out" 2>/dev/null
+    output="$(cat "$tmp_dir/phase.out")"
+
+    assert_equals "1" \
+        "$(grep -c 'Clearing partial vmap extraction output' "$tmp_dir/phase.out" || true)" \
+        "a partial Buildings dir from an earlier attempt is cleared with a warning" || failed=1
+    assert_equals "1" \
+        "$(grep -c '^vmapextractor:' "$tmp_dir/capture" 2>/dev/null || true)" \
+        "vmapextractor re-runs on the resume" || failed=1
+    assert_equals "0" \
+        "$(test -e "$root/Buildings/partial-from-interrupted-run" && echo 1 || echo 0)" \
+        "the stale partial Buildings content is gone" || failed=1
+    assert_equals "1" \
+        "$(test -e "$root/Buildings/fresh-output.wmo" && echo 1 || echo 0)" \
+        "the re-run extraction produced fresh output" || failed=1
+    assert_equals "1" \
+        "$(grep -c 'phase=extraction event=done' "$tmp_dir/phase.out" || true)" \
+        "extraction still completes" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
 test_extraction_phase_invocations() {
     local tmp_dir output root client
     tmp_dir="$(mktemp -d)"
@@ -1298,6 +1394,7 @@ main() {
     run_test "Installer: Extraction root" test_extraction_root_preparation
     run_test "Installer: Client data symlink farm" test_client_data_symlink_farm
     run_test "Installer: Database server provisioning" test_database_server_provisioning
+    run_test "Installer: Extraction resume clears partial vmaps" test_extraction_resume_clears_partial_vmaps
     run_test "Installer: Extraction phase" test_extraction_phase_invocations
     run_test "Installer: Extraction failure honesty" test_extraction_failure_honesty
     run_test "Installer: Download retry" test_download_retry_honesty

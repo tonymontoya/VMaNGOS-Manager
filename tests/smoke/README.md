@@ -164,6 +164,32 @@ without re-downloading.
   legacy SQL file (`ERROR 1146 ... Table 'world.migrations' doesn't exist`)
   and failed with a confusing db-import error marker. Added to the package
   list.
+* **Interrupted vmap extraction poisoned the resume (fixed, this branch):**
+  the verified failure-retry exposed it — stopping the unit mid-vmap
+  extraction left a partial `Buildings/` dir, and `vmapextractor` refuses
+  to run into a polluted directory, so the resumed install silently
+  skipped vmaps AND mmaps (log warnings only, no error marker) and still
+  marked `DATA_DONE`: a degraded server posing as a complete one. The
+  extraction step now clears a partial `Buildings/` before re-running
+  (MoveMapGen already resumes tile-by-tile on its own). Covered by a
+  mocked installer test.
+* **Viewer read the journal in the wrong format (fixed, this branch):**
+  the attach phase showed the checkpoint fallback forever — `parse_marker`
+  matches markers at the start of a line, but `journalctl`'s default
+  format prefixes every line with a timestamp/host/proc header, so against
+  a real journal the viewer folded zero markers and would have shown the
+  EndedScreen even on a successful install. The journal tail now runs with
+  `-o cat` (message-only). The stubbed journalctl in the tests emits
+  message-only lines, which is why the pilot tests never saw it.
+* **Wizard secrets file was not shell-safe (fixed, this branch):** the
+  launch screen's first real drive failed with `line 8: a: unbound
+  variable` — generated passwords draw from a charset including `$`, and
+  the file's consumers `source` it, so `$$`/`$a` inside a double-quoted
+  value expanded (or tripped `set -u`). `render_setup_conf` now escapes
+  `\ $ " and backtick; `parse_secrets_file` reverses it. Round-trip tests
+  run hostile values through both the parser and a real `bash -c source`.
+  `auto_install.sh` has the same latent quirk in its writer; it is the
+  deprecated path, so it is noted on #104 rather than changed.
 * **`--collect` + marker-less failure (documented):** because the runner uses
   `systemd-run --collect`, a *failed* unit is unregistered and immediately
   reports `ActiveState=inactive` (not `failed`). The viewer therefore detects
