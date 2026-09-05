@@ -210,6 +210,7 @@ wait_pane_text() { # wait_pane_text <session> <text> [timeout]
 
 # Save the session's current screen as evidence (host side) and show it.
 capture_screen() { # capture_screen <session> <name>
+    local session="$1"
     mkdir -p "$EVIDENCE_DIR"
     tux capture-pane -t "$session" -p 2>/dev/null > "$EVIDENCE_DIR/$2.txt" || true
     log "--- screen evidence: $2 (also at $EVIDENCE_DIR/$2.txt) ---"
