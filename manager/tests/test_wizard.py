@@ -10,6 +10,7 @@ Seams (agreed):
 """
 
 import asyncio
+import subprocess
 import os
 
 import pytest
@@ -211,6 +212,51 @@ def test_write_setup_conf_replaces_existing(tmp_path):
     second.db_password = "second"
     w.write_setup_conf(target, second, "2026-09-01T00:00:01+00:00")
     assert w.parse_secrets_file(target)["MANGOSDBPASS"] == "second"
+
+
+def test_secrets_file_survives_shell_sourcing(tmp_path):
+    # The file's consumers source it in bash (the runner, the gate,
+    # auto_install.sh). A generated password can contain shell-active
+    # characters ($ backslash quote backtick — all in or alongside the
+    # documented charset), so the rendered file must yield the exact value
+    # back under `source`, and the wizard's own parser must agree.
+    nasty = '!z%A$$#0z9Az!$&$aA--a@&^"\\`end'
+    values = make_values()
+    values.db_password = nasty
+    values.sql_admin_pass = "pa$$word\\with\"quotes"
+    target = os.path.join(str(tmp_path), "setup.conf")
+    w.write_setup_conf(target, values, "2026-09-01T00:00:00+00:00")
+
+    sourced = subprocess.run(
+        ["bash", "-c", 'set -u; source "$1"; printf "%s" "$MANGOSDBPASS"', "_", target],
+        capture_output=True, text=True, check=True,
+    )
+    assert sourced.stdout == nasty
+    admin = subprocess.run(
+        ["bash", "-c", 'set -u; source "$1"; printf "%s" "$SQLADMINPASS"', "_", target],
+        capture_output=True, text=True, check=True,
+    )
+    assert admin.stdout == values.sql_admin_pass
+
+    parsed = w.parse_secrets_file(target)
+    assert parsed["MANGOSDBPASS"] == nasty
+    assert parsed["SQLADMINPASS"] == values.sql_admin_pass
+
+
+def test_generated_passwords_round_trip_through_the_secrets_file(tmp_path):
+    # Whatever generate_password produces must survive the file. Draw a
+    # password from every charset character class at once via many samples.
+    for _ in range(25):
+        values = make_values()
+        values.db_password = w.generate_password()
+        target = os.path.join(str(tmp_path), "setup.conf")
+        w.write_setup_conf(target, values, "2026-09-01T00:00:00+00:00")
+        sourced = subprocess.run(
+            ["bash", "-c", 'set -u; source "$1"; printf "%s" "$MANGOSDBPASS"', "_", target],
+            capture_output=True, text=True, check=True,
+        )
+        assert sourced.stdout == values.db_password
+        assert w.parse_secrets_file(target)["MANGOSDBPASS"] == values.db_password
 
 
 def test_redact_secrets():

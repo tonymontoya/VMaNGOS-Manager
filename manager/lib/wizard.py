@@ -113,7 +113,7 @@ def parse_secrets_file(path: str | Path) -> dict[str, str]:
             continue
         if len(raw_value) >= 2 and raw_value[0] == '"' and raw_value[-1] == '"':
             raw_value = raw_value[1:-1]
-        values[key] = raw_value
+        values[key] = unescape_conf_value(raw_value)
     return values
 
 
@@ -199,6 +199,26 @@ def client_data_required(resume: bool, checkpoint: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def escape_conf_value(value: str) -> str:
+    """Escape a value for the secrets file's double-quoted shell format.
+
+    The file is consumed by sourcing it (auto_install.sh, the runner, the
+    gate), so anything shell-active inside double quotes — ``$``, backtick,
+    ``"``, backslash — must be escaped or a generated password like
+    ``a$$b`` silently corrupts (or trips ``set -u``) on source.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
+
+def unescape_conf_value(raw: str) -> str:
+    """Reverse escape_conf_value (a reader for the file this module writes).
+
+    A backslash that does not precede ``\\ $ " ` `` is left alone, so legacy
+    files written without escaping still parse to their literal text.
+    """
+    return re.sub(r'\\([\\$"`])', r"\1", raw)
+
+
 def render_setup_conf(values: InstallValues, generated_at: str) -> str:
     """Render the exact auto_install.sh secrets file format."""
     lines = [
@@ -207,31 +227,31 @@ def render_setup_conf(values: InstallValues, generated_at: str) -> str:
         "# Permissions: root:root 600",
         "",
         "# Database Admin (root)",
-        f'SQLADMINUSER="{values.sql_admin_user}"',
-        f'SQLADMINIP="{values.sql_admin_ip}"',
-        f'SQLADMINPASS="{values.sql_admin_pass}"',
+        f'SQLADMINUSER="{escape_conf_value(values.sql_admin_user)}"',
+        f'SQLADMINIP="{escape_conf_value(values.sql_admin_ip)}"',
+        f'SQLADMINPASS="{escape_conf_value(values.sql_admin_pass)}"',
         "",
         "# VMANGOS Database User",
-        f'MANGOSDBUSER="{values.db_user}"',
-        f'MANGOSDBPASS="{values.db_password}"',
+        f'MANGOSDBUSER="{escape_conf_value(values.db_user)}"',
+        f'MANGOSDBPASS="{escape_conf_value(values.db_password)}"',
         "",
         "# OS User for running server",
-        f'MANGOSOSUSER="{values.os_user}"',
+        f'MANGOSOSUSER="{escape_conf_value(values.os_user)}"',
         "",
         "# Database Names",
-        f'AUTHDB="{values.auth_db}"',
-        f'WORLDDB="{values.world_db}"',
-        f'CHARACTERDB="{values.characters_db}"',
-        f'LOGSDB="{values.logs_db}"',
+        f'AUTHDB="{escape_conf_value(values.auth_db)}"',
+        f'WORLDDB="{escape_conf_value(values.world_db)}"',
+        f'CHARACTERDB="{escape_conf_value(values.characters_db)}"',
+        f'LOGSDB="{escape_conf_value(values.logs_db)}"',
         "",
         "# Installation Paths",
-        f'INSTALLROOT="{values.install_root}"',
-        f'CLIENTDATA="{values.client_data}"',
+        f'INSTALLROOT="{escape_conf_value(values.install_root)}"',
+        f'CLIENTDATA="{escape_conf_value(values.client_data)}"',
         "",
         "# Auto-install settings",
-        f'SKIP_SECURE_MYSQL="{values.skip_secure_mysql}"',
-        f'PROVISIONTARGET="{values.provision_target}"',
-        f'REINSTALL_POLICY="{values.reinstall_policy}"',
+        f'SKIP_SECURE_MYSQL="{escape_conf_value(values.skip_secure_mysql)}"',
+        f'PROVISIONTARGET="{escape_conf_value(values.provision_target)}"',
+        f'REINSTALL_POLICY="{escape_conf_value(values.reinstall_policy)}"',
         "",
     ]
     return "\n".join(lines)
