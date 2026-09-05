@@ -698,10 +698,12 @@ ensure_service_account() {
 # Database server provisioning
 #
 # The installer assumes a fresh host with no SQL server and installs one
-# (mysql-server, which also provides the mysql client). If a usable
-# MySQL/MariaDB server is already running and reachable, it is used instead —
-# this preserves existing-host adoption (e.g. a host that already runs a DB
-# server) without installing a second, conflicting one.
+# (mysql-server, which also provides the mysql client). A server that is
+# already running is adopted only when the installer can actually administer
+# it (root via the local socket) — every later statement in the database
+# phase runs through that exact connection, so adopting a server it cannot
+# reach would fail later at grant time with a misleading error. Each failure
+# path emits its own error marker (the viewer's Retry screen shows it).
 # ---------------------------------------------------------------------------
 
 # A usable server = the mysql client can connect as a privileged user (root
@@ -737,28 +739,40 @@ ensure_database_server() {
         return 0
     fi
 
-    # 2. A server is running but our standard client cannot reach it → provide
-    #    a client so we can administer it, without installing a second server.
+    # 2. A server is already running → adopt it, without installing a second,
+    #    conflicting one. Install the client when it is missing; then require
+    #    reachability — refusing an unusable server here names the exact
+    #    broken thing instead of failing later inside the SQL statements.
     if db_server_running; then
-        log_info "A database server is running but no usable client is present; installing mysql-client"
-        DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none \
-            apt-get install -y mysql-client || return 1
+        if ! command -v mysql >/dev/null 2>&1; then
+            log_info "A database server is running but no mysql client is present; installing mysql-client"
+            DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none \
+                apt-get install -y mysql-client || {
+                log_marker database error "msg=Failed to install the mysql client for the running database server" "hint=Check the apt output in the install log, then re-run the installer"
+                return 1
+            }
+        fi
         if db_server_reachable; then
             log_info "Using existing MySQL/MariaDB server (client installed)"
             return 0
         fi
-        log_warn "Existing database server detected but still not reachable with the standard client"
-        log_warn "Continuing with the existing server; database setup may need manual credentials"
-        return 0
+        log_error "A database server is running but this installer cannot administer it"
+        log_error "The database phase needs this to work as root: mysql -e \"SELECT 1\""
+        log_marker database error "msg=A database server is running but root cannot connect to it" "hint=Fix root access to the running MySQL/MariaDB server (mysql -e \"SELECT 1\" must work as root), or stop that server so this installer can provision its own, then re-run the installer"
+        return 1
     fi
 
     # 3. No server running → install one (server + client), then start it.
     log_info "No MySQL/MariaDB server detected; installing mysql-server"
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none \
-        apt-get install -y mysql-server || return 1
+        apt-get install -y mysql-server || {
+        log_marker database error "msg=Failed to install mysql-server" "hint=Check the apt output in the install log for the failing package, then re-run the installer"
+        return 1
+    }
     systemctl enable mysql >/dev/null 2>&1 || true
     systemctl start mysql || {
         log_error "Failed to start the mysql server after install"
+        log_marker database error "msg=The installed mysql server failed to start" "hint=Check journalctl -u mysql for the startup error, then re-run the installer"
         return 1
     }
     if wait_for_db_server; then
@@ -766,6 +780,7 @@ ensure_database_server() {
         return 0
     fi
     log_error "mysql-server installed and started but did not become reachable"
+    log_marker database error "msg=The installed mysql server never became reachable" "hint=Check journalctl -u mysql and the install log, then re-run the installer"
     return 1
 }
 
@@ -818,6 +833,12 @@ check_client_data() {
     prepare_extraction_root
 }
 
+# True when $MANGOSOSUSER can read the given path (the extractors run as the
+# service user, so every client-data probe goes through sudo).
+data_readable() {
+    sudo -u "$MANGOSOSUSER" test -r "$1" 2>/dev/null
+}
+
 # Derive CLIENT_DATA_EXTRACT_ROOT from CLIENT_DATA so the extractors can read
 # the MPQs as $MANGOSOSUSER. Called from check_client_data on fresh installs
 # and on demand from phase_data_extraction, because a resumed install re-enters
@@ -836,19 +857,19 @@ check_client_data() {
 #      full copy (last resort).
 prepare_extraction_root() {
     # 1. Data/ already resolvable and readable by mangos.
-    if sudo -u "$MANGOSOSUSER" test -r "$CLIENT_DATA/Data/dbc.MPQ" 2>/dev/null; then
+    if data_readable "$CLIENT_DATA/Data/dbc.MPQ"; then
         CLIENT_DATA_EXTRACT_ROOT="$CLIENT_DATA"
         log_info "Using client data (Data/ resolvable): $CLIENT_DATA"
         return 0
     fi
 
-    if sudo -u "$MANGOSOSUSER" test -r "$CLIENT_DATA/dbc.MPQ" 2>/dev/null; then
+    if data_readable "$CLIENT_DATA/dbc.MPQ"; then
         # MPQs at the top level. Prefer adding the self-symlink in place...
         if [ -w "$CLIENT_DATA" ] && [ ! -e "$CLIENT_DATA/Data" ]; then
             log_info "Creating Data/ self-symlink for extractor compatibility..."
             ln -sfn . "$CLIENT_DATA/Data" 2>/dev/null || true
         fi
-        if sudo -u "$MANGOSOSUSER" test -r "$CLIENT_DATA/Data/dbc.MPQ" 2>/dev/null; then
+        if data_readable "$CLIENT_DATA/Data/dbc.MPQ"; then
             CLIENT_DATA_EXTRACT_ROOT="$CLIENT_DATA"
             log_info "Using client data (Data/ symlinked): $CLIENT_DATA"
             return 0
@@ -860,8 +881,9 @@ prepare_extraction_root() {
     fi
 
     # 4a. The client data is unreadable by mangos, but a root staged by an
-    #     earlier run is still valid — reuse it instead of re-copying.
-    if staged_root_is_usable; then
+    #     earlier run is still valid (repaired in place when it only lacks
+    #     its Data/ entry) — reuse it instead of re-copying.
+    if repair_staged_root; then
         CLIENT_DATA_EXTRACT_ROOT="$INSTALLROOT/client-data"
         log_info "Using previously staged client data: $CLIENT_DATA_EXTRACT_ROOT"
         return 0
@@ -880,7 +902,7 @@ prepare_extraction_root() {
     chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT/client-data" 2>/dev/null || true
     ln -sfn . "$INSTALLROOT/client-data/Data" 2>/dev/null || true
 
-    if ! sudo -u "$MANGOSOSUSER" test -r "$INSTALLROOT/client-data/Data/dbc.MPQ" 2>/dev/null; then
+    if ! data_readable "$INSTALLROOT/client-data/Data/dbc.MPQ"; then
         log_error "Could not stage readable client data for $MANGOSOSUSER under $INSTALLROOT/client-data"
         log_marker extraction error "msg=Client data could not be staged for extraction" "hint=Point VMANGOS_CLIENT_DATA at a readable WoW 1.12.1 (build 5875) Data folder containing dbc.MPQ and terrain.MPQ, then re-run the installer"
         return 1
@@ -891,20 +913,21 @@ prepare_extraction_root() {
 }
 
 # True when the staging root $INSTALLROOT/client-data already exposes
-# Data/dbc.MPQ to the service user. A valid root from an earlier (interrupted)
-# run is reused instead of re-staging on every resume; a root that is simply
-# missing the Data/ entry (e.g. an older full copy) is repaired in place.
+# Data/dbc.MPQ to the service user — a valid root an earlier (interrupted)
+# run left behind. Pure check: repairs belong to repair_staged_root.
 staged_root_is_usable() {
     local STAGED="$INSTALLROOT/client-data"
-    if sudo -u "$MANGOSOSUSER" test -r "$STAGED/Data/dbc.MPQ" 2>/dev/null; then
-        return 0
-    fi
+    data_readable "$STAGED/Data/dbc.MPQ"
+}
+
+# A staged root that is only missing its Data/ entry (e.g. an older full copy)
+# gets the self-symlink added in place instead of being re-staged.
+repair_staged_root() {
+    local STAGED="$INSTALLROOT/client-data"
     if [ -f "$STAGED/dbc.MPQ" ] && [ -w "$STAGED" ]; then
         ln -sfn . "$STAGED/Data" 2>/dev/null || true
-        sudo -u "$MANGOSOSUSER" test -r "$STAGED/Data/dbc.MPQ" 2>/dev/null
-    else
-        return 1
     fi
+    staged_root_is_usable
 }
 
 # Stage a writable "Data/"-resolvable root over a client data directory that
@@ -938,7 +961,7 @@ stage_client_data_symlink_farm() {
     # Satisfy the extractor's "Data/" layout with a self-symlink.
     ln -sfn . "$STAGED/Data"
 
-    if ! sudo -u "$MANGOSOSUSER" test -r "$STAGED/Data/dbc.MPQ" 2>/dev/null; then
+    if ! data_readable "$STAGED/Data/dbc.MPQ"; then
         log_error "Staged client data is not readable by $MANGOSOSUSER: $STAGED/Data/dbc.MPQ"
         return 1
     fi
@@ -990,14 +1013,12 @@ phase_database_setup() {
     log_marker database start
 
     # Ensure a usable MySQL/MariaDB server is available. On a fresh host this
-    # installs mysql-server (server + client) and starts it; if a usable server
-    # is already running it is used instead. Emits a marker on failure so the
-    # viewer shows a Retry-able FailureScreen rather than a bare EndedScreen.
+    # installs mysql-server (server + client) and starts it; a server that is
+    # already running is adopted only when it is reachable as root. Each
+    # failure path inside emits its own specific error marker (the viewer's
+    # Retry screen shows it).
     log_marker database progress "step=Ensuring database server is available"
-    ensure_database_server || {
-        log_marker database error "msg=Failed to ensure a usable database server" "hint=Check that apt can install mysql-server and that the server starts, then re-run the installer"
-        return 1
-    }
+    ensure_database_server || return 1
 
     # Create databases
     mysql -e "CREATE DATABASE IF NOT EXISTS \`$WORLDDB\`;" || true
