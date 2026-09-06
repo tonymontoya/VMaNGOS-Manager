@@ -1171,7 +1171,8 @@ def create_wizard_app(
             """Poll the unit's ActiveState (marker-less failure detection, #103).
 
             Runs in a daemon thread, updating shared state under the lock. The
-            UI reads it in _refresh. Stopped when the viewer finishes.
+            UI reads it in _refresh. Stopped when the viewer finishes or
+            unmounts (detach/app exit).
             """
 
             def checker() -> None:
@@ -1283,8 +1284,11 @@ def create_wizard_app(
                 self._proc = None
 
         def on_unmount(self) -> None:
-            # Detach / app exit: kill the journal child only. The install unit
-            # is left running — detaching never stops the install.
+            # Detach / app exit: stop the state checker and kill the journal
+            # child only. The install unit is left running — detaching never
+            # stops the install. Without the flag the checker thread would
+            # keep polling systemctl forever after the viewer is gone.
+            self._finished = True
             self._kill_journal()
 
         def action_detach(self) -> None:
