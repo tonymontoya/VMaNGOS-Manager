@@ -396,6 +396,17 @@ def screen_text(app):
     return "\n".join(parts)
 
 
+def screen_shows(app, name, needle):
+    """True when the screen has switched AND its text contains needle.
+
+    After push_screen the stack updates immediately but the new screen's
+    widgets compose on a later event-loop cycle — under load an immediate
+    screen_text can legitimately read ''. Gating wait_for on this predicate
+    waits out that compose race instead of asserting against a blank screen.
+    """
+    return screen_name(app) == name and needle in screen_text(app)
+
+
 async def focus_widget(pilot, app, widget_id, max_tabs=60):
     """Tab until the widget with widget_id has focus (deterministic)."""
     for _ in range(max_tabs):
@@ -870,32 +881,48 @@ def make_fake_journalctl(tmp_path, lines, delay=0.05, args_log=None):
 
 
 def make_fake_systemctl(tmp_path, state):
-    """An executable 'systemctl' that reports a scripted ActiveState.
+    """An executable 'systemctl' that reports a constant ActiveState.
 
-    ``state`` may be a single string (constant) or a list of strings (returned
-    in order, then the last one repeats). This lets a test model a unit that is
-    active and then dies without a marker (marker-less failure detection).
+    Returns the bin dir to prepend to PATH so the viewer's unit-state polls
+    resolve to this stub. For a unit that changes state over time (active,
+    then dies) use :func:`make_fake_systemctl_transition` — a call-counted
+    sequence loses its first state whenever a poll times out under load (the
+    stub advances even though the caller never reads the result), which used
+    to make the unit-state tests flake.
     """
+    return _write_systemctl_stub(tmp_path, f'print("ActiveState={state}")\n')
+
+
+def make_fake_systemctl_transition(tmp_path, first_state, then_state, first_seconds):
+    """An executable 'systemctl' whose ActiveState depends on wall-clock time.
+
+    Reports ``first_state`` until ``first_seconds`` have elapsed since the
+    first poll, then ``then_state`` forever — time-based, so a poll that times
+    out under load consumes nothing: the transition lands when a caller
+    actually observes it, not when the Nth call happens.
+    """
+    stamp = os.path.join(str(tmp_path), "systemctl_stamp.txt")
+    body = (
+        "import time\n"
+        f"STAMP = {stamp!r}\n"
+        "try:\n"
+        "    t0 = float(open(STAMP).read())\n"
+        "except OSError:\n"
+        "    t0 = time.time()\n"
+        "    open(STAMP, 'w').write(repr(t0))\n"
+        f"state = {first_state!r} if time.time() - t0 < {first_seconds!r} else {then_state!r}\n"
+        'print("ActiveState=" + state)\n'
+    )
+    return _write_systemctl_stub(tmp_path, body)
+
+
+def _write_systemctl_stub(tmp_path, body):
     bin_dir = os.path.join(str(tmp_path), "fakebin")
     os.makedirs(bin_dir, exist_ok=True)
     script_path = os.path.join(bin_dir, "systemctl")
-    state_file = os.path.join(str(tmp_path), "systemctl_states.txt")
-    counter = os.path.join(str(tmp_path), "systemctl_counter.txt")
-    states = [state] if isinstance(state, str) else list(state)
-    with open(state_file, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(states) + "\n")
-    with open(counter, "w", encoding="utf-8") as handle:
-        handle.write("1\n")
     with open(script_path, "w", encoding="utf-8") as handle:
-        handle.write("#!/usr/bin/env bash\n")
-        handle.write(f'STATES="{state_file}"\n')
-        handle.write(f'COUNTER="{counter}"\n')
-        handle.write('total=$(wc -l < "$STATES" | tr -d " ")\n')
-        handle.write('n=$(cat "$COUNTER" 2>/dev/null || echo 1)\n')
-        handle.write('if [ "$n" -gt "$total" ]; then n="$total"; fi\n')
-        handle.write('line=$(sed -n "${n}p" "$STATES")\n')
-        handle.write('echo "$((n + 1))" > "$COUNTER"\n')
-        handle.write('printf "ActiveState=%s\\n" "$line"\n')
+        handle.write("#!/usr/bin/env python3\n")
+        handle.write(body)
     os.chmod(script_path, 0o755)
     return bin_dir
 
@@ -1147,13 +1174,18 @@ def test_launch_success_offers_follow_to_viewer(tmp_path):
     assert "installer_unit_stop" not in calls[0][2]
 
 
-def test_viewer_detects_unit_failure_without_markers(tmp_path):
+def test_viewer_detects_unit_failure_without_markers(tmp_path, monkeypatch):
     # A unit that dies without emitting event=error (kill -9, or a crash): the
     # viewer polls the unit state and detects the failure, instead of spinning
     # "in progress" forever. The unit is active first (seen_active) then fails.
+    # The stub's active window is wall-clock based and the poll interval is
+    # shrunk through the module seam: under load, a poll that times out must
+    # not consume the "active" observation (the old counter-based stub did,
+    # which is what made this test flake — #113).
+    monkeypatch.setattr(w, "UNIT_STATE_POLL_SECONDS", 0.1)
     lines = ["plain log: doing work"]  # no markers at all
     make_fake_journalctl(tmp_path, lines, delay=0.05)
-    make_fake_systemctl(tmp_path, ["active", "failed"])  # active, then dies
+    make_fake_systemctl_transition(tmp_path, "active", "failed", first_seconds=5.0)
     fake_runner, calls = make_fake_runner(rc=0)
     app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
 
@@ -1163,10 +1195,11 @@ def test_viewer_detects_unit_failure_without_markers(tmp_path):
             async with app.run_test() as pilot:
                 await pilot.pause()
                 assert screen_name(app) == "ViewerScreen"
-                # The unit dies without a marker; the state checker catches it
-                # (the poll is every 2s, so allow generous time).
+                # The unit dies without a marker; the state checker catches it.
+                # The predicate gates on the screen text too: the blank-screen
+                # window between push_screen and compose is what flaked (#113).
                 await wait_for(
-                    lambda: screen_name(app) == "FailureScreen",
+                    lambda: screen_shows(app, "FailureScreen", "stopped without finishing"),
                     message="marker-less failure detected",
                     timeout=20.0,
                 )
@@ -1179,13 +1212,15 @@ def test_viewer_detects_unit_failure_without_markers(tmp_path):
     assert calls == []
 
 
-def test_viewer_detects_unit_ended_without_completion(tmp_path):
+def test_viewer_detects_unit_ended_without_completion(tmp_path, monkeypatch):
     # A unit that ends (zero exit) without emitting the completion marker (an
     # older script): the viewer shows "ended" (not success, not failure) and
-    # points the user at the journal to verify.
+    # points the user at the journal to verify. Same seam + wall-clock stub as
+    # the failure test above (#113).
+    monkeypatch.setattr(w, "UNIT_STATE_POLL_SECONDS", 0.1)
     lines = ["plain log: doing work", "plain log: done"]  # no completion marker
     make_fake_journalctl(tmp_path, lines, delay=0.05)
-    make_fake_systemctl(tmp_path, ["active", "inactive"])  # active, then ends
+    make_fake_systemctl_transition(tmp_path, "active", "inactive", first_seconds=5.0)
     fake_runner, calls = make_fake_runner(rc=0)
     app, _ = build_wizard(tmp_path, attach=True, runner=fake_runner)
 
@@ -1195,10 +1230,12 @@ def test_viewer_detects_unit_ended_without_completion(tmp_path):
             async with app.run_test() as pilot:
                 await pilot.pause()
                 assert screen_name(app) == "ViewerScreen"
-                # The unit ends without a completion marker; the state checker
-                # catches it (the poll is every 2s, so allow generous time).
+                # The unit ends without a completion marker; the state
+                # checker catches it. Same text-gated predicate: the
+                # blank-screen window between push_screen and compose is what
+                # flaked here (#113).
                 await wait_for(
-                    lambda: screen_name(app) == "EndedScreen",
+                    lambda: screen_shows(app, "EndedScreen", "Install Unit Ended"),
                     message="unit-ended detected",
                     timeout=20.0,
                 )
