@@ -774,6 +774,41 @@ def test_marker_tracker_failure_and_completion():
     assert t2.install_done["server_ip"] == "1.2.3.4"
 
 
+def test_marker_tracker_warn_is_recorded_not_fatal():
+    t = w.MarkerTracker()
+    for line in (
+        "@@VMANGOS v1 phase=database event=start",
+        "@@VMANGOS v1 phase=database event=warn msg=\"CREATE DATABASE failed for world\"",
+        "@@VMANGOS v1 phase=database event=done",
+        "@@VMANGOS v1 phase=install event=done server_ip=10.0.0.9",
+    ):
+        m = w.parse_marker(line)
+        assert m is not None
+        t.apply(m)
+    assert not t.failed
+    assert t.failure is None
+    assert t.phase_state["database"] == "done"
+    assert t.warnings == [("database", "CREATE DATABASE failed for world")]
+    assert t.completed  # a warn never blocks completion
+
+    # A warn from an unknown phase is ignored like any other unknown-phase marker.
+    t.apply(w.parse_marker("@@VMANGOS v1 phase=mystery event=warn msg=\"strange\""))
+    assert len(t.warnings) == 1
+
+
+def test_render_checklist_shows_warnings_without_failing():
+    t = w.MarkerTracker()
+    t.apply(w.parse_marker("@@VMANGOS v1 phase=database event=start"))
+    t.apply(w.parse_marker("@@VMANGOS v1 phase=database event=warn msg=\"GRANT failed on world for mangos\""))
+    t.apply(w.parse_marker("@@VMANGOS v1 phase=database event=done"))
+    rendered = w.render_checklist(t)
+    assert "!  Database: GRANT failed on world for mangos" in rendered
+    assert "FAILED" not in rendered
+
+    clean = w.MarkerTracker()
+    assert "!" not in w.render_checklist(clean)
+
+
 def test_render_progress_honest_bar():
     t = w.MarkerTracker()
     t.apply(w.parse_marker("@@VMANGOS v1 phase=build event=progress percent=50 step=\"Compiling\""))

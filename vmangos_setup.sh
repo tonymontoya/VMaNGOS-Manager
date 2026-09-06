@@ -101,6 +101,21 @@ log_marker() {
     printf '%s\n' "$out"
 }
 
+# fail_marker <phase> <msg> <hint>: the guarded-failure shape shared by every
+# phase death path. Always returns non-zero so `cmd || { fail_marker ...;
+# return 1; }` fails the phase even when errexit is suppressed (tests rely on
+# that). warn_marker <phase> <msg>: something failed but the install continues;
+# always returns zero so the guarded command's failure stays swallowed.
+fail_marker() {
+    log_marker "$1" error "msg=$2" "hint=$3"
+    return 1
+}
+
+warn_marker() {
+    log_marker "$1" warn "msg=$2"
+    return 0
+}
+
 refresh_runtime_paths() {
     CHECKPOINT_DIR="${INSTALLROOT}/.install-checkpoints"
     CHECKPOINT_FILE="${CHECKPOINT_DIR}/checkpoint"
@@ -779,7 +794,10 @@ prepare_extraction_root() {
     log_info "Copying client data to $INSTALLROOT/client-data for extraction..."
 
     # Create temp location and copy data
-    mkdir -p "$INSTALLROOT/client-data"
+    mkdir -p "$INSTALLROOT/client-data" || {
+        fail_marker extraction "Failed to create the client-data staging directory" "Check the permissions under $INSTALLROOT, then re-run the installer"
+        return 1
+    }
 
     # Copy all MPQ files and required directories
     cp -r "$CLIENT_DATA_EXTRACT_ROOT"/*.MPQ "$INSTALLROOT/client-data/" 2>/dev/null || true
@@ -791,7 +809,10 @@ prepare_extraction_root() {
     fi
 
     # Set ownership for mangos user
-    chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT/client-data"
+    chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT/client-data" || {
+        fail_marker extraction "Failed to hand the staged client data to $MANGOSOSUSER" "Check that the installer runs as root, then re-run the installer"
+        return 1
+    }
 
     # Create the Data/Data symlink in the copy
     if [ ! -e "$INSTALLROOT/client-data/Data" ]; then
@@ -813,19 +834,19 @@ phase_prerequisites() {
     # Keep prerequisite installs headless-safe on real servers where needrestart
     # may otherwise hold apt open behind a whiptail prompt.
     DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none apt-get update || {
-        log_marker prerequisites error "msg=apt-get update failed" "hint=Check network access and the apt mirror configuration, then re-run the installer"
+        fail_marker prerequisites "apt-get update failed" "Check network access and the apt mirror configuration, then re-run the installer"
         return 1
     }
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none \
         apt-get install -y build-essential cmake git libmariadb-dev default-libmysqlclient-dev libssl-dev \
             libbz2-dev libreadline-dev libncurses-dev libboost-all-dev \
             p7zip-full python3 python3-pip python3-venv sysstat wget zlib1g-dev || {
-        log_marker prerequisites error "msg=Failed to install build prerequisites" "hint=Check the apt output in the install log for the failing package"
+        fail_marker prerequisites "Failed to install build prerequisites" "Check the apt output in the install log for the failing package"
         return 1
     }
 
     ensure_service_account || {
-        log_marker prerequisites error "msg=Failed to set up the service account $MANGOSOSUSER" "hint=Check that the user name is available and that useradd succeeded"
+        fail_marker prerequisites "Failed to set up the service account $MANGOSOSUSER" "Check that the user name is available and that useradd succeeded"
         return 1
     }
 
@@ -837,20 +858,32 @@ phase_database_setup() {
     log_section "PHASE: Database Setup"
     log_marker database start
 
-    # Create databases
-    mysql -e "CREATE DATABASE IF NOT EXISTS \`$WORLDDB\`;" || true
-    mysql -e "CREATE DATABASE IF NOT EXISTS \`$AUTHDB\`;" || true
-    mysql -e "CREATE DATABASE IF NOT EXISTS \`$CHARACTERDB\`;" || true
-    mysql -e "CREATE DATABASE IF NOT EXISTS \`$LOGSDB\`;" || true
+    # Create databases. These are best-effort (|| true in the original): a
+    # failure is recorded as a warn marker so phase=database event=done never
+    # asserts an unverified step; the import phase fails loudly if a database
+    # or grant that mattered is still missing.
+    mysql -e "CREATE DATABASE IF NOT EXISTS \`$WORLDDB\`;" \
+        || warn_marker database "CREATE DATABASE failed for $WORLDDB"
+    mysql -e "CREATE DATABASE IF NOT EXISTS \`$AUTHDB\`;" \
+        || warn_marker database "CREATE DATABASE failed for $AUTHDB"
+    mysql -e "CREATE DATABASE IF NOT EXISTS \`$CHARACTERDB\`;" \
+        || warn_marker database "CREATE DATABASE failed for $CHARACTERDB"
+    mysql -e "CREATE DATABASE IF NOT EXISTS \`$LOGSDB\`;" \
+        || warn_marker database "CREATE DATABASE failed for $LOGSDB"
 
     # Create user
-    mysql -e "CREATE USER IF NOT EXISTS '$MANGOSDBUSER'@'$SQLADMINIP' IDENTIFIED BY '$MANGOSDBPASS';" || true
-    mysql -e "GRANT ALL PRIVILEGES ON \`$WORLDDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
-    mysql -e "GRANT ALL PRIVILEGES ON \`$AUTHDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
-    mysql -e "GRANT ALL PRIVILEGES ON \`$CHARACTERDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
-    mysql -e "GRANT ALL PRIVILEGES ON \`$LOGSDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" || true
+    mysql -e "CREATE USER IF NOT EXISTS '$MANGOSDBUSER'@'$SQLADMINIP' IDENTIFIED BY '$MANGOSDBPASS';" \
+        || warn_marker database "CREATE USER failed for $MANGOSDBUSER"
+    mysql -e "GRANT ALL PRIVILEGES ON \`$WORLDDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" \
+        || warn_marker database "GRANT failed on $WORLDDB for $MANGOSDBUSER"
+    mysql -e "GRANT ALL PRIVILEGES ON \`$AUTHDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" \
+        || warn_marker database "GRANT failed on $AUTHDB for $MANGOSDBUSER"
+    mysql -e "GRANT ALL PRIVILEGES ON \`$CHARACTERDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" \
+        || warn_marker database "GRANT failed on $CHARACTERDB for $MANGOSDBUSER"
+    mysql -e "GRANT ALL PRIVILEGES ON \`$LOGSDB\`.* TO '$MANGOSDBUSER'@'$SQLADMINIP';" \
+        || warn_marker database "GRANT failed on $LOGSDB for $MANGOSDBUSER"
     mysql -e "FLUSH PRIVILEGES;" || {
-        log_marker database error "msg=Failed to apply database grants" "hint=Check that MariaDB or MySQL is running, then re-run the installer"
+        fail_marker database "Failed to apply database grants" "Check that MariaDB or MySQL is running, then re-run the installer"
         return 1
     }
 
@@ -862,13 +895,19 @@ phase_source_download() {
     log_section "PHASE: Downloading Source Code"
     log_marker source start
 
-    mkdir -p "$INSTALLROOT"
-    cd "$INSTALLROOT"
+    mkdir -p "$INSTALLROOT" || {
+        fail_marker source "Failed to create the installation directory $INSTALLROOT" "Check the path and its permissions, then re-run the installer"
+        return 1
+    }
+    cd "$INSTALLROOT" || {
+        fail_marker source "Failed to enter the installation directory $INSTALLROOT" "Check the directory permissions, then re-run the installer"
+        return 1
+    }
 
     # Clone VMaNGOS core
     if [ ! -d "source" ]; then
         git_clone_with_retry "https://github.com/vmangos/core" "source" || {
-            log_marker source error "msg=Failed to clone the VMaNGOS core repository" "hint=Check network access to github.com, then re-run the installer"
+            fail_marker source "Failed to clone the VMaNGOS core repository" "Check network access to github.com, then re-run the installer"
             return 1
         }
     else
@@ -883,7 +922,10 @@ phase_build() {
     log_section "PHASE: Building VMaNGOS from Source"
     log_marker build start
 
-    cd "$INSTALLROOT"
+    cd "$INSTALLROOT" || {
+        fail_marker build "Failed to enter the installation directory $INSTALLROOT" "Check the directory permissions, then re-run the installer"
+        return 1
+    }
     CPU=$(nproc)
     
     log_info "====================================================================="
@@ -912,8 +954,14 @@ phase_build() {
     log_info "====================================================================="
     
     # Create build directory
-    mkdir -p build
-    cd build
+    mkdir -p build || {
+        fail_marker build "Failed to create the build directory" "Check the permissions under $INSTALLROOT, then re-run the installer"
+        return 1
+    }
+    cd build || {
+        fail_marker build "Failed to enter the build directory" "Check the permissions under $INSTALLROOT/build, then re-run the installer"
+        return 1
+    }
     
     # Configure
     log_info ""
@@ -929,7 +977,7 @@ phase_build() {
         set -e
         log_error "CMake configuration failed (exit $CMAKE_RC)"
         log_error "Check $INSTALL_LOG for the cmake error output"
-        log_marker build error "msg=CMake configuration failed" "hint=Check the cmake error output in the install log for the failing component"
+        fail_marker build "CMake configuration failed" "Check the cmake error output in the install log for the failing component"
         return 1
     fi
     log_info "CMake configuration complete."
@@ -945,7 +993,7 @@ phase_build() {
             set -e
             log_error "Background build failed"
             log_error "Check $INSTALL_LOG and $CHECKPOINT_DIR/build-status"
-            log_marker build error "msg=Compilation failed" "hint=Check the build log and build-status file for the failing target"
+            fail_marker build "Compilation failed" "Check the build log and build-status file for the failing target"
             return 1
         fi
     else
@@ -959,7 +1007,7 @@ phase_build() {
         if [ "$MAKE_RC" -ne 0 ]; then
             set -e
             log_error "Compilation failed (exit $MAKE_RC) - full output in $INSTALL_LOG"
-            log_marker build error "msg=Compilation failed" "hint=Check the install log for the compiler error"
+            fail_marker build "Compilation failed" "Check the install log for the compiler error"
             return 1
         fi
         log_info ""
@@ -975,12 +1023,12 @@ phase_build() {
     set -e
     if [ "$INSTALL_RC" -ne 0 ]; then
         log_error "make install failed (exit $INSTALL_RC)"
-        log_marker build error "msg=make install failed" "hint=Check the install log for the failing install step"
+        fail_marker build "make install failed" "Check the install log for the failing install step"
         return 1
     fi
     if [ ! -f "$INSTALLROOT/run/etc/mangosd.conf.dist" ]; then
         log_error "Build artifacts missing after install (expected $INSTALLROOT/run/etc/mangosd.conf.dist)"
-        log_marker build error "msg=Build artifacts missing after install" "hint=Re-run the build phase; the compiled output was not produced"
+        fail_marker build "Build artifacts missing after install" "Re-run the build phase; the compiled output was not produced"
         return 1
     fi
     log_info "Installation of binaries complete."
@@ -998,15 +1046,18 @@ phase_config_setup() {
     log_section "PHASE: Configuration Setup"
     log_marker config start
 
-    cd "$INSTALLROOT"
+    cd "$INSTALLROOT" || {
+        fail_marker config "Failed to enter the installation directory $INSTALLROOT" "Check the directory permissions, then re-run the installer"
+        return 1
+    }
 
     # Copy config files
     cp "$INSTALLROOT/run/etc/mangosd.conf.dist" "$INSTALLROOT/run/etc/mangosd.conf" || {
-        log_marker config error "msg=Build artifacts are missing (mangosd.conf.dist)" "hint=Re-run the installer so the build phase completes first"
+        fail_marker config "Build artifacts are missing (mangosd.conf.dist)" "Re-run the installer so the build phase completes first"
         return 1
     }
     cp "$INSTALLROOT/run/etc/realmd.conf.dist" "$INSTALLROOT/run/etc/realmd.conf" || {
-        log_marker config error "msg=Build artifacts are missing (realmd.conf.dist)" "hint=Re-run the installer so the build phase completes first"
+        fail_marker config "Build artifacts are missing (realmd.conf.dist)" "Re-run the installer so the build phase completes first"
         return 1
     }
     
@@ -1054,22 +1105,34 @@ phase_config_setup() {
         manager_password_file="$manager_config_dir/.dbpass"
 
         log_info "Provisioning VMANGOS Manager configuration..."
-        mkdir -p "$manager_root/bin" "$manager_root/lib" "$manager_root/tests" "$manager_config_dir"
+        mkdir -p "$manager_root/bin" "$manager_root/lib" "$manager_root/tests" "$manager_config_dir" || {
+            fail_marker config "Failed to create the manager directories" "Check the permissions under $manager_root, then re-run the installer"
+            return 1
+        }
 
         if [ -d "$SCRIPT_DIR/manager" ]; then
             log_info "Installing bundled VMANGOS Manager sources into $manager_root"
-            cp "$SCRIPT_DIR/manager/bin/vmangos-manager" "$manager_root/bin/"
-            cp "$SCRIPT_DIR/manager/lib/"*.sh "$manager_root/lib/"
+            cp "$SCRIPT_DIR/manager/bin/vmangos-manager" "$manager_root/bin/" || {
+                fail_marker config "Failed to install the manager CLI" "Check the sources under $SCRIPT_DIR/manager, then re-run the installer"
+                return 1
+            }
+            cp "$SCRIPT_DIR/manager/lib/"*.sh "$manager_root/lib/" || {
+                fail_marker config "Failed to install the manager libraries" "Check the sources under $SCRIPT_DIR/manager, then re-run the installer"
+                return 1
+            }
             cp "$SCRIPT_DIR/manager/lib/"*.py "$manager_root/lib/" 2>/dev/null || true
             cp "$SCRIPT_DIR/manager/tests/"*.sh "$manager_root/tests/" 2>/dev/null || true
             cp "$SCRIPT_DIR/manager/Makefile" "$manager_root/" 2>/dev/null || true
             cp "$SCRIPT_DIR/manager/dashboard-requirements.txt" "$manager_root/" 2>/dev/null || true
-            chmod +x "$manager_root/bin/vmangos-manager"
+            chmod +x "$manager_root/bin/vmangos-manager" || {
+                fail_marker config "Failed to make the manager CLI executable" "Check the permissions under $manager_root/bin, then re-run the installer"
+                return 1
+            }
         else
             log_warn "Bundled manager sources not found next to vmangos_setup.sh; creating config only"
         fi
 
-        cat > "$manager_config_file" << EOF
+        if ! cat > "$manager_config_file" << EOF
 # VMANGOS Manager Configuration
 # Auto-generated by vmangos_setup.sh on $(date -Iseconds)
 
@@ -1098,21 +1161,52 @@ retention_days = 7
 level = info
 file = /var/log/vmangos-manager.log
 EOF
+        then
+            fail_marker config "Failed to write the manager configuration" "Check the disk and permissions under $manager_config_dir, then re-run the installer"
+            return 1
+        fi
 
-        printf '%s\n' "$MANGOSDBPASS" > "$manager_password_file"
+        printf '%s\n' "$MANGOSDBPASS" > "$manager_password_file" || {
+            fail_marker config "Failed to write the manager password file" "Check the disk and permissions under $manager_config_dir, then re-run the installer"
+            return 1
+        }
         # 640 + mangos group (set by the later chown -R) lets non-root users
         # read the config after 'usermod -aG mangos <user>'; 600 would lock
         # them out with errors on every subcommand.
-        chmod 640 "$manager_config_file" "$manager_password_file"
-        mkdir -p "$INSTALLROOT/backups"
-        chmod 775 "$INSTALLROOT/backups"
+        chmod 640 "$manager_config_file" "$manager_password_file" || {
+            fail_marker config "Failed to set the manager config permissions" "Check the permissions under $manager_config_dir, then re-run the installer"
+            return 1
+        }
+        mkdir -p "$INSTALLROOT/backups" || {
+            fail_marker config "Failed to create the backups directory" "Check the permissions under $INSTALLROOT, then re-run the installer"
+            return 1
+        }
+        chmod 775 "$INSTALLROOT/backups" || {
+            fail_marker config "Failed to set the backups directory permissions" "Check the permissions on $INSTALLROOT/backups, then re-run the installer"
+            return 1
+        }
         # Runtime lock dir is on tmpfs: recreate it group-writable at boot.
-        mkdir -p /etc/tmpfiles.d
-        printf 'd /run/vmangos-manager 0775 root %s -\n' "$MANGOSOSUSER" > /etc/tmpfiles.d/vmangos-manager.conf
+        mkdir -p /etc/tmpfiles.d || {
+            fail_marker config "Failed to create /etc/tmpfiles.d" "Check the install log for the failing step, then re-run the installer"
+            return 1
+        }
+        printf 'd /run/vmangos-manager 0775 root %s -\n' "$MANGOSOSUSER" > /etc/tmpfiles.d/vmangos-manager.conf || {
+            fail_marker config "Failed to write the manager tmpfiles rule" "Check the install log for the failing step, then re-run the installer"
+            return 1
+        }
         systemd-tmpfiles --create /etc/tmpfiles.d/vmangos-manager.conf 2>/dev/null || true
-        mkdir -p /var/run/vmangos-manager
-        chgrp "$MANGOSOSUSER" /var/run/vmangos-manager
-        chmod 775 /var/run/vmangos-manager
+        mkdir -p /var/run/vmangos-manager || {
+            fail_marker config "Failed to create /var/run/vmangos-manager" "Check the install log for the failing step, then re-run the installer"
+            return 1
+        }
+        chgrp "$MANGOSOSUSER" /var/run/vmangos-manager || {
+            fail_marker config "Failed to set the manager runtime directory group" "Check the install log for the failing step, then re-run the installer"
+            return 1
+        }
+        chmod 775 /var/run/vmangos-manager || {
+            fail_marker config "Failed to set the manager runtime directory permissions" "Check the install log for the failing step, then re-run the installer"
+            return 1
+        }
         log_info "Manager config written to $manager_config_file"
         log_info "To manage the server as a non-root user:"
         log_info "  sudo usermod -aG $MANGOSOSUSER <username>   # then that user logs out/in"
@@ -1153,7 +1247,10 @@ phase_data_extraction() {
     log_section "PHASE: Data Extraction from Client Data"
     log_marker extraction start
 
-    cd "$INSTALLROOT"
+    cd "$INSTALLROOT" || {
+        fail_marker extraction "Failed to enter the installation directory $INSTALLROOT" "Check the directory permissions, then re-run the installer"
+        return 1
+    }
 
     # The server cannot boot without DBC files and base maps, so do NOT
     # checkpoint DATA_DONE here — stop and tell the user how to resume.
@@ -1171,7 +1268,7 @@ phase_data_extraction() {
         log_info ""
         log_info "To extract manually instead, place the client Data folder and run:"
         log_info "  sudo $INSTALLROOT/run/bin/Extractors/mapextractor --silent -i <client_root_with_Data>"
-        log_marker extraction error "msg=No client data found" "hint=Provide a WoW 1.12.1 (build 5875) client Data folder and set VMANGOS_CLIENT_DATA, then re-run the installer"
+        fail_marker extraction "No client data found" "Provide a WoW 1.12.1 (build 5875) client Data folder and set VMANGOS_CLIENT_DATA, then re-run the installer"
         return 1
     fi
 
@@ -1199,16 +1296,23 @@ phase_data_extraction() {
     fi
     
     # Create directories
-    mkdir -p "$INSTALLROOT/run/bin/5875"
-    mkdir -p "$INSTALLROOT/logs/mangosd"
-    mkdir -p "$INSTALLROOT/logs/honor"
-    mkdir -p "$INSTALLROOT/logs/realmd"
+    mkdir -p "$INSTALLROOT/run/bin/5875" "$INSTALLROOT/logs/mangosd" \
+        "$INSTALLROOT/logs/honor" "$INSTALLROOT/logs/realmd" || {
+        fail_marker extraction "Failed to create the extraction output directories" "Check the permissions under $INSTALLROOT, then re-run the installer"
+        return 1
+    }
     
     # Set ownership for extraction
-    chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT"
+    chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT" || {
+        fail_marker extraction "Failed to hand the installation directory to $MANGOSOSUSER" "Check that the installer runs as root, then re-run the installer"
+        return 1
+    }
     
     # Run extractors as mangos user
-    cd "$INSTALLROOT"
+    cd "$INSTALLROOT" || {
+        fail_marker extraction "Failed to enter the installation directory $INSTALLROOT" "Check the directory permissions, then re-run the installer"
+        return 1
+    }
     
     local EXTRACTION_FAILED=0
     
@@ -1385,7 +1489,7 @@ phase_data_extraction() {
         log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/vmap_assembler --silent buildings vmaps"
         log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/MoveMapGenerator --silent"
         log_error ""
-        log_marker extraction error "msg=Data extraction failed" "hint=Verify the client data is WoW 1.12.1 (build 5875) and complete, then re-run the installer to resume from this phase"
+        fail_marker extraction "Data extraction failed" "Verify the client data is WoW 1.12.1 (build 5875) and complete, then re-run the installer to resume from this phase"
         return 1
     else
         if [ $VMAPS_FAILED -eq 1 ] || [ $MMAPS_FAILED -eq 1 ]; then
@@ -1459,7 +1563,10 @@ phase_database_import() {
     log_section "PHASE: Database Import"
     log_marker db-import start
 
-    cd "$INSTALLROOT"
+    cd "$INSTALLROOT" || {
+        fail_marker db-import "Failed to enter the installation directory $INSTALLROOT" "Check the directory permissions, then re-run the installer"
+        return 1
+    }
 
     # Download and import world database
     # Try multiple sources in order of preference
@@ -1490,7 +1597,7 @@ phase_database_import() {
                     if [ -f "mysql-dump/logon.sql" ]; then
                         log_info "Importing auth database (logon.sql)..."
                         mysql "$AUTHDB" < "mysql-dump/logon.sql" || {
-                            log_marker db-import error "msg=Failed to import the auth database" "hint=Check the MariaDB log for the failing statement, then re-run the installer"
+                            fail_marker db-import "Failed to import the auth database" "Check the MariaDB log for the failing statement, then re-run the installer"
                             return 1
                         }
                         log_marker db-import progress "percent=20" "step=Import auth database"
@@ -1499,7 +1606,7 @@ phase_database_import() {
                     if [ -f "mysql-dump/characters.sql" ]; then
                         log_info "Importing characters database..."
                         mysql "$CHARACTERDB" < "mysql-dump/characters.sql" || {
-                            log_marker db-import error "msg=Failed to import the characters database" "hint=Check the MariaDB log for the failing statement, then re-run the installer"
+                            fail_marker db-import "Failed to import the characters database" "Check the MariaDB log for the failing statement, then re-run the installer"
                             return 1
                         }
                         log_marker db-import progress "percent=40" "step=Import characters database"
@@ -1508,7 +1615,7 @@ phase_database_import() {
                     if [ -f "mysql-dump/logs.sql" ]; then
                         log_info "Importing logs database..."
                         mysql "$LOGSDB" < "mysql-dump/logs.sql" || {
-                            log_marker db-import error "msg=Failed to import the logs database" "hint=Check the MariaDB log for the failing statement, then re-run the installer"
+                            fail_marker db-import "Failed to import the logs database" "Check the MariaDB log for the failing statement, then re-run the installer"
                             return 1
                         }
                         log_marker db-import progress "percent=60" "step=Import logs database"
@@ -1517,7 +1624,7 @@ phase_database_import() {
                     if [ -f "mysql-dump/mangos.sql" ]; then
                         log_info "Importing world database (this may take a while)..."
                         mysql "$WORLDDB" < "mysql-dump/mangos.sql" || {
-                            log_marker db-import error "msg=Failed to import the world database" "hint=Check the MariaDB log for the failing statement, then re-run the installer"
+                            fail_marker db-import "Failed to import the world database" "Check the MariaDB log for the failing statement, then re-run the installer"
                             return 1
                         }
                         log_info "World database imported successfully"
@@ -1534,7 +1641,7 @@ phase_database_import() {
                     if [ -n "$WORLD_SQL" ]; then
                         log_info "Importing world database from $WORLD_SQL (this may take a while)..."
                         mysql "$WORLDDB" < "$WORLD_SQL" || {
-                            log_marker db-import error "msg=Failed to import the world database" "hint=Check the MariaDB log for the failing statement, then re-run the installer"
+                            fail_marker db-import "Failed to import the world database" "Check the MariaDB log for the failing statement, then re-run the installer"
                             return 1
                         }
                         log_info "World database imported successfully"
@@ -1579,9 +1686,15 @@ phase_database_import() {
         
         if [ "$MIGRATIONS_EXIST" -gt 0 ] && [ "$WORLD_DB_DOWNLOADED" != "true" ]; then
             log_info "Running database migrations..."
-            cd "$INSTALLROOT/source/sql/migrations"
+            cd "$INSTALLROOT/source/sql/migrations" || {
+                fail_marker db-import "Failed to enter the migrations directory" "Check the sources under $INSTALLROOT/source/sql, then re-run the installer"
+                return 1
+            }
             if [ -f "merge.sh" ]; then
-                chmod +x merge.sh
+                chmod +x merge.sh || {
+                    fail_marker db-import "Failed to make the migration merge script executable" "Check the sources under $INSTALLROOT/source/sql/migrations, then re-run the installer"
+                    return 1
+                }
                 ./merge.sh 2>&1 | tee -a "$INSTALL_LOG" || true
             fi
 
@@ -1603,7 +1716,7 @@ phase_database_import() {
     fi
 
     ensure_realmlist_entry || {
-        log_marker db-import error "msg=Failed to seed the realmlist" "hint=Check that the auth database exists and the MariaDB log for the failing statement"
+        fail_marker db-import "Failed to seed the realmlist" "Check that the auth database exists and the MariaDB log for the failing statement"
         return 1
     }
     log_marker db-import "done"
@@ -1616,7 +1729,7 @@ phase_service_setup() {
     log_marker services start
 
     # Create systemd services
-    cat > /etc/systemd/system/auth.service << EOF
+    if ! cat > /etc/systemd/system/auth.service << EOF
 [Unit]
 Description=VMaNGOS Auth Server (Classic WoW)
 After=network.target mysql.service
@@ -1633,8 +1746,12 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+    then
+        fail_marker services "Failed to write the auth service unit" "Check the install log for the failing step, then re-run the installer"
+        return 1
+    fi
 
-    cat > /etc/systemd/system/world.service << EOF
+    if ! cat > /etc/systemd/system/world.service << EOF
 [Unit]
 Description=VMaNGOS World Server (Classic WoW)
 After=network.target mysql.service
@@ -1655,25 +1772,41 @@ TTYVHangup=yes
 [Install]
 WantedBy=multi-user.target
 EOF
+    then
+        fail_marker services "Failed to write the world service unit" "Check the install log for the failing step, then re-run the installer"
+        return 1
+    fi
 
-    systemctl daemon-reload
-    systemctl enable auth.service
-    systemctl enable world.service
+    systemctl daemon-reload || {
+        fail_marker services "systemctl daemon-reload failed" "Check the install log for the systemd error, then re-run the installer"
+        return 1
+    }
+    systemctl enable auth.service || {
+        fail_marker services "Failed to enable the auth service" "Check the install log for the systemd error, then re-run the installer"
+        return 1
+    }
+    systemctl enable world.service || {
+        fail_marker services "Failed to enable the world service" "Check the install log for the systemd error, then re-run the installer"
+        return 1
+    }
     
     # Fix permissions
-    chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT"
+    chown -R "$MANGOSOSUSER:$MANGOSOSUSER" "$INSTALLROOT" || {
+        fail_marker services "Failed to hand the installation directory to $MANGOSOSUSER" "Check that the installer runs as root, then re-run the installer"
+        return 1
+    }
     
     # Start services
     log_info "Starting auth service..."
     systemctl start auth.service || {
-        log_marker services error "msg=Failed to start the auth service" "hint=Check the unit with: journalctl -u auth -n 50, then re-run the installer"
+        fail_marker services "Failed to start the auth service" "Check the unit with: journalctl -u auth -n 50, then re-run the installer"
         return 1
     }
     sleep 3
 
     log_info "Starting world service (this may take 30-60 seconds to fully load)..."
     systemctl start world.service || {
-        log_marker services error "msg=Failed to start the world service" "hint=Check the unit with: journalctl -u world -n 50, then re-run the installer"
+        fail_marker services "Failed to start the world service" "Check the unit with: journalctl -u world -n 50, then re-run the installer"
         return 1
     }
     sleep 15
@@ -1709,7 +1842,7 @@ EOF
 
     if [ "$AUTH_STATUS" != "active" ] || [ "$WORLD_STATUS" != "active" ]; then
         log_error "Service verification failed - not marking installation complete"
-        log_marker services error "msg=Service verification failed" "hint=Check journalctl -u auth and journalctl -u world for the startup failure, then re-run the installer"
+        fail_marker services "Service verification failed" "Check journalctl -u auth and journalctl -u world for the startup failure, then re-run the installer"
         return 1
     fi
 

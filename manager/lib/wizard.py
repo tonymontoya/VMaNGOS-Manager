@@ -547,6 +547,9 @@ class MarkerTracker:
     States: pending -> running -> done | failed. The "current phase" is the
     most recent phase that started and has not finished. Completion is the
     ``phase=install event=done`` marker; failure is any ``event=error``.
+    ``event=warn`` marks a step that failed without stopping the install
+    (e.g. a swallowed database CREATE/GRANT failure); warnings are recorded
+    for display but never change phase state or trigger the failure screen.
     """
 
     def __init__(self) -> None:
@@ -558,6 +561,7 @@ class MarkerTracker:
         self.failure: tuple[str, str, str] | None = None
         self.install_done: dict[str, str] | None = None
         self.marker_count = 0
+        self.warnings: list[tuple[str, str]] = []
 
     def apply(self, marker: dict[str, str]) -> None:
         phase = marker.get("phase", "")
@@ -590,10 +594,16 @@ class MarkerTracker:
             self.failure = (phase, marker.get("msg", ""), marker.get("hint", ""))
             if self.current_phase == phase:
                 self.current_phase = None
+        elif event == "warn":
+            self.warnings.append((phase, marker.get("msg", "")))
 
 
 def render_checklist(tracker: MarkerTracker) -> str:
-    """The phase checklist: done / running / failed / pending, in order."""
+    """The phase checklist: done / running / failed / pending, in order.
+
+    Warnings (non-fatal failures) are appended under the phases so a phase
+    that "done"-ed with a swallowed failure never looks clean.
+    """
     marks = {"done": "\u2713", "running": "\u25b6", "failed": "\u2717", "pending": "\u00b7"}
     suffix = {"running": "  in progress", "failed": "  FAILED", "pending": "  pending"}
     lines = []
@@ -604,6 +614,8 @@ def render_checklist(tracker: MarkerTracker) -> str:
         if state in suffix:
             line += suffix[state]
         lines.append(line)
+    for phase, msg in tracker.warnings:
+        lines.append(f"!  {PHASE_LABELS.get(phase, phase)}: {msg}")
     return "\n".join(lines)
 
 
