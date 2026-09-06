@@ -300,7 +300,10 @@ EOF
                 printf "SYMLINK=0\n"
             fi
 
-            export SUDO_DENY="'"$tmp_dir"'/client-src/dbc.MPQ"
+            # Deny the path the extractor actually reads (via Data/): the
+            # client data is then unreadable from the extractor point of
+            # view, so the staged copy under $INSTALLROOT must be used.
+            export SUDO_DENY="'"$tmp_dir"'/client-src/Data/dbc.MPQ"
             mkdir -p "$INSTALLROOT/client-data"
             touch "$INSTALLROOT/client-data/dbc.MPQ"
             prepare_extraction_root
@@ -321,6 +324,315 @@ EOF
     assert_equals "1" \
         "$(printf '%s\n' "$output" | grep -c 'RESULT3=.*root/client-data')" \
         "unreadable client data falls back to the staged client-data copy"
+}
+
+# ensure_database_server's three provisioning paths, with every external
+# command stubbed: adopt a running reachable server, install a server when
+# none is running, and refuse (with an error marker, at adoption time) a
+# running server root cannot administer.
+test_database_server_provisioning() {
+    local tmp_dir state capture failed=0
+    tmp_dir="$(mktemp -d)"
+    state="$tmp_dir/state"
+    capture="$tmp_dir/capture"
+    mkdir -p "$tmp_dir/bin" "$tmp_dir/bin2" "$state"
+
+    cat > "$tmp_dir/bin/systemctl" <<EOF
+#!/usr/bin/env bash
+printf 'systemctl:%s\n' "\$*" >> '$capture'
+if [[ "\${1:-}" == "is-active" ]]; then
+    [[ -f '$state/active' ]] && exit 0
+    exit 3
+fi
+if [[ "\${1:-}" == "start" ]]; then
+    touch '$state/active'
+fi
+exit 0
+EOF
+    # apt-get records every call; installing either package also provides
+    # the mysql binary (bin2 is the only PATH entry that ever holds mysql).
+    cat > "$tmp_dir/bin/apt-get" <<EOF
+#!/usr/bin/env bash
+printf 'apt-get:%s\n' "\$*" >> '$capture'
+case " \$* " in
+    *" mysql-client "*) cp '$tmp_dir/mysql-stub' '$tmp_dir/bin2/mysql' ;;
+    *" mysql-server "*) cp '$tmp_dir/mysql-stub' '$tmp_dir/bin2/mysql' ;;
+esac
+exit 0
+EOF
+    # The mysql client: connectable (as root, via the socket) only while a
+    # server is active and not flagged unreachable.
+    cat > "$tmp_dir/mysql-stub" <<EOF
+#!/usr/bin/env bash
+[[ "\${1:-}" == "-e" ]] || exit 2
+[[ -f '$state/unreachable' ]] && exit 1
+[[ -f '$state/active' ]] || exit 1
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/systemctl" "$tmp_dir/bin/apt-get" "$tmp_dir/mysql-stub"
+
+    # run_scenario NAME PRELUDE — sources the installer, runs the prelude
+    # (flag/client setup), then ensure_database_server; captures rc + output.
+    run_scenario() {
+        local name="$1" prelude="$2"
+        rm -rf "$state" "$tmp_dir/bin2"
+        mkdir -p "$state" "$tmp_dir/bin2"
+        : > "$capture"
+        INSTALL_LOG="$tmp_dir/install-$name.log" \
+        PATH="$tmp_dir/bin2:$tmp_dir/bin:$PATH" \
+        REPO_ROOT="$REPO_ROOT" \
+        bash -c '
+            set -u
+            source "$REPO_ROOT/vmangos_setup.sh"
+            '"$prelude"'
+            set +e
+            ensure_database_server
+            rc=$?
+            set -e
+            printf "RC=%s\n" "$rc"
+        ' > "$tmp_dir/out-$name" 2>/dev/null
+    }
+
+    # A. A running, reachable server is adopted; nothing is installed.
+    run_scenario adopt \
+        "touch '$state/active'; cp '$tmp_dir/mysql-stub' '$tmp_dir/bin2/mysql'"
+    assert_equals "0" "$(sed -n 's/^RC=//p' "$tmp_dir/out-adopt")" \
+        "a running reachable server is adopted" || failed=1
+    assert_equals "1" \
+        "$(grep -c 'Using existing MySQL/MariaDB server (already reachable)' "$tmp_dir/out-adopt" || true)" \
+        "adoption of a reachable server is logged" || failed=1
+    assert_equals "0" \
+        "$(grep -c '^apt-get:' "$capture" || true)" \
+        "adopting a reachable server installs nothing" || failed=1
+
+    # B. No server running: mysql-server is installed and started.
+    run_scenario install ""
+    assert_equals "0" "$(sed -n 's/^RC=//p' "$tmp_dir/out-install")" \
+        "a fresh host provisions its own server" || failed=1
+    assert_equals "1" \
+        "$(grep -c '^apt-get:install -y mysql-server$' "$capture" || true)" \
+        "no running server means mysql-server is installed" || failed=1
+    assert_equals "1" \
+        "$(grep -c '^systemctl:start mysql$' "$capture" || true)" \
+        "the installed server is started" || failed=1
+    assert_equals "1" \
+        "$(grep -c 'installed, started, and reachable' "$tmp_dir/out-install" || true)" \
+        "a provisioned server is confirmed reachable" || failed=1
+
+    # C. A server is running but root cannot connect: refused at adoption
+    #    time with an error marker, not adopted to fail later at grants.
+    run_scenario unreachable \
+        "touch '$state/active' '$state/unreachable'; cp '$tmp_dir/mysql-stub' '$tmp_dir/bin2/mysql'"
+    assert_equals "1" "$(sed -n 's/^RC=//p' "$tmp_dir/out-unreachable")" \
+        "a running but unreachable server is refused" || failed=1
+    assert_equals "1" \
+        "$(grep -c '^@@VMANGOS v1 phase=database event=error' "$tmp_dir/out-unreachable" || true)" \
+        "refusing an unreachable server emits a database error marker" || failed=1
+    assert_equals "1" \
+        "$(grep '^@@VMANGOS v1 ' "$tmp_dir/out-unreachable" | grep -c 'msg="A database server is running but root cannot connect to it"' || true)" \
+        "the error marker names the real problem" || failed=1
+    assert_equals "1" \
+        "$(grep -c 'cannot administer' "$tmp_dir/out-unreachable" || true)" \
+        "the refusal names the exact broken check" || failed=1
+    assert_equals "0" \
+        "$(grep -c '^apt-get:' "$capture" || true)" \
+        "an unreachable server with a client present installs nothing" || failed=1
+
+    # D. A server is running and reachable, but the client is missing: the
+    #    client is installed and the server adopted.
+    run_scenario client-missing "touch '$state/active'"
+    assert_equals "0" "$(sed -n 's/^RC=//p' "$tmp_dir/out-client-missing")" \
+        "a running server without a client is adopted after client install" || failed=1
+    assert_equals "1" \
+        "$(grep -c '^apt-get:install -y mysql-client$' "$capture" || true)" \
+        "only the mysql client is installed for an adoptable server" || failed=1
+    assert_equals "0" \
+        "$(grep -c '^apt-get:install -y mysql-server' "$capture" || true)" \
+        "no second server is installed next to a running one" || failed=1
+
+    # E. A server is running, the client is missing, and it stays
+    #    unreachable after the client install: still refused with a marker.
+    run_scenario client-missing-unreachable "touch '$state/active' '$state/unreachable'"
+    assert_equals "1" "$(sed -n 's/^RC=//p' "$tmp_dir/out-client-missing-unreachable")" \
+        "a server that stays unreachable after client install is refused" || failed=1
+    assert_equals "1" \
+        "$(grep -c '^@@VMANGOS v1 phase=database event=error' "$tmp_dir/out-client-missing-unreachable" || true)" \
+        "the refusal after client install emits an error marker" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
+# The symlink farm staged over read-only client data: created with per-MPQ
+# symlinks plus the Data/ entry, and reused as-is (not rebuilt) on a resume.
+test_client_data_symlink_farm() {
+    local tmp_dir output failed=0
+    tmp_dir="$(mktemp -d)"
+    mkdir -p "$tmp_dir/bin" "$tmp_dir/client" "$tmp_dir/root"
+
+    cat > "$tmp_dir/bin/sudo" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-u" ]]; then shift 2; fi
+if [[ "\${1:-}" == "test" ]]; then
+    if [[ "\${3:-}" == "$tmp_dir/client/Data/dbc.MPQ" ]]; then exit 1; fi
+    [[ -r "\${3:-}" ]] && exit 0
+    exit 1
+fi
+exec "\$@"
+EOF
+    chmod +x "$tmp_dir/bin/sudo"
+
+    touch "$tmp_dir/client/dbc.MPQ" "$tmp_dir/client/terrain.MPQ" "$tmp_dir/client/patch.MPQ"
+    mkdir -p "$tmp_dir/client/Interface"
+    # Read-only client data (like a :ro mount): the self-symlink cannot be
+    # created in place, so the farm under the install root is the only way.
+    chmod a-w "$tmp_dir/client"
+
+    output="$(
+        INSTALL_LOG="$tmp_dir/install.log" \
+        PATH="$tmp_dir/bin:$PATH" \
+        REPO_ROOT="$REPO_ROOT" \
+        FARM_TEST_TMP="$tmp_dir" \
+        bash -c '
+            set -euo pipefail
+            source "$REPO_ROOT/vmangos_setup.sh"
+            INSTALLROOT="$FARM_TEST_TMP/root"
+            CLIENT_DATA="$FARM_TEST_TMP/client"
+            MANGOSOSUSER="mangos"
+            STAGED="$FARM_TEST_TMP/root/client-data"
+
+            prepare_extraction_root
+            printf "ROOT1=%s\n" "$CLIENT_DATA_EXTRACT_ROOT"
+            [ -L "$STAGED/dbc.MPQ" ] && printf "DBC_LINK=1\n"
+            [ "$(readlink "$STAGED/dbc.MPQ")" = "$FARM_TEST_TMP/client/dbc.MPQ" ] && printf "DBC_TARGET=1\n"
+            [ -L "$STAGED/Data" ] && [ "$(readlink "$STAGED/Data")" = "." ] && printf "DATA_LINK=1\n"
+            [ -L "$STAGED/Interface" ] && printf "INTERFACE_LINK=1\n"
+
+            # A resume re-enters preparation: the farm must be reused, not
+            # rebuilt (the sentinel only survives if nothing rm -rf-ed it).
+            touch "$STAGED/.sentinel"
+            prepare_extraction_root
+            printf "ROOT2=%s\n" "$CLIENT_DATA_EXTRACT_ROOT"
+            [ -f "$STAGED/.sentinel" ] && printf "SENTINEL=1\n"
+        ' 2>/dev/null
+    )"
+    chmod u+w "$tmp_dir/client"
+    rm -rf "$tmp_dir"
+
+    assert_equals "$tmp_dir/root/client-data" \
+        "$(printf '%s\n' "$output" | sed -n 's/^ROOT1=//p')" \
+        "read-only client data is staged as the symlink farm" || failed=1
+    assert_equals "1" "$(printf '%s\n' "$output" | sed -n 's/^DBC_LINK=//p')" \
+        "farm entries are symlinks, not copies" || failed=1
+    assert_equals "1" "$(printf '%s\n' "$output" | sed -n 's/^DBC_TARGET=//p')" \
+        "farm symlinks point at the read-only client data" || failed=1
+    assert_equals "1" "$(printf '%s\n' "$output" | sed -n 's/^DATA_LINK=//p')" \
+        "the farm provides the Data/ self-symlink the extractor needs" || failed=1
+    assert_equals "1" "$(printf '%s\n' "$output" | sed -n 's/^INTERFACE_LINK=//p')" \
+        "the Interface directory is part of the farm" || failed=1
+    assert_equals "$tmp_dir/root/client-data" \
+        "$(printf '%s\n' "$output" | sed -n 's/^ROOT2=//p')" \
+        "a resumed install reuses the staged farm" || failed=1
+    assert_equals "1" "$(printf '%s\n' "$output" | sed -n 's/^SENTINEL=//p')" \
+        "reusing the farm does not rebuild it" || failed=1
+
+    return "$failed"
+}
+
+# An interrupted vmap extraction leaves a partial Buildings dir; the resume
+# must clear it (vmapextractor refuses polluted directories) instead of
+# silently downgrading to a vmap-less install.
+test_extraction_resume_clears_partial_vmaps() {
+    local tmp_dir root client output failed=0
+    tmp_dir="$(mktemp -d)"
+    root="$tmp_dir/root"
+    client="$tmp_dir/client-src"
+    mkdir -p "$tmp_dir/bin" "$client" "$root/run/bin/Extractors" "$root/client-data" "$root/.install-checkpoints" "$root/Buildings"
+
+    cat > "$tmp_dir/bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" ]]; then shift 2; fi
+if [[ "${1:-}" == "test" ]]; then
+    [[ -r "${3:-}" ]] && exit 0
+    exit 1
+fi
+exec "$@"
+EOF
+    cat > "$tmp_dir/bin/id" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$tmp_dir/bin/chown" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/sudo" "$tmp_dir/bin/id" "$tmp_dir/bin/chown"
+
+    touch "$client/dbc.MPQ" "$client/terrain.MPQ" "$root/client-data/dbc.MPQ"
+    # What the killed first attempt left behind.
+    touch "$root/Buildings/partial-from-interrupted-run"
+
+    cat > "$root/run/bin/Extractors/MapExtractor" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p dbc maps
+touch dbc/Map.dbc maps/0004331.map
+exit 0
+EOF
+    cat > "$root/run/bin/Extractors/VMapExtractor" <<EOF
+#!/usr/bin/env bash
+printf 'vmapextractor:%s\n' "\$*" >> '$tmp_dir/capture'
+mkdir -p Buildings
+touch Buildings/fresh-output.wmo
+exit 0
+EOF
+    cat > "$root/run/bin/Extractors/VMapAssembler" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p vmaps
+touch vmaps/000.vmtree
+exit 0
+EOF
+    cat > "$root/run/bin/Extractors/MoveMapGenerator" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p mmaps
+touch mmaps/000.mmap
+exit 0
+EOF
+    chmod +x "$root/run/bin/Extractors/"*
+
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        refresh_runtime_paths
+        CLIENT_DATA="'"$client"'"
+        MANGOSOSUSER="mangos"
+        export SUDO_DENY="'"$client"'/dbc.MPQ"
+
+        phase_data_extraction
+    ' > "$tmp_dir/phase.out" 2>/dev/null
+    output="$(cat "$tmp_dir/phase.out")"
+
+    assert_equals "1" \
+        "$(grep -c 'Clearing partial vmap extraction output' "$tmp_dir/phase.out" || true)" \
+        "a partial Buildings dir from an earlier attempt is cleared with a warning" || failed=1
+    assert_equals "1" \
+        "$(grep -c '^vmapextractor:' "$tmp_dir/capture" 2>/dev/null || true)" \
+        "vmapextractor re-runs on the resume" || failed=1
+    assert_equals "0" \
+        "$(test -e "$root/Buildings/partial-from-interrupted-run" && echo 1 || echo 0)" \
+        "the stale partial Buildings content is gone" || failed=1
+    assert_equals "1" \
+        "$(test -e "$root/Buildings/fresh-output.wmo" && echo 1 || echo 0)" \
+        "the re-run extraction produced fresh output" || failed=1
+    assert_equals "1" \
+        "$(grep -c 'phase=extraction event=done' "$tmp_dir/phase.out" || true)" \
+        "extraction still completes" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
 }
 
 test_extraction_phase_invocations() {
@@ -772,7 +1084,7 @@ EOF
         INSTALLROOT="'"$root"'"
         SERVERIP="10.0.5.5"
         MANGOSDBUSER="mangos"
-        MANGOSDBPASS="sekrit"
+        MANGOSDBPASS="ZaZZ--%!9----%\$*Z-^&0Aa9"
         AUTHDB="auth"
         WORLDDB="world"
         CHARACTERDB="characters"
@@ -782,18 +1094,25 @@ EOF
     ' > "$tmp_dir/test.out" 2>&1
 
     local failed=0
-    assert_equals "LoginDatabaseInfo = \"127.0.0.1;3306;mangos;sekrit;auth\"" \
+    # The exact password class the #104 TUI smoke broke on: the wizard
+    # charset includes & and $, and sed replacement text expands & to the
+    # whole matched line — the config used to corrupt mid-password and the
+    # daemons crash-looped on a malformed connection string.
+    assert_equals "LoginDatabaseInfo = \"127.0.0.1;3306;mangos;ZaZZ--%!9----%\$*Z-^&0Aa9;auth\"" \
         "$(grep '^LoginDatabaseInfo' "$root/run/etc/realmd.conf")" \
         "realmd connects to the local database, not the LAN IP" || failed=1
     assert_equals "BindIP = \"10.0.5.5\"" \
         "$(grep '^BindIP' "$root/run/etc/realmd.conf")" \
         "realmd still binds the LAN IP for clients" || failed=1
-    assert_equals "WorldDatabase.Info = \"127.0.0.1;3306;mangos;sekrit;world\"" \
+    assert_equals "WorldDatabase.Info = \"127.0.0.1;3306;mangos;ZaZZ--%!9----%\$*Z-^&0Aa9;world\"" \
         "$(grep '^WorldDatabase.Info' "$root/run/etc/mangosd.conf")" \
         "mangosd world database points at 127.0.0.1" || failed=1
     assert_equals "0" \
         "$(grep -c ';3306;.*10\.0\.5\.5' "$root/run/etc/mangosd.conf" "$root/run/etc/realmd.conf" | awk -F: '{s+=$2} END {print s}')" \
         "no database tuple keeps the LAN IP" || failed=1
+    assert_equals "4" \
+        "$(grep -c 'ZaZZ--%!9----%.\*Z-\^&0Aa9' "$root/run/etc/mangosd.conf" || true)" \
+        "every mangosd connection string carries the password verbatim" || failed=1
 
     rm -rf "$tmp_dir"
     return "$failed"
@@ -1080,6 +1399,9 @@ main() {
     run_test "Installer: Guided prompts" test_guided_prompts_collect_values
     run_test "Installer: Guided state" test_guided_state_round_trip
     run_test "Installer: Extraction root" test_extraction_root_preparation
+    run_test "Installer: Client data symlink farm" test_client_data_symlink_farm
+    run_test "Installer: Database server provisioning" test_database_server_provisioning
+    run_test "Installer: Extraction resume clears partial vmaps" test_extraction_resume_clears_partial_vmaps
     run_test "Installer: Extraction phase" test_extraction_phase_invocations
     run_test "Installer: Extraction failure honesty" test_extraction_failure_honesty
     run_test "Installer: Download retry" test_download_retry_honesty

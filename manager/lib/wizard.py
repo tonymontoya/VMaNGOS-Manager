@@ -41,7 +41,11 @@ DEFAULT_OS_USER = "mangos"
 PROVISION_TARGETS = ("vmangos_manager", "vmangos_only")
 REINSTALL_POLICIES = ("abort", "replace")
 
-PASSWORD_CHARSET = "a-zA-Z0-9!@#$%^&*"
+# Password characters that survive every consumer: the shell-sourced
+# secrets file (escaping handles $ " ` \), the SQL grant statements (no '), and
+# the server .conf files (mangos's Config parser ends a value at '#' and the
+# connection string separates fields with ';' — both must never appear).
+PASSWORD_CHARSET = "a-zA-Z0-9!@$%^&*"
 PASSWORD_LENGTH = 24
 
 # Checkpoints at or past the client-data extraction phase: a resume past
@@ -113,7 +117,7 @@ def parse_secrets_file(path: str | Path) -> dict[str, str]:
             continue
         if len(raw_value) >= 2 and raw_value[0] == '"' and raw_value[-1] == '"':
             raw_value = raw_value[1:-1]
-        values[key] = raw_value
+        values[key] = unescape_conf_value(raw_value)
     return values
 
 
@@ -199,6 +203,26 @@ def client_data_required(resume: bool, checkpoint: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def escape_conf_value(value: str) -> str:
+    """Escape a value for the secrets file's double-quoted shell format.
+
+    The file is consumed by sourcing it (auto_install.sh, the runner, the
+    gate), so anything shell-active inside double quotes — ``$``, backtick,
+    ``"``, backslash — must be escaped or a generated password like
+    ``a$$b`` silently corrupts (or trips ``set -u``) on source.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
+
+def unescape_conf_value(raw: str) -> str:
+    """Reverse escape_conf_value (a reader for the file this module writes).
+
+    A backslash that does not precede ``\\ $ " ` `` is left alone, so legacy
+    files written without escaping still parse to their literal text.
+    """
+    return re.sub(r'\\([\\$"`])', r"\1", raw)
+
+
 def render_setup_conf(values: InstallValues, generated_at: str) -> str:
     """Render the exact auto_install.sh secrets file format."""
     lines = [
@@ -207,31 +231,31 @@ def render_setup_conf(values: InstallValues, generated_at: str) -> str:
         "# Permissions: root:root 600",
         "",
         "# Database Admin (root)",
-        f'SQLADMINUSER="{values.sql_admin_user}"',
-        f'SQLADMINIP="{values.sql_admin_ip}"',
-        f'SQLADMINPASS="{values.sql_admin_pass}"',
+        f'SQLADMINUSER="{escape_conf_value(values.sql_admin_user)}"',
+        f'SQLADMINIP="{escape_conf_value(values.sql_admin_ip)}"',
+        f'SQLADMINPASS="{escape_conf_value(values.sql_admin_pass)}"',
         "",
         "# VMANGOS Database User",
-        f'MANGOSDBUSER="{values.db_user}"',
-        f'MANGOSDBPASS="{values.db_password}"',
+        f'MANGOSDBUSER="{escape_conf_value(values.db_user)}"',
+        f'MANGOSDBPASS="{escape_conf_value(values.db_password)}"',
         "",
         "# OS User for running server",
-        f'MANGOSOSUSER="{values.os_user}"',
+        f'MANGOSOSUSER="{escape_conf_value(values.os_user)}"',
         "",
         "# Database Names",
-        f'AUTHDB="{values.auth_db}"',
-        f'WORLDDB="{values.world_db}"',
-        f'CHARACTERDB="{values.characters_db}"',
-        f'LOGSDB="{values.logs_db}"',
+        f'AUTHDB="{escape_conf_value(values.auth_db)}"',
+        f'WORLDDB="{escape_conf_value(values.world_db)}"',
+        f'CHARACTERDB="{escape_conf_value(values.characters_db)}"',
+        f'LOGSDB="{escape_conf_value(values.logs_db)}"',
         "",
         "# Installation Paths",
-        f'INSTALLROOT="{values.install_root}"',
-        f'CLIENTDATA="{values.client_data}"',
+        f'INSTALLROOT="{escape_conf_value(values.install_root)}"',
+        f'CLIENTDATA="{escape_conf_value(values.client_data)}"',
         "",
         "# Auto-install settings",
-        f'SKIP_SECURE_MYSQL="{values.skip_secure_mysql}"',
-        f'PROVISIONTARGET="{values.provision_target}"',
-        f'REINSTALL_POLICY="{values.reinstall_policy}"',
+        f'SKIP_SECURE_MYSQL="{escape_conf_value(values.skip_secure_mysql)}"',
+        f'PROVISIONTARGET="{escape_conf_value(values.provision_target)}"',
+        f'REINSTALL_POLICY="{escape_conf_value(values.reinstall_policy)}"',
         "",
     ]
     return "\n".join(lines)
@@ -1139,7 +1163,13 @@ def create_wizard_app(
         def _start_journal(self) -> None:
             # journalctl is resolved from PATH so tests can stub it. tail_lines
             # is 0 after a retry so the prior failure's markers are not replayed.
-            command = ["journalctl", "-u", INSTALLER_UNIT_NAME, "-n", str(self.tail_lines), "-f"]
+            # -o cat: message-only output — parse_marker matches markers at the
+            # START of a line, and the default journal format prefixes every
+            # line with a timestamp/host/proc header that would hide them.
+            command = [
+                "journalctl", "-u", INSTALLER_UNIT_NAME,
+                "-n", str(self.tail_lines), "-f", "-o", "cat",
+            ]
             try:
                 self._proc = subprocess.Popen(
                     command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True

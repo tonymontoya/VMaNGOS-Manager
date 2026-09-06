@@ -10,6 +10,7 @@ Seams (agreed):
 """
 
 import asyncio
+import subprocess
 import os
 
 import pytest
@@ -96,6 +97,17 @@ def test_generate_password_charset_and_length():
         password = w.generate_password()
         assert len(password) == 24
         assert set(password) <= set(w.PASSWORD_CHARSET)
+
+
+def test_password_charset_is_server_config_safe():
+    # The password lands verbatim inside the server .conf connection string
+    # (semicolon-separated fields) and mangos's Config parser ends a value at
+    # '#': a generated '#'-password truncates LoginDatabaseInfo and realmd
+    # crash-loops with "Incorrectly formatted database connection string"
+    # (found by the #104 TUI smoke). ';' is the field separator; '"' would
+    # break the quoted value; '\'' breaks the SQL grant; '\' escapes.
+    for banned in "#;\"'\\":
+        assert banned not in w.PASSWORD_CHARSET, banned
 
 
 def test_generate_password_rejects_bad_arguments():
@@ -211,6 +223,51 @@ def test_write_setup_conf_replaces_existing(tmp_path):
     second.db_password = "second"
     w.write_setup_conf(target, second, "2026-09-01T00:00:01+00:00")
     assert w.parse_secrets_file(target)["MANGOSDBPASS"] == "second"
+
+
+def test_secrets_file_survives_shell_sourcing(tmp_path):
+    # The file's consumers source it in bash (the runner, the gate,
+    # auto_install.sh). A generated password can contain shell-active
+    # characters ($ backslash quote backtick — all in or alongside the
+    # documented charset), so the rendered file must yield the exact value
+    # back under `source`, and the wizard's own parser must agree.
+    nasty = '!z%A$$#0z9Az!$&$aA--a@&^"\\`end'
+    values = make_values()
+    values.db_password = nasty
+    values.sql_admin_pass = "pa$$word\\with\"quotes"
+    target = os.path.join(str(tmp_path), "setup.conf")
+    w.write_setup_conf(target, values, "2026-09-01T00:00:00+00:00")
+
+    sourced = subprocess.run(
+        ["bash", "-c", 'set -u; source "$1"; printf "%s" "$MANGOSDBPASS"', "_", target],
+        capture_output=True, text=True, check=True,
+    )
+    assert sourced.stdout == nasty
+    admin = subprocess.run(
+        ["bash", "-c", 'set -u; source "$1"; printf "%s" "$SQLADMINPASS"', "_", target],
+        capture_output=True, text=True, check=True,
+    )
+    assert admin.stdout == values.sql_admin_pass
+
+    parsed = w.parse_secrets_file(target)
+    assert parsed["MANGOSDBPASS"] == nasty
+    assert parsed["SQLADMINPASS"] == values.sql_admin_pass
+
+
+def test_generated_passwords_round_trip_through_the_secrets_file(tmp_path):
+    # Whatever generate_password produces must survive the file. Draw a
+    # password from every charset character class at once via many samples.
+    for _ in range(25):
+        values = make_values()
+        values.db_password = w.generate_password()
+        target = os.path.join(str(tmp_path), "setup.conf")
+        w.write_setup_conf(target, values, "2026-09-01T00:00:00+00:00")
+        sourced = subprocess.run(
+            ["bash", "-c", 'set -u; source "$1"; printf "%s" "$MANGOSDBPASS"', "_", target],
+            capture_output=True, text=True, check=True,
+        )
+        assert sourced.stdout == values.db_password
+        assert w.parse_secrets_file(target)["MANGOSDBPASS"] == values.db_password
 
 
 def test_redact_secrets():
@@ -1062,6 +1119,35 @@ def test_viewer_detach_never_stops_the_unit(tmp_path):
 
     # Detaching must not have issued any unit stop (or any) runner command.
     assert calls == []
+
+
+def test_viewer_journal_tail_requests_message_only_output(tmp_path):
+    # The journal tail must run with -o cat: parse_marker matches markers at
+    # the START of a line, and journalctl's default format prefixes every line
+    # with a timestamp/host/proc header — without -o cat the viewer folds zero
+    # markers against a real journal and falls back forever (found by the
+    # #104 TUI smoke). The fake journalctl emits message-only lines, exactly
+    # what -o cat produces, so the rendered progress proves the folding.
+    lines = ["@@VMANGOS v1 phase=build event=progress percent=40 step=\"Compiling\""]
+    bin_dir = make_fake_journalctl(tmp_path, lines, delay=0.2)
+    app, _ = build_wizard(tmp_path, attach=True)
+
+    with with_path_prepended(bin_dir):
+
+        async def scenario():
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert screen_name(app) == "ViewerScreen"
+                await wait_for(lambda: "40%" in screen_text(app), message="progress shown")
+
+        asyncio.run(scenario())
+
+    args = journalctl_args_log(tmp_path)
+    assert args, "the viewer should have started a journal tail"
+    tokens = args[0].split()
+    assert "-o" in tokens and tokens[tokens.index("-o") + 1] == "cat", (
+        f"journal tail must use -o cat (message-only output), got: {args[0]!r}"
+    )
 
 
 def test_viewer_marker_starvation_falls_back_to_checkpoint(tmp_path):
