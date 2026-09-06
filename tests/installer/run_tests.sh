@@ -1084,7 +1084,7 @@ EOF
         INSTALLROOT="'"$root"'"
         SERVERIP="10.0.5.5"
         MANGOSDBUSER="mangos"
-        MANGOSDBPASS="sekrit"
+        MANGOSDBPASS="ZaZZ--%!9----%\$*Z-^&0Aa9"
         AUTHDB="auth"
         WORLDDB="world"
         CHARACTERDB="characters"
@@ -1094,18 +1094,25 @@ EOF
     ' > "$tmp_dir/test.out" 2>&1
 
     local failed=0
-    assert_equals "LoginDatabaseInfo = \"127.0.0.1;3306;mangos;sekrit;auth\"" \
+    # The exact password class the #104 TUI smoke broke on: the wizard
+    # charset includes & and $, and sed replacement text expands & to the
+    # whole matched line — the config used to corrupt mid-password and the
+    # daemons crash-looped on a malformed connection string.
+    assert_equals "LoginDatabaseInfo = \"127.0.0.1;3306;mangos;ZaZZ--%!9----%\$*Z-^&0Aa9;auth\"" \
         "$(grep '^LoginDatabaseInfo' "$root/run/etc/realmd.conf")" \
         "realmd connects to the local database, not the LAN IP" || failed=1
     assert_equals "BindIP = \"10.0.5.5\"" \
         "$(grep '^BindIP' "$root/run/etc/realmd.conf")" \
         "realmd still binds the LAN IP for clients" || failed=1
-    assert_equals "WorldDatabase.Info = \"127.0.0.1;3306;mangos;sekrit;world\"" \
+    assert_equals "WorldDatabase.Info = \"127.0.0.1;3306;mangos;ZaZZ--%!9----%\$*Z-^&0Aa9;world\"" \
         "$(grep '^WorldDatabase.Info' "$root/run/etc/mangosd.conf")" \
         "mangosd world database points at 127.0.0.1" || failed=1
     assert_equals "0" \
         "$(grep -c ';3306;.*10\.0\.5\.5' "$root/run/etc/mangosd.conf" "$root/run/etc/realmd.conf" | awk -F: '{s+=$2} END {print s}')" \
         "no database tuple keeps the LAN IP" || failed=1
+    assert_equals "4" \
+        "$(grep -c 'ZaZZ--%!9----%.\*Z-\^&0Aa9' "$root/run/etc/mangosd.conf" || true)" \
+        "every mangosd connection string carries the password verbatim" || failed=1
 
     rm -rf "$tmp_dir"
     return "$failed"

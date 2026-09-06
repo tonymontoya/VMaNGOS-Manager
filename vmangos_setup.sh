@@ -1195,13 +1195,19 @@ phase_config_setup() {
     
     log_info "Configuring realmd.conf..."
 
+    # The password is interpolated into sed replacement text below, where &
+    # and \ are special (& expands to the whole matched line, corrupting the
+    # config). Escape them so any legal password lands verbatim.
+    local MANGOSDBPASS_SED="${MANGOSDBPASS//\\/\\\\}"
+    MANGOSDBPASS_SED="${MANGOSDBPASS_SED//&/\\&}"
+
     # The database is set up locally by this installer (MySQL binds 127.0.0.1
     # by default on Ubuntu), so the daemons must connect via 127.0.0.1 - not
     # $SERVERIP, which nothing listens on. Clients keep using $SERVERIP via
     # the realmlist entry and BindIP below.
     # The config format is: LoginDatabaseInfo = "host;port;user;pass;db"
     # Use more flexible sed patterns that handle variations in spacing
-    sed -i "s|LoginDatabaseInfo.*=.*\"127\.0\.0\.1;3306;mangos;.*;realmd\"|LoginDatabaseInfo = \"127.0.0.1;3306;$MANGOSDBUSER;$MANGOSDBPASS;$AUTHDB\"|" "$INSTALLROOT/run/etc/realmd.conf"
+    sed -i "s|LoginDatabaseInfo.*=.*\"127\.0\.0\.1;3306;mangos;.*;realmd\"|LoginDatabaseInfo = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$AUTHDB\"|" "$INSTALLROOT/run/etc/realmd.conf"
     sed -i "s|BindIP.*=.*\"0\.0\.0\.0\"|BindIP = \"$SERVERIP\"|" "$INSTALLROOT/run/etc/realmd.conf"
 
     log_info "Configuring mangosd.conf..."
@@ -1209,10 +1215,10 @@ phase_config_setup() {
     # Update World server config - handle both old and new format
     # New format uses dots: LoginDatabase.Info, WorldDatabase.Info, etc.
     # Use flexible patterns that match the actual config file format
-    sed -i "s|LoginDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|LoginDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;$MANGOSDBPASS;$AUTHDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
-    sed -i "s|WorldDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|WorldDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;$MANGOSDBPASS;$WORLDDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
-    sed -i "s|CharacterDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|CharacterDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;$MANGOSDBPASS;$CHARACTERDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
-    sed -i "s|LogsDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|LogsDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;$MANGOSDBPASS;$LOGSDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|LoginDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|LoginDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$AUTHDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|WorldDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|WorldDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$WORLDDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|CharacterDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|CharacterDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$CHARACTERDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
+    sed -i "s|LogsDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|LogsDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$LOGSDB\"|" "$INSTALLROOT/run/etc/mangosd.conf"
     
     # Update DataDir to point to installation root
     sed -i "s|DataDir = \"\.\"|DataDir = \"$INSTALLROOT\"|" "$INSTALLROOT/run/etc/mangosd.conf"
