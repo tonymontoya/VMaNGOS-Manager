@@ -99,6 +99,17 @@ def test_generate_password_charset_and_length():
         assert set(password) <= set(w.PASSWORD_CHARSET)
 
 
+def test_password_charset_is_server_config_safe():
+    # The password lands verbatim inside the server .conf connection string
+    # (semicolon-separated fields) and mangos's Config parser ends a value at
+    # '#': a generated '#'-password truncates LoginDatabaseInfo and realmd
+    # crash-loops with "Incorrectly formatted database connection string"
+    # (found by the #104 TUI smoke). ';' is the field separator; '"' would
+    # break the quoted value; '\'' breaks the SQL grant; '\' escapes.
+    for banned in "#;\"'\\":
+        assert banned not in w.PASSWORD_CHARSET, banned
+
+
 def test_generate_password_rejects_bad_arguments():
     with pytest.raises(ValueError):
         w.generate_password(length=0)

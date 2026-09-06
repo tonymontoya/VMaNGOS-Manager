@@ -41,7 +41,11 @@ DEFAULT_OS_USER = "mangos"
 PROVISION_TARGETS = ("vmangos_manager", "vmangos_only")
 REINSTALL_POLICIES = ("abort", "replace")
 
-PASSWORD_CHARSET = "a-zA-Z0-9!@#$%^&*"
+# Password characters that survive every consumer: the shell-sourced
+# secrets file (escaping handles $ " ` \), the SQL grant statements (no '), and
+# the server .conf files (mangos's Config parser ends a value at '#' and the
+# connection string separates fields with ';' — both must never appear).
+PASSWORD_CHARSET = "a-zA-Z0-9!@$%^&*"
 PASSWORD_LENGTH = 24
 
 # Checkpoints at or past the client-data extraction phase: a resume past
