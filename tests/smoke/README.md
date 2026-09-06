@@ -190,6 +190,16 @@ without re-downloading.
   run hostile values through both the parser and a real `bash -c source`.
   `auto_install.sh` has the same latent quirk in its writer; it is the
   deprecated path, so it is noted on #104 rather than changed.
+* **Generated passwords could not live in the server config (fixed, this
+  branch):** the first fully TUI-launched run reached the services phase and
+  crash-looped — `realmd` reported `Incorrectly formatted database connection
+  string` because the generated password contained `#`, and mangos's Config
+  parser (`src/shared/Config/Config.cpp`) ends a value at `#`,
+  truncating `LoginDatabaseInfo` mid-password. The wizard's password charset
+  now excludes every character a consumer cannot carry (`#` config comment,
+  `;` connection-string separator, `"` value quoting, `'` SQL grants,
+  `\` escapes). `auto_install.sh`'s generator has the same latent quirk
+  (deprecated path, noted on #104).
 * **`--collect` + marker-less failure (documented):** because the runner uses
   `systemd-run --collect`, a *failed* unit is unregistered and immediately
   reports `ActiveState=inactive` (not `failed`). The viewer therefore detects
