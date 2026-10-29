@@ -52,6 +52,7 @@ from dashboard import (
     render_metrics_panel,
     render_player_pulse,
     render_service_panel,
+    render_sidebar_target,
     set_palette,
 )
 
@@ -1157,6 +1158,98 @@ def test_a_narrow_metric_card_gives_each_metric_one_row():
     assert "range " in strip_markup(render_monitor_trends(snapshot, history, 30)), (
         "the wide Trends card dropped the scale sentence its sparkline rows have room for"
     )
+
+
+def test_a_short_terminal_keeps_the_console_target_inside_the_sidebar(tmp_path):
+    """The rail beside the buttons has to end inside the window, not past it.
+
+    The sidebar is 27 rows of content and a 24-row terminal gives it 21, so the last
+    six rows -- the Console Target block naming the install prefix, the config, and
+    the revision the buttons act on -- sat below the fold with only a mouse wheel to
+    reach them. The pulse and target trim below SHORT_VIEWPORT_HEIGHT, and the tail
+    is measured inside the column rather than assumed from the copy.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            assert app.short_sidebar, "a 24-row terminal was not treated as short"
+            sidebar = app.query_one("#sidebar")
+            target = app.query_one("#sidebar-target")
+            assert sidebar.max_scroll_y == 0, f"the sidebar still overflows by {sidebar.max_scroll_y} rows"
+            assert target.region.bottom <= sidebar.content_region.bottom, (
+                "the Console Target is still below the fold"
+            )
+            pulse = strip_markup(str(app.query_one("#sidebar-pulse").renderable))
+            lines = strip_markup(str(target.renderable))
+            assert "install" in lines and "source" in lines, lines
+            assert "units" not in lines, lines
+            for label in ("Players", "Auth", "World"):
+                assert label in pulse, pulse
+            for label in ("Refresh", "Backups", "Updated"):
+                assert label not in pulse, pulse
+
+    asyncio.run(scenario())
+
+
+def test_the_sidebar_grows_its_full_copy_back_as_soon_as_it_fits(tmp_path):
+    """Trimming is a fit decision, not a smaller default; 30 rows is where it ends.
+
+    SHORT_VIEWPORT_HEIGHT was measured: 27 rows of content plus the header row and
+    the column's own padding. A guard that leaves the rail trimmed at a height where
+    it fits is a dashboard with less to say than it has room for.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            assert not app.short_sidebar, "a 30-row terminal fits the rail, so it must not trim"
+            sidebar = app.query_one("#sidebar")
+            target = app.query_one("#sidebar-target")
+            assert sidebar.max_scroll_y == 0, "the roomy rail still does not fit"
+            assert target.region.bottom <= sidebar.content_region.bottom, "the tail is still cut"
+            pulse = strip_markup(str(app.query_one("#sidebar-pulse").renderable))
+            lines = strip_markup(str(target.renderable))
+            for label in ("Updated", "Refresh", "Backups"):
+                assert label in pulse, pulse
+            for label in ("config", "units"):
+                assert label in lines, lines
+
+    asyncio.run(scenario())
+
+
+def test_a_broken_config_refuses_to_be_trimmed_out_of_the_sidebar():
+    """A line that only ever reads "ok" can go; a line that reads "invalid" cannot.
+
+    The short rail drops the config and unit names because they are stable between
+    installs -- which is exactly why they are safe to drop, and equally why a
+    failure in one of them is not. Both snapshots are hand-built so only the config
+    verdict differs between them.
+    """
+
+    def snapshot_with(validate_ok):
+        return {
+            "config_summary": {
+                "install_root": "/opt/mangos",
+                "auth_service": "mangos-auth",
+                "world_service": "mangos-world",
+            },
+            "config_path": "/opt/mangos/manager/config/manager.conf",
+            "config_validate": {"ok": validate_ok, "problems": [] if validate_ok else ["db host unreachable"]},
+            "update_check": {"ok": True, "data": {"branch": "main", "local_commit": "c6d3339"}},
+        }
+
+    healthy = strip_markup(render_sidebar_target(snapshot_with(True), short=True))
+    assert "install" in healthy and "source" in healthy, healthy
+    assert "config" not in healthy and "units" not in healthy, healthy
+
+    broken = strip_markup(render_sidebar_target(snapshot_with(False), short=True))
+    assert "config" in broken and "invalid" in broken, broken
+    assert "units" not in broken, broken
 
 
 def test_the_narrow_window_asks_the_cards_for_their_narrow_form(tmp_path):

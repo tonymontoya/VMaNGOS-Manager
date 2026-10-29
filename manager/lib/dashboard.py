@@ -225,6 +225,13 @@ LOG_FILTER_OPTIONS: dict[str, list[tuple[str, str]]] = {
 # the panels inside it vanish — an empty frame reads as a crash. Past that
 # threshold the grids fall back to natural heights and the view scrolls.
 COMPACT_VIEWPORT_HEIGHT = 46
+# Below this many rows the sidebar stops fitting, measured rather than guessed: its
+# content is 27 rows (head, seven modules, pulse, target) and the column has
+# rows - 1 header - 2 padding of its own, so 30 rows is the first height that holds
+# all of it. Hiding the Console Target block is the failure mode -- in a 24-row
+# terminal that is exactly the block naming the prefix, the config, and the revision
+# the buttons act on, and nothing but a mouse wheel brings it back.
+SHORT_VIEWPORT_HEIGHT = 30
 
 # Below this many columns, a fixed side panel and a 1fr table cannot both be
 # read: at 100 columns the Accounts table is left with roughly twenty columns and
@@ -2042,7 +2049,17 @@ def render_sidebar_module(view_id: str, key: str, label: str, active: bool) -> s
     return f"[{ACCENT_MUTED}]  [/] [bold {ACCENT_GOLD}]{key}[/] [{ACCENT_MUTED}]{label}[/]"
 
 
-def render_sidebar_pulse(snapshot: dict[str, Any], refresh_interval: int) -> str:
+def render_sidebar_pulse(
+    snapshot: dict[str, Any], refresh_interval: int, short: bool = False
+) -> str:
+    """The realm's pulse, in the 32-column rail beside the buttons.
+
+    In a short terminal the pulse trims to the lines that answer "is it up, and is
+    anyone in it". The refresh cadence and the backup count are not facts an
+    operator acts on from the rail -- the cadence is in the banner and the backups
+    are a key away -- and losing them is what keeps the Console Target below in
+    view instead of scrolled out of the window.
+    """
     server = snapshot.get("server", {})
     server_data = server.get("data", {}) if server.get("ok") else {}
     services = server_data.get("services", {})
@@ -2051,21 +2068,25 @@ def render_sidebar_pulse(snapshot: dict[str, Any], refresh_interval: int) -> str
     backups = snapshot.get("backups", {}).get("summary", {})
     players = player_summary(snapshot)
 
-    return "\n".join(
-        [
-            "",
-            f"[bold {ACCENT_SKY}]Realm Pulse[/]",
-            f"[{ACCENT_MUTED}]Updated[/]  {escape_markup(iso_to_clock(snapshot.get('captured_at')))}",
-            f"[{ACCENT_MUTED}]Refresh[/]  {refresh_interval}s",
-            f"[{ACCENT_MUTED}]Players[/]  {players.get('online_count', 0)} online",
-            f"[{ACCENT_MUTED}]Backups[/]  {backups.get('count', 0)} stored",
-            f"[{ACCENT_MUTED}]Auth[/]     {format_state(auth.get('health', auth.get('state', 'unavailable')))}",
-            f"[{ACCENT_MUTED}]World[/]    {format_state(world.get('health', world.get('state', 'unavailable')))}",
-        ]
+    lines: list[str] = [] if short else [""]
+    lines.append(f"[bold {ACCENT_SKY}]Realm Pulse[/]")
+    if not short:
+        lines.append(
+            f"[{ACCENT_MUTED}]Updated[/]  {escape_markup(iso_to_clock(snapshot.get('captured_at')))}"
+        )
+        lines.append(f"[{ACCENT_MUTED}]Refresh[/]  {refresh_interval}s")
+        lines.append(f"[{ACCENT_MUTED}]Backups[/]  {backups.get('count', 0)} stored")
+    lines.append(f"[{ACCENT_MUTED}]Players[/]  {players.get('online_count', 0)} online")
+    lines.append(
+        f"[{ACCENT_MUTED}]Auth[/]     {format_state(auth.get('health', auth.get('state', 'unavailable')))}"
     )
+    lines.append(
+        f"[{ACCENT_MUTED}]World[/]    {format_state(world.get('health', world.get('state', 'unavailable')))}"
+    )
+    return "\n".join(lines)
 
 
-def render_sidebar_target(snapshot: dict[str, Any]) -> str:
+def render_sidebar_target(snapshot: dict[str, Any], short: bool = False) -> str:
     """What this console is pointed at, kept where the operator is looking.
 
     Every action in this panel runs against whatever the config file names, not
@@ -2080,7 +2101,13 @@ def render_sidebar_target(snapshot: dict[str, Any]) -> str:
     validate = snapshot.get("config_validate") or {}
     update = (snapshot.get("update_check") or {}).get("data") or {}
 
-    lines = ["", f"[bold {ACCENT_SKY}]Console Target[/]"]
+    # In a short terminal the block keeps the two lines that say where this console
+    # acts and on which revision; the config name and the unit names are stable
+    # between installs and are the first thing to go. A *broken* config is the
+    # exception: a line that only ever reads "ok" can be trimmed, a line that reads
+    # "invalid" cannot, so it stays whether or not the rail is short.
+    lines: list[str] = [] if short else [""]
+    lines.append(f"[bold {ACCENT_SKY}]Console Target[/]")
 
     install_root = str(summary.get("install_root") or "")
     lines.append(f"[{ACCENT_MUTED}]install[/]  {escape_markup(install_root or 'unknown')}")
@@ -2093,14 +2120,15 @@ def render_sidebar_target(snapshot: dict[str, Any]) -> str:
         config_state, config_tone = "ok", ACCENT_TEAL
     else:
         config_state, config_tone = "invalid", ACCENT_ROSE
-    lines.append(
-        f"[{ACCENT_MUTED}]config[/]    {escape_markup(config_name)} [{config_tone}]{config_state}[/]"
-    )
+    if not short or config_state != "ok":
+        lines.append(
+            f"[{ACCENT_MUTED}]config[/]    {escape_markup(config_name)} [{config_tone}]{config_state}[/]"
+        )
 
     units = ", ".join(
         str(name) for name in (summary.get("auth_service"), summary.get("world_service")) if name
     )
-    if units:
+    if units and not short:
         lines.append(f"[{ACCENT_MUTED}]units[/]     {escape_markup(units)}")
 
     branch = str(update.get("branch") or "")
@@ -3694,6 +3722,7 @@ def create_app(
             # Decided from the screen size, re-decided on resize and after the first
             # layout pass; the banner wording is written against it.
             self.narrow_viewport = False
+            self.short_sidebar = False
 
         def compose(self) -> ComposeResult:
             # icon= keeps Textual's default glyph out of the header: it is
@@ -3846,6 +3875,10 @@ def create_app(
             # need more window than two columns of *window*, because a column that
             # is narrower than the row inside it is a row the card loses.
             self.screen.set_class(self.size.width < TWO_COLUMN_MINIMUM_WIDTH, "stacked")
+            # The sidebar trims on its own height rule, decided from App.size for the
+            # same reason the others are: before the first layout pass there is no
+            # screen size to ask.
+            self.short_sidebar = self.size.height < SHORT_VIEWPORT_HEIGHT
             if narrow != self.narrow_viewport:
                 # The banner text is written for the room available, not merely
                 # styled for it, so the decision has to be re-taken here: a window
@@ -3904,9 +3937,13 @@ def create_app(
                 item.update(render_sidebar_module(view_id, key, label, active=view_id == self.active_view))
                 item.set_class(view_id == self.active_view, "active")
             self.query_one("#sidebar-pulse", Static).update(
-                render_sidebar_pulse(self.snapshot, self.refresh_interval)
+                render_sidebar_pulse(
+                    self.snapshot, self.refresh_interval, short=self.short_sidebar
+                )
             )
-            self.query_one("#sidebar-target", Static).update(render_sidebar_target(self.snapshot))
+            self.query_one("#sidebar-target", Static).update(
+                render_sidebar_target(self.snapshot, short=self.short_sidebar)
+            )
             self.query_one("#action-banner", Static).update(
                 render_action_banner(
                     self.active_view,
