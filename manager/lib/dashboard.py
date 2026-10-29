@@ -110,6 +110,12 @@ LOG_FILTER_OPTIONS: dict[str, list[tuple[str, str]]] = {
     "limit": [("10 events", "10"), ("25 events", "25"), ("50 events", "50"), ("100 events", "100"), ("200 events", "200")],
 }
 
+# Below this many rows the Overview and Monitor grids cannot fit both of their
+# design-height rows. The second row is `1fr`, so it collapses to a border and
+# the panels inside it vanish — an empty frame reads as a crash. Past that
+# threshold the grids fall back to natural heights and the view scrolls.
+COMPACT_VIEWPORT_HEIGHT = 46
+
 # Sidebar module rows (view_id, nav key, label). The sidebar items, the
 # command-rail Navigate row, and the command palette all derive from this.
 SIDEBAR_MODULES: list[tuple[str, str, str]] = [
@@ -1733,6 +1739,61 @@ def render_sidebar_pulse(snapshot: dict[str, Any], refresh_interval: int) -> str
     )
 
 
+def render_sidebar_target(snapshot: dict[str, Any]) -> str:
+    """What this console is pointed at, kept where the operator is looking.
+
+    Every action in this panel runs against whatever the config file names, not
+    against whatever the operator last cd'd into. On a host with a stale clone
+    or a second config lying around, that distinction is the difference between
+    restarting the realm and restarting the wrong thing, so the target is stated
+    beside the buttons instead of three screens away in the config view. The
+    sidebar is 32 columns with 2 of padding on each side, so every line here has
+    to fit in 28 — which is why the config is named rather than pathed.
+    """
+    summary = snapshot.get("config_summary") or {}
+    validate = snapshot.get("config_validate") or {}
+    update = (snapshot.get("update_check") or {}).get("data") or {}
+
+    lines = ["", f"[bold {ACCENT_SKY}]Console Target[/]"]
+
+    install_root = str(summary.get("install_root") or "")
+    lines.append(f"[{ACCENT_MUTED}]install[/]  {escape_markup(install_root or 'unknown')}")
+
+    config_path = str(snapshot.get("config_path") or "")
+    config_name = config_path.rsplit("/", 1)[-1] if config_path else "unknown"
+    if not validate:
+        config_state, config_tone = "unknown", ACCENT_MUTED
+    elif validate.get("ok"):
+        config_state, config_tone = "ok", ACCENT_TEAL
+    else:
+        config_state, config_tone = "invalid", ACCENT_ROSE
+    lines.append(
+        f"[{ACCENT_MUTED}]config[/]    {escape_markup(config_name)} [{config_tone}]{config_state}[/]"
+    )
+
+    units = ", ".join(
+        str(name) for name in (summary.get("auth_service"), summary.get("world_service")) if name
+    )
+    if units:
+        lines.append(f"[{ACCENT_MUTED}]units[/]     {escape_markup(units)}")
+
+    branch = str(update.get("branch") or "")
+    commit = str(update.get("local_commit") or "")[:7]
+    if branch or commit:
+        behind = int(update.get("commits_behind") or 0)
+        if behind:
+            state, tone = f"{behind} behind", ACCENT_GOLD
+        elif update.get("worktree_dirty"):
+            state, tone = "worktree dirty", ACCENT_GOLD
+        else:
+            state, tone = "current", ACCENT_TEAL
+        source = f"{branch}@{commit}" if branch else commit
+        lines.append(f"[{ACCENT_MUTED}]source[/]    {escape_markup(source)}")
+        lines.append(f"{'':10}[{tone}]{escape_markup(state)}[/]")
+
+    return "\n".join(lines)
+
+
 def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
     server = snapshot["server"]
     if not server["ok"]:
@@ -3183,13 +3244,17 @@ def create_app(
             self.action_inflight = False
 
         def compose(self) -> ComposeResult:
-            yield Header(show_clock=True)
+            # icon= keeps Textual's default glyph out of the header: it is
+            # U+2B58, which most terminal fonts do not carry, so the first thing
+            # an operator sees is a tofu box.
+            yield Header(show_clock=True, icon="◆")
             with Horizontal(id="shell"):
                 with Vertical(id="sidebar"):
                     yield Static("", id="sidebar-head")
                     for view_id, key, label in SIDEBAR_MODULES:
                         yield SidebarItem(view_id, key, label)
                     yield Static("", id="sidebar-pulse")
+                    yield Static("", id="sidebar-target")
                 with Container(id="content"):
                     yield Static("", id="action-banner")
                     with Container(id="view-stack"):
@@ -3279,6 +3344,7 @@ def create_app(
 
             self.apply_theme()
             self.apply_view_state()
+            self.apply_view_density()
             self.set_interval(self.refresh_interval, self.request_snapshot_refresh)
 
         def apply_theme(self) -> None:
@@ -3286,6 +3352,20 @@ def create_app(
             self.remove_class("theme-light")
             self.remove_class("theme-dark")
             self.add_class(f"theme-{self.theme_name}")
+
+        def apply_view_density(self) -> None:
+            """Pick the roomy or the scrolling grid layout for the active screen.
+
+            The class lands on the screen rather than the app because Textual
+            matches CSS against the screen and its widgets; a class on the app
+            node styles nothing. Modals carry their own palette, so they are not
+            part of this.
+            """
+            compact = self.screen.size.height < COMPACT_VIEWPORT_HEIGHT
+            self.screen.set_class(compact, "compact")
+
+        def on_resize(self, event: object) -> None:
+            self.apply_view_density()
 
         def apply_view_state(self) -> None:
             for view_name in ("overview", "monitor", "accounts", "backups", "config", "logs", "operations"):
@@ -3323,6 +3403,7 @@ def create_app(
             self.query_one("#sidebar-pulse", Static).update(
                 render_sidebar_pulse(self.snapshot, self.refresh_interval)
             )
+            self.query_one("#sidebar-target", Static).update(render_sidebar_target(self.snapshot))
             self.query_one("#action-banner", Static).update(
                 render_action_banner(
                     self.active_view,
@@ -4348,6 +4429,11 @@ DASHBOARD_CSS = """
             margin-top: 1;
         }
 
+        #sidebar-target {
+            height: auto;
+            margin-top: 1;
+        }
+
         #content {
             width: 1fr;
             layout: vertical;
@@ -4425,6 +4511,26 @@ DASHBOARD_CSS = """
             grid-rows: 15 1fr;
             grid-gutter: 1 2;
             height: 1fr;
+        }
+
+        /* Short terminals: the two-row grids are sized for a tall window.
+           When the remainder after the fixed first row is zero, the lower
+           panels become empty frames, which reads as a broken console rather
+           than a small one. Below COMPACT_VIEWPORT_HEIGHT the panels take
+           their natural height and the view scrolls instead. */
+        .compact #overview-grid {
+            height: auto;
+            grid-rows: 15 auto;
+        }
+
+        .compact #monitor-grid {
+            height: auto;
+            grid-rows: 18 auto;
+        }
+
+        .compact #overview-view,
+        .compact #monitor-view {
+            overflow-y: auto;
         }
 
         #monitor-grid {
