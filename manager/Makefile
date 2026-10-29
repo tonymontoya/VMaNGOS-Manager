@@ -51,6 +51,7 @@ test-dashboard:
 
 # Install to system
 install:
+	@bash lib/install_guard.sh check-manager-prefix "$(INSTALL_ROOT)"
 	@echo "Installing VMANGOS Manager into $(INSTALL_ROOT)..."
 	@install -d "$(INSTALL_BIN_DIR)" "$(INSTALL_LIB_DIR)" "$(INSTALL_TEST_DIR)"
 	@install -m 755 bin/vmangos-manager "$(INSTALL_BIN_DIR)/vmangos-manager"

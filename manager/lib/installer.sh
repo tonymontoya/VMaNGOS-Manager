@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck source=lib/common.sh
+# shellcheck source=lib/install_guard.sh
 #
 # Transient install unit lifecycle for VMANGOS Manager
 #
@@ -9,6 +10,10 @@
 #
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# The layout guards live here rather than in the wizard: the TUI, a direct CLI
+# call and the wizard's own shell-out all pass through this module, and a guard
+# that only one of those paths enforces is a guard the other paths skip.
+source "$(dirname "${BASH_SOURCE[0]}")/install_guard.sh"
 
 # The whole install lifecycle shares one transient unit.
 INSTALLER_UNIT_NAME="vmangos-install"
@@ -80,6 +85,13 @@ installer_clear_install() {
     done
     if (( components < 2 )); then
         log_error "Refusing to clear a top-level directory: $install_root"
+        return 1
+    fi
+
+    # Layout guard: a realm root at or under the manager's prefix is not a
+    # realm root at all — clearing it would remove the manager's own files,
+    # which carry no .install-checkpoints marker and cannot be resumed.
+    if ! install_guard_refuse_root_inside_manager "$install_root"; then
         return 1
     fi
 
@@ -165,6 +177,16 @@ installer_unit_start() {
     local env_lines
     if ! env_lines=$(installer_env_from_secrets "$secrets_file"); then
         log_error "Failed to read install secrets from: $secrets_file"
+        return 1
+    fi
+
+    # Layout guard, before anything is handed to systemd-run: the install root
+    # comes from a secrets file an operator edits by hand, and this is the last
+    # point that can say "that root is inside the manager" before hours of
+    # build output are written there.
+    local install_root=""
+    install_root=$(printf '%s\n' "$env_lines" | sed -n 's/^VMANGOS_INSTALL_ROOT=//p' | head -n 1)
+    if ! install_guard_refuse_root_inside_manager "$install_root"; then
         return 1
     fi
 

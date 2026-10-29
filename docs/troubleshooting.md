@@ -50,6 +50,37 @@ The wizard resolves the setup script one directory above the manager's own locat
 sudo ln -sfn /path/to/VMaNGOS-Manager/vmangos_setup.sh /opt/mangos/vmangos_setup.sh
 ```
 
+The wizard prints that `ln -sfn` line itself, naming the path it actually looked for, so the fix can be pasted rather than looked up.
+
+### The installer refused my install root
+
+The install layout is not free-form: the realm root contains the manager, never the other way round. Both mistakes are refused before a single file is written, because both destroy a working installation.
+
+A realm root at or inside the manager's own prefix:
+
+```text
+Refusing to install a realm at /opt/mangos/manager/realm: it is the manager's own prefix, or inside it.
+A later manager update or uninstall would touch the realm tree, and the two installs could no longer be told apart.
+Install the realm at a root that contains the manager instead, for example: INSTALLROOT=/opt/mangos
+```
+
+Installing the manager into a directory that is already a realm:
+
+```text
+Refusing to install the manager into /opt/mangos: that directory is a VMaNGOS realm install.
+The manager writes its own Makefile, VERSION and build-info into its prefix, which would replace files belonging to the realm.
+Install the manager inside the realm root instead, for example: PREFIX=/opt/mangos/manager
+```
+
+The layout every other part of this project assumes:
+
+```text
+/opt/mangos                  ← realm root (bin/, etc/, run/, vmangos_setup.sh)
+/opt/mangos/manager          ← the manager (bin/, lib/, tests/, VERSION)
+```
+
+The marker for a realm root is any of `bin/mangosd`, `bin/realmd`, `run/etc/mangosd.conf`, `run/etc/realmd.conf` or `.install-checkpoints`. If your layout is deliberate and different, pass a `PREFIX=` (for the manager) or an `INSTALLROOT=` (in the install secrets file) that does not nest.
+
 ---
 
 ## ⚙️ Config
