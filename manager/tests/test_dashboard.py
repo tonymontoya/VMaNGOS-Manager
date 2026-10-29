@@ -18,7 +18,21 @@ import pytest
 from textual.widgets import DataTable, Select
 from textual.widgets._toast import Toast
 
-from dashboard import create_app, empty_snapshot
+import re
+
+from dashboard import (
+    ACTION_STYLES,
+    DASHBOARD_CSS,
+    DARK_PALETTE,
+    LIGHT_PALETTE,
+    create_app,
+    empty_snapshot,
+    format_flag,
+    palette_color,
+    render_meter,
+    render_player_pulse,
+    set_palette,
+)
 
 # The app's daemon refresh worker can still be mid-call when the pilot
 # tears the app down; its post-exit thread exception is teardown noise,
@@ -119,7 +133,7 @@ def add_backups_to_fixture(path, *, age_seconds=300, credentials_ready=False):
         json.dump(snapshot, handle)
 
 
-def build_app(tmp_path, *, initial_view, accounts=None, snapshot_file="default", refresh=30):
+def build_app(tmp_path, *, initial_view, accounts=None, snapshot_file="default", refresh=30, theme="dark"):
     stub, log_path = write_recorder_stub(tmp_path)
     if accounts is None:
         accounts = make_accounts(8)
@@ -129,7 +143,7 @@ def build_app(tmp_path, *, initial_view, accounts=None, snapshot_file="default",
         manager_bin=stub,
         config_path="/dev/null",
         refresh=refresh,
-        theme="dark",
+        theme=theme,
         initial_view=initial_view,
         screenshot_path=None,
         snapshot_file=snapshot_file,
@@ -751,5 +765,162 @@ def test_unconfigured_host_is_told_once(tmp_path):
             combined = banner + services + alerts
             assert "CONFIG_NOT_FOUND" not in combined, "internal error codes stay internal"
             assert "not fetched for this view" not in combined, "unfetched bookkeeping stays invisible"
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Palette: the light theme has to be a theme, not a dark screen with a light
+# background painted on it.
+
+
+@pytest.fixture(autouse=True)
+def _leave_the_dark_palette_behind():
+    """set_palette mutates module globals; no test may leak its palette into the next."""
+    yield
+    set_palette("dark")
+
+
+def _luminance(hex_color):
+    channels = [int(hex_color[start : start + 2], 16) / 255 for start in (1, 3, 5)]
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(first, second):
+    first_lum, second_lum = _luminance(first), _luminance(second)
+    lighter, darker = max(first_lum, second_lum), min(first_lum, second_lum)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _surfaces():
+    """The surfaces each theme actually draws, read out of DASHBOARD_CSS.
+
+    Read from the CSS rather than restated here: a rule that changes its
+    background must move the palette test with it, not quietly stay green.
+    """
+    match = re.search(r"\n\s+Screen \{\s*background: (#[0-9a-f]{6});", DASHBOARD_CSS)
+    dark_screen = match.group(1)
+    match = re.search(r"Screen\.theme-light \{\s*background: (#[0-9a-f]{6});", DASHBOARD_CSS)
+    light_screen = match.group(1)
+    match = re.search(r"\n\s+\.panel \{[^}]*background: (#[0-9a-f]{6});", DASHBOARD_CSS, re.S)
+    dark_panel = match.group(1)
+    match = re.search(r"Screen\.theme-light \.panel \{[^}]*background: (#[0-9a-f]{6});", DASHBOARD_CSS, re.S)
+    light_panel = match.group(1)
+    return {
+        "dark": (DARK_PALETTE, (dark_screen, dark_panel)),
+        "light": (LIGHT_PALETTE, (light_screen, light_panel)),
+    }
+
+
+def test_palette_roles_are_readable_on_their_own_surfaces():
+    """Every role colour has to clear its own theme's surfaces.
+
+    The light theme inherited the dark palette for everything built in Python
+    rather than CSS, and #cbd5e1 on #f6f1e7 is about 2:1 — legible enough to
+    look at, too faint to read. 4.5:1 is the WCAG AA floor for body text, and
+    these are labels an operator has to read under time pressure.
+    """
+    for theme, (palette, surfaces) in _surfaces().items():
+        for role, color in palette.items():
+            for surface in surfaces:
+                ratio = _contrast(color, surface)
+                assert ratio >= 4.5, f"{theme} {role} {color} on {surface} is {ratio:.2f}:1, below 4.5:1"
+
+
+def test_panels_recolour_when_the_palette_changes():
+    """Markup is built from role colours at render time, so a switch is visible."""
+    snapshot = empty_snapshot("no manager yet")
+
+    dark = render_player_pulse(snapshot, [], 2)
+    set_palette("light")
+    light = render_player_pulse(snapshot, [], 2)
+
+    assert DARK_PALETTE["muted"] in dark, "the dark palette is not in the dark render"
+    assert DARK_PALETTE["muted"] not in light, "a dark label survived the switch to light"
+    assert LIGHT_PALETTE["muted"] in light, "the light palette never reached the markup"
+
+    # Colours captured at def time or import time are the easy way for a stale
+    # dark hex to survive, so both paths are exercised — from a known palette.
+    set_palette("dark")
+    assert DARK_PALETTE["green"] in render_meter("50")
+    assert DARK_PALETTE["green"] in format_flag(True)
+    assert palette_color(ACTION_STYLES["success"][1]) == DARK_PALETTE["green"]
+    set_palette("light")
+    assert LIGHT_PALETTE["green"] in render_meter("50")
+    assert LIGHT_PALETTE["green"] in format_flag(True)
+    assert palette_color(ACTION_STYLES["success"][1]) == LIGHT_PALETTE["green"]
+
+
+def test_light_theme_classes_land_on_the_screen_not_the_app(tmp_path):
+    """Textual matches CSS against widgets.
+
+    Every light override in DASHBOARD_CSS is written as Screen.theme-light, and
+    the app node is not a widget: adding the class there styles nothing, which
+    is why `t` used to report success and change nothing.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="overview", theme="light")
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            assert app.screen.has_class("theme-light"), "the active screen is not themed light"
+            assert not app.screen.has_class("theme-dark")
+            # The app node is where this used to go, and it styles nothing there:
+            # asserting its absence is what makes this test fail on the old code.
+            assert not app.has_class("theme-light"), "the palette class landed on the app node"
+            await pilot.press("t")
+            await pilot.pause()
+            assert app.screen.has_class("theme-dark"), "t did not switch the screen back to dark"
+            assert not app.has_class("theme-dark"), "the palette class landed on the app node"
+
+    asyncio.run(scenario())
+
+
+def test_toggling_the_theme_recolours_the_panels(tmp_path):
+    """``t`` has to change the colours the panels are built with, not just report.
+
+    The panes are Rich visuals, and reading their styles out of a widget means
+    poking private attributes, so this asserts through the same public seam the
+    dashboard uses: the render function fed the app's own snapshot. If the
+    toggle stops handing the palette to the render layer, the markup still comes
+    back with dark hexes and this fails.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="overview", theme="dark")
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="first snapshot")
+            before = render_player_pulse(app.snapshot, [], app.refresh_interval)
+            assert DARK_PALETTE["muted"] in before, "the dark palette never reached the panel markup"
+            await pilot.press("t")
+            await wait_for(lambda: app.theme_name == "light", message="toggle to light")
+            after = render_player_pulse(app.snapshot, [], app.refresh_interval)
+            assert LIGHT_PALETTE["muted"] in after, "the toggle left the panels drawing with dark colours"
+            assert DARK_PALETTE["muted"] not in after, "a dark colour survived the toggle"
+
+    asyncio.run(scenario())
+
+
+def test_a_pushed_modal_inherits_the_active_theme(tmp_path):
+    """A confirm dialog with the dark palette on a light screen is its own warning."""
+    app, _log_path = build_app(tmp_path, initial_view=MONITOR_KEYS_VIEW, theme="light")
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            await pilot.press("x")  # stop, which asks before it acts
+            await wait_for(
+                lambda: app.screen.__class__.__name__ == "ConfirmScreen",
+                message="confirm screen",
+            )
+            # Both screens in the stack, and not the app node: Textual pushed the
+            # class onto modals on its own even when it was set on the app, which
+            # is why the main screen — the one an operator actually looks at — was
+            # the half that stayed dark.
+            for screen in app.screen_stack:
+                assert screen.has_class("theme-light"), f"{screen.__class__.__name__} kept the dark palette"
+            assert not app.has_class("theme-light"), "the palette class landed on the app node"
 
     asyncio.run(scenario())
