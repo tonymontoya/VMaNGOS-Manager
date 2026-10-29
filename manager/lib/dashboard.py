@@ -34,6 +34,19 @@ DARK_PALETTE = {
     "red": "#ef4444",
     "red_soft": "#f87171",
     "slate": "#94a3b8",
+    # Selection chrome. Textual paints the row cursor and the scrollbars from its
+    # own theme variables, whose default is a purple that appears in neither
+    # palette here. A cursor the operator cannot see is worse than no cursor, and
+    # a scrollbar in a colour the theme never chose makes the light theme look
+    # like a different program.
+    "cursor_bg": "#2563eb",
+    "cursor_fg": "#f8fafc",
+    "cursor_blur_bg": "#274463",
+    "cursor_blur_fg": "#e6edf7",
+    "scrollbar": "#3b82f6",
+    "scrollbar_hover": "#7dd3fc",
+    "scrollbar_active": "#7dd3fc",
+    "scrollbar_track": "#12283c",
 }
 
 LIGHT_PALETTE = {
@@ -50,6 +63,15 @@ LIGHT_PALETTE = {
     "red": "#b91c1c",
     "red_soft": "#b91c1c",
     "slate": "#57606a",
+    # See DARK_PALETTE: the same roles, chosen for ink-on-paper surfaces.
+    "cursor_bg": "#1d4ed8",
+    "cursor_fg": "#ffffff",
+    "cursor_blur_bg": "#b9c6d6",
+    "cursor_blur_fg": "#142033",
+    "scrollbar": "#5a6673",
+    "scrollbar_hover": "#1d4ed8",
+    "scrollbar_active": "#1d4ed8",
+    "scrollbar_track": "#e7e1d6",
 }
 
 STATUS_COLORS = {
@@ -93,6 +115,24 @@ _ACCENT_NAMES = {
 }
 
 CURRENT_PALETTE = DARK_PALETTE
+
+
+# Roles that describe a filled block rather than ink on a surface: a selection
+# block or a scrollbar. They are judged against the text they carry, not against
+# the panel behind them, so the ink-on-surface test skips them and the chrome
+# test covers them.
+CHROME_ROLES = frozenset(
+    {
+        "cursor_bg",
+        "cursor_fg",
+        "cursor_blur_bg",
+        "cursor_blur_fg",
+        "scrollbar",
+        "scrollbar_hover",
+        "scrollbar_active",
+        "scrollbar_track",
+    }
+)
 
 
 def palette_color(role: str) -> str:
@@ -185,6 +225,13 @@ LOG_FILTER_OPTIONS: dict[str, list[tuple[str, str]]] = {
 # the panels inside it vanish — an empty frame reads as a crash. Past that
 # threshold the grids fall back to natural heights and the view scrolls.
 COMPACT_VIEWPORT_HEIGHT = 46
+
+# Below this many columns, a fixed side panel and a 1fr table cannot both be
+# read: at 100 columns the Accounts table is left with roughly twenty columns and
+# renders as an empty frame, which looks like a broken console rather than a small
+# one. The measured number is where a 1fr pane stops clearing about 30 columns
+# once a 40-wide detail panel and the 32-wide sidebar are subtracted.
+NARROW_VIEWPORT_WIDTH = 122
 
 # Sidebar module rows (view_id, nav key, label). The sidebar items, the
 # command-rail Navigate row, and the command palette all derive from this.
@@ -1715,21 +1762,42 @@ def render_action_banner(
     action_next_step: str = "",
     action_view_context: str | None = None,
     setup: dict[str, Any] | None = None,
+    narrow: bool = False,
 ) -> str:
     tone_label, tone_role = ACTION_STYLES.get(action_tone, ACTION_STYLES["info"])
     tone_color = palette_color(tone_role)
     captured_at = escape_markup(iso_to_display(snapshot.get("captured_at")))
-    message = escape_markup(truncate_text(last_action or "dashboard started", 140))
+    # In a narrow window the banner is the first thing that grows, and every row
+    # it takes comes off the table below it. The message is the part that can be
+    # shortened without losing the state it reports: the tone label already says
+    # whether the last action worked.
+    message_room = 44 if narrow else 140
+    message = escape_markup(truncate_text(last_action or "dashboard started", message_room))
     receipt = escape_markup(truncate_text(action_receipt or "", 140))
     next_step = escape_markup(truncate_text(action_next_step or "", 140))
     view_title = VIEW_TITLES.get(active_view, active_view.title())
     view_summary = VIEW_SUMMARIES.get(active_view, "")
     show_follow_up = not action_view_context or active_view == action_view_context
-    lines = [
-        f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]  [{ACCENT_MUTED}]realm console[/]  [bold {ACCENT_SKY}]{view_title}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
-        f"[{ACCENT_MUTED}]last refresh[/] {captured_at}  [{ACCENT_MUTED}]last action[/] [bold {tone_color}]{tone_label}[/] [{ACCENT_MUTED}]—[/] {message}",
-    ]
-    if view_summary:
+    # In a narrow window each wrapped line of this banner comes straight off the
+    # table below it, so the banner states the same facts in fewer characters:
+    # the view name replaces the "realm console" tag, and the last action is
+    # reported by its tone rather than its prose (the Ops view keeps the full
+    # receipt, and a failure still reads as one because the tone is red).
+    if narrow:
+        lines = [
+            f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]  [bold {ACCENT_SKY}]{view_title}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
+            f"[{ACCENT_MUTED}]refresh[/] {iso_to_clock(snapshot.get('captured_at'))}  "
+            f"[{ACCENT_MUTED}]action[/] [bold {tone_color}]{tone_label}[/]",
+        ]
+    else:
+        lines = [
+            f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]  [{ACCENT_MUTED}]realm console[/]  [bold {ACCENT_SKY}]{view_title}[/]  [{ACCENT_MUTED}]refresh[/] {refresh_interval}s",
+            f"[{ACCENT_MUTED}]last refresh[/] {captured_at}  [{ACCENT_MUTED}]last action[/] [bold {tone_color}]{tone_label}[/] [{ACCENT_MUTED}]—[/] {message}",
+        ]
+    # The footer's "This View" row already names the actions available in the
+    # current view, so in a narrow window the prose is the part that goes: it is a
+    # restatement, and it costs two to four rows of table.
+    if view_summary and not narrow:
         lines.extend(["", f"[bold {ACCENT_SKY}]This View[/] {escape_markup(view_summary)}"])
     # A host that cannot serve data yet gets one explanation here, not one
     # per panel — and the command that resolves it.
@@ -3318,6 +3386,9 @@ def create_app(
             self.last_refresh_failed = False
             self.snapshot_loaded = False
             self.action_inflight = False
+            # Decided from the screen size, re-decided on resize and after the first
+            # layout pass; the banner wording is written against it.
+            self.narrow_viewport = False
 
         def compose(self) -> ComposeResult:
             # icon= keeps Textual's default glyph out of the header: it is
@@ -3421,6 +3492,12 @@ def create_app(
             self.apply_theme()
             self.apply_view_state()
             self.apply_view_density()
+            # At mount the screen has no size yet, so the density decision above is
+            # taken from a zero-sized screen — which marked every terminal compact
+            # (and, newly, narrow) until the window was resized. The deferred call
+            # runs after the first layout pass, when the screen knows its size;
+            # on_resize covers every change after that.
+            self.call_after_refresh(self.apply_view_density)
             self.set_interval(self.refresh_interval, self.request_snapshot_refresh)
 
         def apply_theme(self) -> None:
@@ -3453,8 +3530,20 @@ def create_app(
             node styles nothing. Modals carry their own palette, so they are not
             part of this.
             """
-            compact = self.screen.size.height < COMPACT_VIEWPORT_HEIGHT
+            # App.size is the terminal the driver is talking to, and it is known
+            # before the first layout pass; screen.size is zero until then, which
+            # once made every session start out compact and narrow.
+            compact = self.size.height < COMPACT_VIEWPORT_HEIGHT
             self.screen.set_class(compact, "compact")
+            narrow = self.size.width < NARROW_VIEWPORT_WIDTH
+            self.screen.set_class(narrow, "narrow")
+            if narrow != self.narrow_viewport:
+                # The banner text is written for the room available, not merely
+                # styled for it, so the decision has to be re-taken here: a window
+                # that starts narrow and is widened keeps the cramped wording until
+                # something else happens to repaint the banner.
+                self.narrow_viewport = narrow
+                self.refresh_chrome()
 
         def on_resize(self, event: object) -> None:
             self.apply_view_density()
@@ -3507,6 +3596,7 @@ def create_app(
                     self.last_action_next_step,
                     self.last_action_view,
                     self.snapshot.get("setup"),
+                    narrow=self.narrow_viewport,
                 )
             )
             self.query_one("#command-rail", Static).update(render_command_rail(self.active_view))
@@ -4466,11 +4556,43 @@ DASHBOARD_CSS = """
         Screen {
             background: #071522;
             color: #e6edf7;
+            scrollbar-color: #3b82f6;
+            scrollbar-color-hover: #7dd3fc;
+            scrollbar-color-active: #7dd3fc;
+            scrollbar-background: #12283c;
+            scrollbar-corner-color: #12283c;
         }
 
         Screen.theme-light {
             background: #f6f1e7;
             color: #142033;
+            scrollbar-color: #5a6673;
+            scrollbar-color-hover: #1d4ed8;
+            scrollbar-color-active: #1d4ed8;
+            scrollbar-background: #e7e1d6;
+            scrollbar-corner-color: #e7e1d6;
+        }
+
+        /* Scrollbar colour is not inherited: Textual reads it off each scrollable
+           widget, so a rule on Screen alone leaves every inner pane painted in
+           Textual's default purple (measured: #4f4270 dark, #b89ae5 light — a hue
+           neither palette contains). The universal rule is what makes the whole
+           tree honest; Screen keeps its own copy so the background it paints
+           behind a scrollbar is the one it chose. */
+        * {
+            scrollbar-color: #3b82f6;
+            scrollbar-color-hover: #7dd3fc;
+            scrollbar-color-active: #7dd3fc;
+            scrollbar-background: #12283c;
+            scrollbar-corner-color: #12283c;
+        }
+
+        Screen.theme-light * {
+            scrollbar-color: #5a6673;
+            scrollbar-color-hover: #1d4ed8;
+            scrollbar-color-active: #1d4ed8;
+            scrollbar-background: #e7e1d6;
+            scrollbar-corner-color: #e7e1d6;
         }
 
         Header {
@@ -4638,6 +4760,105 @@ DASHBOARD_CSS = """
             overflow-y: auto;
         }
 
+        /* Narrow terminals. The layout that fails first is a fixed side panel
+           beside a 1fr table: measured at 100 columns the Accounts table was left
+           about twenty columns wide and drew an empty frame, which reads as a
+           broken console rather than a small one. Below NARROW_VIEWPORT_WIDTH the
+           pairs stack, each pane gets the full width, and the view scrolls. */
+        .narrow #accounts-layout,
+        .narrow #backups-layout {
+            layout: vertical;
+            height: auto;
+        }
+
+        .narrow #accounts-table-layout {
+            width: 1fr;
+            height: auto;
+            min-height: 12;
+            margin-right: 0;
+            margin-bottom: 1;
+        }
+
+        .narrow #account-details {
+            width: 1fr;
+            height: auto;
+        }
+
+        .narrow #backups-table-layout {
+            width: 1fr;
+            height: auto;
+            min-height: 12;
+        }
+
+        .narrow #backup-summary {
+            width: 1fr;
+            min-width: 0;
+            height: auto;
+            margin-right: 0;
+            margin-bottom: 1;
+        }
+
+        .narrow .table-detail-body {
+            layout: vertical;
+            height: auto;
+        }
+
+        .narrow .detail-pane {
+            width: 1fr;
+            height: auto;
+            margin-left: 0;
+            margin-top: 1;
+            border-left: none;
+            border-top: heavy #f59e0b;
+            padding-left: 0;
+            padding-top: 1;
+        }
+
+        Screen.theme-light .narrow .detail-pane {
+            border-left: none;
+            border-top: heavy #93c5fd;
+        }
+
+        /* Panels that reserve a fixed height for prose: in a 36-row window the
+           reservation is the view. They take their natural height instead and the
+           view scrolls. */
+        .narrow #realm-logs-layout {
+            height: auto;
+        }
+
+        .narrow #realm-logs-summary,
+        .narrow #operations-summary {
+            height: auto;
+            margin-bottom: 1;
+        }
+
+        .narrow #operations-summary {
+            layout: vertical;
+        }
+
+        .narrow #logs-pane,
+        .narrow #update-pane {
+            width: 1fr;
+            height: auto;
+            margin-right: 0;
+            margin-bottom: 1;
+        }
+
+        .narrow #realm-logs-body,
+        .narrow #roster-modal-layout {
+            layout: vertical;
+            height: auto;
+            min-height: 14;
+        }
+
+        .narrow #accounts-view,
+        .narrow #backups-view,
+        .narrow #logs-view,
+        .narrow #config-view,
+        .narrow #operations-view {
+            overflow-y: auto;
+        }
+
         #monitor-grid {
             layout: grid;
             grid-size: 2 2;
@@ -4779,6 +5000,39 @@ DASHBOARD_CSS = """
         Screen.theme-light DataTable {
             background: #ffffff;
             color: #111827;
+        }
+
+        /* Row cursor. Left to Textual, the cursor is painted from its own theme
+           variables: a purple that belongs to no palette in this file, and in the
+           light theme a pale block on white that reads as nothing at all. Both the
+           focused and the unfocused state are set here, because the unfocused one
+           is what the operator sees while reading a panel they are not in. */
+        DataTable > .datatable--cursor,
+        DataTable > .datatable--header-cursor,
+        DataTable > .datatable--fixed-cursor {
+            background: #274463;
+            color: #e6edf7;
+        }
+
+        DataTable:focus > .datatable--cursor,
+        DataTable:focus > .datatable--header-cursor,
+        DataTable:focus > .datatable--fixed-cursor {
+            background: #2563eb;
+            color: #f8fafc;
+        }
+
+        Screen.theme-light DataTable > .datatable--cursor,
+        Screen.theme-light DataTable > .datatable--header-cursor,
+        Screen.theme-light DataTable > .datatable--fixed-cursor {
+            background: #b9c6d6;
+            color: #142033;
+        }
+
+        Screen.theme-light DataTable:focus > .datatable--cursor,
+        Screen.theme-light DataTable:focus > .datatable--header-cursor,
+        Screen.theme-light DataTable:focus > .datatable--fixed-cursor {
+            background: #1d4ed8;
+            color: #ffffff;
         }
 
         #backups-table {
