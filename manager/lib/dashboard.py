@@ -15,42 +15,112 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 
-STATUS_COLORS = {
-    "healthy": "#34d399",
-    "ok": "#22c55e",
-    "active": "#2dd4bf",
-    "warning": "#f59e0b",
-    "degraded": "#fbbf24",
-    "missing": "#f59e0b",
-    "notice": "#7dd3fc",
-    "info": "#7dd3fc",
-    "debug": "#94a3b8",
-    "stopped": "#f59e0b",
-    "inactive": "#f59e0b",
-    "critical": "#f87171",
-    "error": "#ef4444",
-    "alert": "#ef4444",
-    "emergency": "#ef4444",
-    "failed": "#ef4444",
-    "crash-loop": "#fb7185",
-    "unreachable": "#fb7185",
-    "unavailable": "#94a3b8",
+# A colour is only readable relative to what sits behind it, so the tables and
+# the panel markup name *roles*, and a palette turns a role into a hex for the
+# theme in use. Without that indirection the light theme inherits colours picked
+# against the dark screen: #cbd5e1 labels on #f6f1e7 are about 2:1, which is why
+# a light screen looked half-painted rather than light.
+DARK_PALETTE = {
+    "muted": "#cbd5e1",
+    "gold": "#f59e0b",
+    "sky": "#7dd3fc",
+    "teal": "#2dd4bf",
+    "rose": "#fb7185",
+    "green": "#34d399",
+    "green_strong": "#22c55e",
+    "blue": "#3b82f6",
+    "amber": "#f59e0b",
+    "amber_soft": "#fbbf24",
+    "red": "#ef4444",
+    "red_soft": "#f87171",
+    "slate": "#94a3b8",
 }
 
-ACCENT_GOLD = "#f59e0b"
-ACCENT_SKY = "#7dd3fc"
-ACCENT_TEAL = "#2dd4bf"
-ACCENT_ROSE = "#fb7185"
-ACCENT_MUTED = "#cbd5e1"
-ACCENT_GREEN = "#34d399"
-ACCENT_BLUE = "#3b82f6"
+LIGHT_PALETTE = {
+    "muted": "#475569",
+    "gold": "#9a3412",
+    "sky": "#0369a1",
+    "teal": "#0f766e",
+    "rose": "#b91c1c",
+    "green": "#166534",
+    "green_strong": "#166534",
+    "blue": "#1d4ed8",
+    "amber": "#9a3412",
+    "amber_soft": "#92400e",
+    "red": "#b91c1c",
+    "red_soft": "#b91c1c",
+    "slate": "#57606a",
+}
+
+STATUS_COLORS = {
+    "healthy": "green",
+    "ok": "green_strong",
+    "active": "teal",
+    "warning": "amber",
+    "degraded": "amber_soft",
+    "missing": "amber",
+    "notice": "sky",
+    "info": "sky",
+    "debug": "slate",
+    "stopped": "amber",
+    "inactive": "amber",
+    "critical": "red_soft",
+    "error": "red",
+    "alert": "red",
+    "emergency": "red",
+    "failed": "red",
+    "crash-loop": "rose",
+    "unreachable": "rose",
+    "unavailable": "slate",
+}
+
+ACCENT_GOLD = DARK_PALETTE["gold"]
+ACCENT_SKY = DARK_PALETTE["sky"]
+ACCENT_TEAL = DARK_PALETTE["teal"]
+ACCENT_ROSE = DARK_PALETTE["rose"]
+ACCENT_MUTED = DARK_PALETTE["muted"]
+ACCENT_GREEN = DARK_PALETTE["green"]
+ACCENT_BLUE = DARK_PALETTE["blue"]
+
+_ACCENT_NAMES = {
+    "gold": "ACCENT_GOLD",
+    "sky": "ACCENT_SKY",
+    "teal": "ACCENT_TEAL",
+    "rose": "ACCENT_ROSE",
+    "muted": "ACCENT_MUTED",
+    "green": "ACCENT_GREEN",
+    "blue": "ACCENT_BLUE",
+}
+
+CURRENT_PALETTE = DARK_PALETTE
+
+
+def palette_color(role: str) -> str:
+    """The hex for a role in the palette the dashboard is currently drawing with."""
+    return CURRENT_PALETTE[role]
+
+
+def set_palette(theme: str) -> dict:
+    """Point every accent name at one palette, and return it.
+
+    Panel markup is built from ACCENT_* at render time, so rebinding those names
+    recolours every panel on the next repaint without threading a palette object
+    through 360 call sites. Anything that would otherwise keep a stale copy —
+    ACTION_STYLES and keyword defaults — stores a role instead, so there is
+    nowhere left for a dark hex to survive a switch to light.
+    """
+    global CURRENT_PALETTE
+    CURRENT_PALETTE = LIGHT_PALETTE if theme == "light" else DARK_PALETTE
+    for role, name in _ACCENT_NAMES.items():
+        globals()[name] = CURRENT_PALETTE[role]
+    return CURRENT_PALETTE
 
 ACTION_STYLES = {
-    "info": ("Ready", ACCENT_SKY),
-    "running": ("Running", ACCENT_GOLD),
-    "success": ("Complete", ACCENT_GREEN),
-    "warning": ("Attention", ACCENT_GOLD),
-    "error": ("Failed", ACCENT_ROSE),
+    "info": ("Ready", "sky"),
+    "running": ("Running", "gold"),
+    "success": ("Complete", "green"),
+    "warning": ("Attention", "gold"),
+    "error": ("Failed", "rose"),
 }
 
 VIEW_TITLES = {
@@ -268,13 +338,13 @@ def format_bytes(value_bytes: Any) -> str:
 
 def format_state(value: Any) -> str:
     text = str(value or "unknown")
-    color = STATUS_COLORS.get(text, "white")
+    color = palette_color(STATUS_COLORS.get(text, "muted"))
     return f"[bold {color}]{text}[/]"
 
 
 def metric_health_color(value: Any) -> str:
     normalized = str(value or "unknown").strip().lower()
-    return STATUS_COLORS.get(normalized, ACCENT_MUTED)
+    return palette_color(STATUS_COLORS.get(normalized, "muted"))
 
 
 def format_flag(
@@ -282,12 +352,16 @@ def format_flag(
     *,
     true_text: str = "yes",
     false_text: str = "no",
-    true_color: str = ACCENT_GREEN,
-    false_color: str = ACCENT_MUTED,
+    true_color: str | None = None,
+    false_color: str | None = None,
 ) -> str:
+    # None rather than an ACCENT_* default: a default is evaluated once, at
+    # def time, and would keep a dark hex after a switch to light.
+    yes = true_color or palette_color("green")
+    no = false_color or palette_color("muted")
     if value:
-        return f"[bold {true_color}]{true_text}[/]"
-    return f"[bold {false_color}]{false_text}[/]"
+        return f"[bold {yes}]{true_text}[/]"
+    return f"[bold {no}]{false_text}[/]"
 
 
 def truncate_text(value: Any, max_length: int = 76) -> str:
@@ -577,9 +651,10 @@ def render_meter(
     value: Any,
     *,
     width: int = 12,
-    color: str = ACCENT_GREEN,
+    color: str | None = None,
     show_minimum_for_positive: bool = False,
 ) -> str:
+    color = color or palette_color("green")
     percent = normalize_percent(value)
     filled = int(round((percent / 100.0) * width))
     if show_minimum_for_positive and percent > 0 and filled == 0:
@@ -1641,7 +1716,8 @@ def render_action_banner(
     action_view_context: str | None = None,
     setup: dict[str, Any] | None = None,
 ) -> str:
-    tone_label, tone_color = ACTION_STYLES.get(action_tone, ACTION_STYLES["info"])
+    tone_label, tone_role = ACTION_STYLES.get(action_tone, ACTION_STYLES["info"])
+    tone_color = palette_color(tone_role)
     captured_at = escape_markup(iso_to_display(snapshot.get("captured_at")))
     message = escape_markup(truncate_text(last_action or "dashboard started", 140))
     receipt = escape_markup(truncate_text(action_receipt or "", 140))
@@ -2383,7 +2459,7 @@ def render_alerts_panel(snapshot: dict[str, Any]) -> str:
                 f"{format_state(alert.get('severity', 'warning'))} {escape_markup(alert.get('source', 'unknown'))}: {escape_markup(truncate_text(alert.get('message', ''), 64))}"
             )
     else:
-        lines.append(f"[bold {STATUS_COLORS['healthy']}]No active alerts[/]")
+        lines.append(f"[bold {palette_color(STATUS_COLORS['healthy'])}]No active alerts[/]")
 
     lines.append("")
     lines.append(f"[bold {ACCENT_SKY}]Recent Events[/]")
@@ -3348,10 +3424,26 @@ def create_app(
             self.set_interval(self.refresh_interval, self.request_snapshot_refresh)
 
         def apply_theme(self) -> None:
+            """Put the palette on the screens, not on the app node.
+
+            Every light-palette override in DASHBOARD_CSS is written as
+            ``Screen.theme-light`` (plus ``CommandFormScreen.theme-light`` and
+            ``ConfirmScreen.theme-light``). Textual matches CSS against widgets,
+            and the app node is not one, so the previous version — which added
+            ``theme-light`` to the app — styled nothing: ``t`` and ``--theme
+            light`` both redrew the same dark screen and reported success. The
+            class now goes on every screen in the stack, including any modal
+            already open, and is re-applied when a screen becomes active.
+            """
             self.theme = "tokyo-night" if self.theme_name == "dark" else "catppuccin-latte"
-            self.remove_class("theme-light")
-            self.remove_class("theme-dark")
-            self.add_class(f"theme-{self.theme_name}")
+            set_palette(self.theme_name)
+            for screen in self.screen_stack:
+                screen.set_class(self.theme_name == "light", "theme-light")
+                screen.set_class(self.theme_name == "dark", "theme-dark")
+
+        def on_screen_resume(self, event: object) -> None:
+            """A modal pushed on top of the main screen inherits its palette."""
+            self.apply_theme()
 
         def apply_view_density(self) -> None:
             """Pick the roomy or the scrolling grid layout for the active screen.
@@ -3486,6 +3578,25 @@ def create_app(
             self.metric_history = append_monitoring_sample(self.metric_history, snapshot)
             self.refresh_inflight = False
             self.refresh_force_full = False
+            self.repaint()
+            if self.screenshot_path and not self.screenshot_taken and not self.screenshot_pending:
+                self.screenshot_pending = True
+                self.set_timer(0.5, self.capture_screenshot_and_exit)
+            # A refresh requested while this one was running must not be
+            # dropped — run it now that the UI thread is free again.
+            if self.refresh_pending:
+                self.refresh_pending = False
+                self.request_snapshot_refresh()
+
+        def repaint(self) -> None:
+            """Redraw every pane and table from the snapshot in hand.
+
+            Split out of apply_snapshot because the palette can change while the
+            data has not. Re-running apply_snapshot to recolour would append the
+            same sample to the monitor history again, so the repaint is its own
+            step: same data, new colours.
+            """
+            snapshot = self.snapshot
             self.query_one("#service-pane", Static).update(render_service_panel(snapshot, self.active_view))
             self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot, self.metric_history, self.refresh_interval))
             self.query_one("#player-pulse-pane", Static).update(render_player_pulse(snapshot, self.metric_history, self.refresh_interval))
@@ -3503,14 +3614,6 @@ def create_app(
             self.refresh_logs(snapshot.get("log_events", []))
             self.refresh_schedules(snapshot.get("schedules", []))
             self.refresh_chrome()
-            if self.screenshot_path and not self.screenshot_taken and not self.screenshot_pending:
-                self.screenshot_pending = True
-                self.set_timer(0.5, self.capture_screenshot_and_exit)
-            # A refresh requested while this one was running must not be
-            # dropped — run it now that the UI thread is free again.
-            if self.refresh_pending:
-                self.refresh_pending = False
-                self.request_snapshot_refresh()
 
         def capture_screenshot_and_exit(self) -> None:
             self.screenshot_taken = True
@@ -3815,8 +3918,10 @@ def create_app(
                 tone="success",
                 receipt=f"Switched the dashboard theme to {self.theme_name}.",
             )
-            self.apply_view_state()
-            self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view))
+            # Every pane is built from ACCENT_* at render time, so the switch is
+            # only visible once the panels are rebuilt from the current snapshot.
+            self.repaint()
+            self.refresh_chrome()
 
         def action_start_server(self) -> None:
             self.request_command_action(

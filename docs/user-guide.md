@@ -149,6 +149,20 @@ This is the default view and the one you leave open. It shows:
 
 **Common actions:** `s` start, `x` stop, `R` restart, `b` backup, `v` verify, `k` validate config.
 
+The same screen in the light palette — press `t`, or start it with
+`--theme light`:
+
+![Overview in the light theme](assets/dashboard-overview-light.svg)
+
+Colour here is chosen per surface, not per theme name. Everything the dashboard
+draws in Python names a *role* — label, healthy, warning, unreachable — and a
+palette resolves that role against the background it will sit on; the light
+palette is held to a 4.5:1 contrast ratio against its own surfaces by a test,
+because a label an operator cannot read under time pressure is not a label.
+Dark stays the default: a realm console is usually open on a wall display, and
+a light screen in a dim server room is a complaint waiting to happen.
+
+
 If something looks off here, press `2` to jump into **Monitor** for the diagnosis.
 
 ---
