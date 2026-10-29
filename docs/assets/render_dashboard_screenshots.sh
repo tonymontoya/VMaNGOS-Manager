@@ -19,6 +19,24 @@ mkdir -p "$OUTPUT_DIR"
 SNAPSHOT_FILE="$OUTPUT_DIR/dashboard-demo-snapshot.json"
 python3 "$SCRIPT_DIR/generate_dashboard_demo.py" --output "$SNAPSHOT_FILE"
 
+check_geometry() {
+    # One geometry for every frame. A frame rendered at the driver default of
+    # 80x24 while the others are 140x52 is easy to commit by eye and impossible
+    # to notice in the README, so the renderer refuses it.
+    local expected=""
+    local path
+    for path in "$OUTPUT_DIR"/dashboard-*.svg; do
+        local box
+        box=$(grep -o 'viewBox="0 0 [0-9.]* [0-9.]*"' "$path" | head -1)
+        if [ -z "$expected" ]; then
+            expected="$box"
+        elif [ "$box" != "$expected" ]; then
+            echo "render geometry differs: $path is $box, expected $expected" >&2
+            return 1
+        fi
+    done
+}
+
 for view_name in overview monitor accounts backups config logs operations; do
     COLUMNS="$SCREEN_COLUMNS" LINES="$SCREEN_LINES" \
     "$DASHBOARD_PYTHON" "$DASHBOARD_APP" \
@@ -30,3 +48,5 @@ for view_name in overview monitor accounts backups config logs operations; do
         --view "$view_name" \
         --screenshot "$OUTPUT_DIR/dashboard-$view_name.svg"
 done
+
+check_geometry

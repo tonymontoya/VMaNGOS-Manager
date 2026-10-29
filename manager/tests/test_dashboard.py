@@ -11,6 +11,7 @@ Seams (agreed):
 import asyncio
 import json
 import os
+import pathlib
 import textwrap
 from datetime import datetime, timedelta, timezone
 
@@ -22,13 +23,17 @@ import re
 
 from dashboard import (
     ACTION_STYLES,
+    CHROME_ROLES,
     DASHBOARD_CSS,
     DARK_PALETTE,
     LIGHT_PALETTE,
+    NARROW_VIEWPORT_WIDTH,
     create_app,
     empty_snapshot,
     format_flag,
     palette_color,
+    render_action_banner,
+    strip_markup,
     render_meter,
     render_player_pulse,
     set_palette,
@@ -823,6 +828,10 @@ def test_palette_roles_are_readable_on_their_own_surfaces():
     """
     for theme, (palette, surfaces) in _surfaces().items():
         for role, color in palette.items():
+            if role in CHROME_ROLES:
+                # A scrollbar or a selection block is judged against the text it
+                # carries, not the surface behind it; see the chrome test.
+                continue
             for surface in surfaces:
                 ratio = _contrast(color, surface)
                 assert ratio >= 4.5, f"{theme} {role} {color} on {surface} is {ratio:.2f}:1, below 4.5:1"
@@ -850,6 +859,206 @@ def test_panels_recolour_when_the_palette_changes():
     assert LIGHT_PALETTE["green"] in render_meter("50")
     assert LIGHT_PALETTE["green"] in format_flag(True)
     assert palette_color(ACTION_STYLES["success"][1]) == LIGHT_PALETTE["green"]
+
+
+def test_a_narrow_window_gives_the_table_the_width_it_needs(tmp_path):
+    """A table squeezed beside a fixed panel is the layout that breaks first.
+
+    Measured before the narrow rules: at 100 columns the Accounts table was about
+    twenty columns wide and drew an empty frame, and the Logs table showed three
+    of its columns. That reads as a broken console, not a small one. The number
+    asserted here is far below what any real table needs and far above what the
+    broken layout produced.
+    """
+    for view_name, table_id in (
+        ("accounts", "#accounts-table"),
+        ("backups", "#backups-table"),
+        ("logs", "#realm-logs-table"),
+    ):
+        app, _log_path = build_app(tmp_path, initial_view=view_name)
+
+        async def scenario(app=app, table_id=table_id, view_name=view_name):
+            async with app.run_test(size=(100, 36)) as pilot:
+                await pilot.pause()
+                assert app.screen.size.width < NARROW_VIEWPORT_WIDTH
+                assert app.screen.has_class("narrow"), f"{view_name}: the screen is not marked narrow"
+                table = app.query_one(table_id)
+                assert table.region.width >= 45, (
+                    f"{view_name} table is {table.region.width} columns wide at 100 columns of terminal"
+                )
+
+        asyncio.run(scenario())
+
+
+def test_a_wide_window_keeps_the_summary_beside_the_table(tmp_path):
+    """The stacking must not leak into a window that has room for both panes."""
+    app, _log_path = build_app(tmp_path, initial_view="accounts")
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            assert not app.screen.has_class("narrow"), "a 140-column window is marked narrow"
+            table = app.query_one("#accounts-table")
+            details = app.query_one("#account-details")
+            assert details.region.x > table.region.right, "the summary stacked below a table that had room beside it"
+
+    import asyncio
+
+    asyncio.run(scenario())
+
+
+def test_the_narrow_banner_says_the_same_thing_in_fewer_rows():
+    """Each wrapped banner row comes straight off the table below it.
+
+    The measured inner width of the banner at a 100-column terminal is about 38
+    characters, so the narrow form is checked against a bound a little above that
+    rather than against the wide form's length. The view prose is dropped in the
+    narrow form because the footer already lists that view's actions.
+    """
+    snapshot = empty_snapshot("waiting for first refresh")
+    narrow = render_action_banner("accounts", snapshot, "reset password for RAIDER01", "success", 2, narrow=True)
+    wide = render_action_banner("accounts", snapshot, "reset password for RAIDER01", "success", 2)
+
+    narrow_lines = [line for line in strip_markup(narrow).splitlines() if line.strip()]
+    assert narrow_lines, "the narrow banner rendered nothing"
+    for line in narrow_lines:
+        assert len(line) <= 44, f"narrow banner line is {len(line)} characters, it will wrap: {line!r}"
+    assert "This View" not in strip_markup(narrow), "the narrow banner repeats footer help text the table needs room for"
+    assert "This View" in strip_markup(wide), "the roomy banner lost its view prose"
+
+
+def test_every_committed_screenshot_shares_one_geometry():
+    """The README is a grid of frames, and a mismatched frame is invisible by eye.
+
+    A light-theme frame once got rendered at the driver default of 80x24 while
+    every other frame was 140x52: same filename, same content, a third of the
+    width, and it sat in the README unnoticed. The check is on the SVG geometry
+    rather than the pixel count, and the floor is there so a uniformly small set
+    cannot pass either.
+    """
+    assets = pathlib.Path(__file__).resolve().parents[2] / "docs" / "assets"
+    frames = sorted(assets.glob("dashboard-*.svg"))
+    assert frames, "no dashboard screenshots found to check"
+
+    boxes = {}
+    for frame in frames:
+        match = re.search(r'viewBox="0 0 ([0-9.]+) ([0-9.]+)"', frame.read_text(encoding="utf-8"))
+        assert match, f"{frame.name} has no readable viewBox"
+        boxes[frame.name] = (float(match.group(1)), float(match.group(2)))
+
+    widths = {box[0] for box in boxes.values()}
+    heights = {box[1] for box in boxes.values()}
+    assert len(widths) == 1, f"screenshots differ in width: {boxes}"
+    assert len(heights) == 1, f"screenshots differ in height: {boxes}"
+    # Textual's screenshot SVG advances about 12.3 px per column; 80 columns is
+    # 994 px, 140 columns is 1726. Anything under 1400 px is a default-sized frame.
+    assert next(iter(widths)) >= 1400, f"screenshots are {next(iter(widths))} px wide — that is a default-sized terminal, not the documented 140 columns"
+
+
+def _hex(color):
+    return "#%02x%02x%02x" % (color.r, color.g, color.b)
+
+
+def _chrome_rules():
+    """The selection-chrome hexes actually written in DASHBOARD_CSS, per theme.
+
+    Read out of the CSS for the same reason _surfaces() is: a rule edited here has
+    to move the palette assertion with it, instead of the palette drifting away
+    from what the screen paints.
+    """
+    def grab(pattern):
+        match = re.search(pattern, DASHBOARD_CSS, re.S)
+        assert match, f"no rule matched {pattern!r} in DASHBOARD_CSS"
+        block = match.group(1)
+        values = re.findall(
+            r"(scrollbar-color|scrollbar-color-hover|scrollbar-color-active|scrollbar-background"
+            r"|background|color): (#[0-9a-f]{6});",
+            block,
+        )
+        return {name: value for name, value in values}
+
+    return {
+        "dark": {
+            "cursor_blur": grab(r"\n\s+DataTable > \.datatable--cursor,[^}]*\{([^}]*)\}"),
+            "cursor": grab(r"\n\s+DataTable:focus > \.datatable--cursor,[^}]*\{([^}]*)\}"),
+            "scrollbar": grab(r"\n\s+\* \{([^}]*)\}"),
+        },
+        "light": {
+            "cursor_blur": grab(r"Screen\.theme-light DataTable > \.datatable--cursor,[^}]*\{([^}]*)\}"),
+            "cursor": grab(r"Screen\.theme-light DataTable:focus > \.datatable--cursor,[^}]*\{([^}]*)\}"),
+            "scrollbar": grab(r"Screen\.theme-light \* \{([^}]*)\}"),
+        },
+    }
+
+
+def test_selection_chrome_matches_the_palette():
+    """Cursor and scrollbar colours come from the palette, not from Textual.
+
+    Left alone, Textual paints the row cursor and every inner scrollbar from its
+    own theme variables: a purple that appears in neither palette here, and in the
+    light theme a cursor block so pale on white it reads as no selection at all.
+    """
+    chrome = _chrome_rules()
+    for theme, palette in (("dark", DARK_PALETTE), ("light", LIGHT_PALETTE)):
+        rules = chrome[theme]
+        assert rules["cursor"]["background"] == palette["cursor_bg"]
+        assert rules["cursor"]["color"] == palette["cursor_fg"]
+        assert rules["cursor_blur"]["background"] == palette["cursor_blur_bg"]
+        assert rules["cursor_blur"]["color"] == palette["cursor_blur_fg"]
+        assert rules["scrollbar"]["scrollbar-color"] == palette["scrollbar"]
+        assert rules["scrollbar"]["scrollbar-background"] == palette["scrollbar_track"]
+
+
+def test_the_row_cursor_is_readable_in_both_states():
+    """Focused and unfocused selection both have to be readable text on a block.
+
+    The unfocused block is the one an operator glances at while their hands are in
+    another pane, so it gets the same floor as the focused one. The block also has
+    to be distinguishable from the surface it sits on — that is not a text
+    contrast question, but a ratio near 1 means "no cursor".
+    """
+    for theme, (palette, surfaces) in _surfaces().items():
+        assert _contrast(palette["cursor_fg"], palette["cursor_bg"]) >= 4.5, f"{theme} focused cursor text"
+        assert _contrast(palette["cursor_blur_fg"], palette["cursor_blur_bg"]) >= 4.5, f"{theme} unfocused cursor text"
+        for surface in surfaces:
+            for role in ("cursor_bg", "cursor_blur_bg"):
+                ratio = _contrast(palette[role], surface)
+                assert ratio >= 1.4, f"{theme} {role} {palette[role]} on {surface} is {ratio:.2f}:1 — no visible selection block"
+
+
+def test_a_focused_table_paints_the_cursor_from_the_active_palette(tmp_path):
+    """The computed styles, not the CSS text.
+
+    Two separate bugs live here. A rule written against the app node styles
+    nothing, and a scrollbar rule written only for Screen leaves every inner pane
+    on Textual's purple: scrollbar colour is not inherited, which was measured on
+    a nested Vertical (#4f4270 dark, #b89ae5 light). So the nested scroller is
+    asserted alongside the cursor.
+    """
+    for theme, palette in (("dark", DARK_PALETTE), ("light", LIGHT_PALETTE)):
+        app, _log_path = build_app(tmp_path, initial_view="accounts", theme=theme)
+
+        async def scenario(app=app, palette=palette):
+            async with app.run_test(size=(140, 52)) as pilot:
+                await pilot.pause()
+                table = app.query_one("#accounts-table")
+                cursor = table.get_component_styles("datatable--cursor")
+                assert cursor.background is not None, "the row cursor has no background of its own"
+                assert _hex(cursor.background) == palette["cursor_bg"], "focused cursor is not the palette colour"
+                assert _hex(cursor.color) == palette["cursor_fg"], "focused cursor text is not the palette colour"
+
+                nested = None
+                for widget in app.query("*"):
+                    if widget is not app.screen and widget.styles.overflow_y == "auto":
+                        nested = widget
+                        break
+                assert nested is not None, "this view has no inner scroller to check"
+                assert _hex(nested.styles.scrollbar_color) == palette["scrollbar"], (
+                    "an inner scroller is still painted with Textual's default purple"
+                )
+
+        asyncio.run(scenario())
+        set_palette("dark")
 
 
 def test_light_theme_classes_land_on_the_screen_not_the_app(tmp_path):
