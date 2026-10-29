@@ -110,6 +110,32 @@ def write_snapshot_fixture(directory, accounts):
     return path
 
 
+def add_services_to_fixture(path):
+    """Fill the server section so the Overview cards render their data half."""
+    with open(path, "r", encoding="utf-8") as handle:
+        snapshot = json.load(handle)
+    service = {
+        "state": "active",
+        "health": "healthy",
+        "pid": 231004,
+        "uptime_human": "5h 30m",
+        "cpu_percent": 0.7,
+        "memory_mb": 11,
+        "restart_count_1h": 0,
+    }
+    snapshot["server"] = {
+        "ok": True,
+        "error": "",
+        "data": {
+            "services": {"auth": dict(service), "world": {**service, "pid": 231051, "memory_mb": 482}},
+            "checks": {"database_connectivity": {"ok": True, "message": "reachable"}},
+        },
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(snapshot, handle)
+    return path
+
+
 def add_backups_to_fixture(path, *, age_seconds=300, credentials_ready=False):
     """Give a snapshot fixture one fresh backup so the Backups view fills in."""
     with open(path, "r", encoding="utf-8") as handle:
@@ -914,6 +940,94 @@ def test_a_wide_window_keeps_the_summary_beside_the_table(tmp_path):
     import asyncio
 
     asyncio.run(scenario())
+
+
+def test_the_narrow_overview_and_monitor_stack_rather_than_draw_empty_frames(tmp_path):
+    """At 100 columns the two-column grids leave the second row of cards empty.
+
+    Measured on 2026-10-29 at 100x36 (`ops/staging/shots-100col/`): the Monitor view
+    drew two bordered boxes containing nothing at all, which is the same failure the
+    compact height rules already guard against — a frame with no content reads as a
+    broken console, not a small one. Neither grid had a `.narrow` rule.
+    """
+    for view_name, grid_id in (("overview", "#overview-grid"), ("monitor", "#monitor-grid")):
+        app, _log_path = build_app(tmp_path, initial_view=view_name)
+
+        async def scenario(app=app, grid_id=grid_id, view_name=view_name):
+            async with app.run_test(size=(100, 36)) as pilot:
+                await pilot.pause()
+                assert app.screen.has_class("narrow"), f"{view_name}: the screen is not marked narrow"
+                grid = app.query_one(grid_id)
+                cards = list(app.query(f"{grid_id} > Static"))
+                assert len(cards) >= 3, f"{view_name}: only {len(cards)} cards in {grid_id}"
+                for card in cards:
+                    assert card.region.width >= grid.region.width - 1, (
+                        f"{view_name}: a card is {card.region.width} columns wide inside a "
+                        f"{grid.region.width}-column grid at 100 columns of terminal"
+                    )
+                    assert card.region.height >= 6, f"{view_name}: a card is {card.region.height} rows tall"
+                    assert str(card.renderable).strip(), f"{view_name}: {card.id} drew an empty frame"
+                rows = [card.region.y for card in cards]
+                assert len(set(rows)) == len(rows), f"{view_name}: cards still sit side by side"
+
+        asyncio.run(scenario())
+
+
+def test_the_wide_overview_keeps_its_two_columns(tmp_path):
+    """Stacking is a response to width, not a new default."""
+    app, _log_path = build_app(tmp_path, initial_view="overview")
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            cards = list(app.query("#overview-grid > Static"))
+            assert len(cards) >= 4, "the overview lost a card"
+            side_by_side = any(
+                a.region.y == b.region.y and a.region.right < b.region.x
+                for a in cards
+                for b in cards
+                if a is not b
+            )
+            assert side_by_side, "the wide overview stacked its cards"
+
+    asyncio.run(scenario())
+
+
+def test_a_narrow_window_drops_the_card_prose_and_keeps_the_card(tmp_path):
+    """A sentence about what a card holds costs three rows in a narrow one.
+
+    The wording half of the same decision: the prose is what pushed the data below
+    the fold at 100 columns. Dropping it is progressive disclosure, not loss — the
+    labels and values stay, and the same sentence survives at a width that can pay
+    for it.
+    """
+    snapshot = add_services_to_fixture(write_snapshot_fixture(tmp_path, make_accounts(8)))
+
+    app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=snapshot)
+
+    async def scenario():
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            narrow_text = str(app.query_one("#service-pane").renderable)
+            assert "Auth and world services, plus the DB check." not in narrow_text, (
+                "the narrow card spends rows describing itself"
+            )
+            for needed in ("Realm Services", "Auth", "World", "DB"):
+                assert needed in narrow_text, f"the narrow card dropped {needed}"
+
+    asyncio.run(scenario())
+
+    app_wide, _ = build_app(tmp_path, initial_view="overview", snapshot_file=snapshot)
+
+    async def wide():
+        async with app_wide.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            wide_text = str(app_wide.query_one("#service-pane").renderable)
+            assert "Auth and world services, plus the DB check." in wide_text, (
+                "the prose vanished at a width that has room for it"
+            )
+
+    asyncio.run(wide())
 
 
 def test_the_narrow_banner_says_the_same_thing_in_fewer_rows():
