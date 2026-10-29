@@ -16,7 +16,7 @@ import textwrap
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from textual.widgets import DataTable, Select
+from textual.widgets import DataTable, Input, Select, Static
 from textual.widgets._toast import Toast
 
 import re
@@ -34,6 +34,10 @@ from dashboard import (
     palette_color,
     iso_to_clock,
     render_action_banner,
+    NARROW_ACTION_TOKENS,
+    action_entry,
+    render_command_rail,
+    view_command_tokens,
     strip_markup,
     render_meter,
     render_player_pulse,
@@ -1138,3 +1142,104 @@ def test_a_pushed_modal_inherits_the_active_theme(tmp_path):
             assert not app.has_class("theme-light"), "the palette class landed on the app node"
 
     asyncio.run(scenario())
+
+
+def test_the_rail_is_tall_enough_for_what_it_says(tmp_path):
+    """The legend under the view may not be cut off by its own box.
+
+    The rail used a fixed height of five rows. Its Navigate row is a list of
+    tokens, and a list wraps: at 100 columns the row took a second line, which
+    pushed the third row -- the actions available in the current view -- out of the
+    box without trace. A Backups legend at 140 columns was already too wide for
+    three rows. These sizes are the widths an operator actually uses, and the
+    assertion is about the box versus the wrapped content, not about any string.
+    """
+
+    async def scenario():
+        for cols, lines in ((140, 52), (100, 36), (80, 24)):
+            for view in ("backups", "operations"):
+                app, _log_path = build_app(tmp_path, initial_view=view)
+                async with app.run_test(size=(cols, lines)) as pilot:
+                    await pilot.pause()
+                    rail = app.query_one("#command-rail", Static)
+                    inner = rail.content_region.width
+                    wrapped = rail.get_content_height(rail.region.width, rail.region.width, inner)
+                    # The heavy border costs a row top and bottom; nothing else in
+                    # this widget has vertical padding.
+                    assert rail.region.height >= wrapped + 2, (
+                        f"{view} at {cols}x{lines}: the rail is {rail.region.height} rows tall "
+                        f"and has to draw {wrapped} rows of keys"
+                    )
+
+    asyncio.run(scenario())
+
+
+def test_the_narrow_rail_rewords_the_actions_and_keeps_all_of_them():
+    """Narrow means shorter wording, not fewer actions."""
+    for view in ("overview", "monitor", "accounts", "backups", "operations", "config", "logs"):
+        wide = strip_markup(render_command_rail(view)).splitlines()
+        narrow = strip_markup(render_command_rail(view, narrow=True)).splitlines()
+        assert len(wide) == 3 and wide[0].startswith("Navigate"), f"{view}: the wide rail lost its shape"
+        assert not any(row.startswith("Navigate") for row in narrow), (
+            f"{view}: the narrow rail repeats the Modules list, which already carries the keys"
+        )
+        # Same rows in the same order, minus Navigate: nothing may get longer.
+        for narrow_row, wide_row in zip(narrow, wide[1:]):
+            assert len(narrow_row) <= len(wide_row), (
+                f"{view}: the narrow rail spent more columns than the wide one"
+            )
+        wide_keys = {token[0] for token in view_command_tokens(view)}
+        narrow_keys = {token[0] for token in view_command_tokens(view, narrow=True)}
+        assert wide_keys == narrow_keys, f"{view}: the narrow rail dropped a key, not just a word"
+        for (key, wide_label), (_key, narrow_label) in zip(
+            view_command_tokens(view), view_command_tokens(view, narrow=True)
+        ):
+            if wide_label == narrow_label:
+                continue
+            # A shorter word belongs to the action this view's key runs, never to
+            # the letter: "p" means different things two views apart.
+            entry = action_entry(view, key)
+            assert NARROW_ACTION_TOKENS.get(entry[0]) == narrow_label, (
+                f"{view}: {key} narrowed to {narrow_label!r}, which is not what {entry[0]} does"
+            )
+            assert len(narrow_label) < len(wide_label), (
+                f"{view}: {entry[0]} was 'shortened' to {narrow_label!r}"
+            )
+
+
+def test_one_key_one_action_per_view_even_when_the_letter_is_reused(tmp_path):
+    """"p" resets a password in Accounts and rehearses a restore in Backups.
+
+    Both views advertise the letter, and a table keyed only by character can hold
+    one of the two: the literal silently kept the Backups entry, so Accounts drew
+    "restore preflight" in its legend, bound a backup action to p, and left its
+    password reset with no key at all.
+    """
+    assert ("p", "reset password") in view_command_tokens("accounts")
+    assert ("p", "restore preflight") in view_command_tokens("backups")
+
+    async def accounts():
+        app, _log_path = build_app(tmp_path, initial_view=ACCOUNTS_KEYS_VIEW)
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            await pilot.press("p")
+            await wait_for(
+                lambda: len(app.screen_stack) > 1,
+                message="the password form to open from the Accounts view",
+            )
+            modal = app.screen_stack[-1]
+            assert modal.query_one("#command-field-password", Input)
+            assert modal.query_one("#command-field-confirm_password", Input)
+
+    async def backups():
+        app, _log_path = build_app(tmp_path, initial_view="backups")
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            await pilot.press("p")
+            await wait_for(
+                lambda: "preflight" in getattr(app, "last_action", ""),
+                message="the restore preflight action to answer",
+            )
+
+    asyncio.run(accounts())
+    asyncio.run(backups())

@@ -1071,7 +1071,6 @@ KEY_ACTION_DESCRIPTIONS: dict[str, tuple[str, str, str]] = {
     "m": ("create_restart_schedule", "Schedule Restart", "restart"),
     "P": ("refresh_update_plan", "Update Plan", "plan"),
     "d": ("restore_selected_backup_dry_run", "Dry Run", "restore dry-run"),
-    "p": ("restore_selected_backup_preflight", "Preflight", "restore preflight"),
     "y": ("schedule_daily_backup", "Daily", "daily timer"),
     "w": ("schedule_weekly_backup", "Weekly", "weekly timer"),
     "j": ("cancel_selected_schedule", "Remove Task", "remove task"),
@@ -1080,6 +1079,28 @@ KEY_ACTION_DESCRIPTIONS: dict[str, tuple[str, str, str]] = {
     "/": ("table_search", "Search", "search"),
     "S": ("sort_table", "Sort", "sort"),
 }
+
+# The same letter does a different job in two views: "p" resets an account's
+# password in Accounts and runs a restore preflight in Backups. A single table
+# keyed by character cannot hold both -- the literal silently kept whichever came
+# last, which left the Accounts view advertising and binding a backup action while
+# its password reset had no key at all. Views that disagree declare it here.
+VIEW_KEY_ACTIONS: dict[str, dict[str, tuple[str, str, str]]] = {
+    "backups": {
+        "p": ("restore_selected_backup_preflight", "Preflight", "restore preflight"),
+    },
+}
+
+
+def action_entry(view_id: str, key: str) -> tuple[str, str, str]:
+    """The (action, label, token) triple for one key in one view.
+
+    Everything the dashboard says about a key -- the command rail, the banner's
+    "This View" row, and the binding actually installed on the view container --
+    has to come from here, or the keyboard and the legend drift apart.
+    """
+    return VIEW_KEY_ACTIONS.get(view_id, {}).get(key, KEY_ACTION_DESCRIPTIONS[key])
+
 
 VIEW_KEYS: dict[str, list[str]] = {
     "overview": ["o", "s", "x", "R", "b", "v", "k"],
@@ -1092,16 +1113,41 @@ VIEW_KEYS: dict[str, list[str]] = {
 }
 
 
-def view_command_tokens(active_view: str) -> list[tuple[str, str]]:
+# The command rail's "This View" row is the only place the view's own keys are
+# spelled out, so it is the row that must survive a small terminal. In the narrow
+# form each token carries the shortest wording that still says what the key does;
+# the wording differs, the actions do not.
+#
+# Keyed by action, not by letter. "p" resets a password in Accounts and rehearses
+# a restore in Backups, so a shorter word attached to the letter would put the
+# wrong action's name next to the key -- the same mistake the key table made.
+NARROW_ACTION_TOKENS: dict[str, str] = {
+    "restore_selected_backup_dry_run": "dry-run",
+    "restore_selected_backup_preflight": "preflight",
+    "validate_config": "validate",
+    "schedule_daily_backup": "daily",
+    "schedule_weekly_backup": "weekly",
+    "cancel_selected_schedule": "remove",
+    "test_logs_config": "test",
+    "create_honor_schedule": "maint",
+}
+
+
+def view_command_tokens(active_view: str, narrow: bool = False) -> list[tuple[str, str]]:
     keys = VIEW_KEYS.get(active_view, VIEW_KEYS["overview"])
-    return [(key, KEY_ACTION_DESCRIPTIONS[key][2]) for key in keys]
+    tokens = []
+    for key in keys:
+        entry = action_entry(active_view, key)
+        label = NARROW_ACTION_TOKENS.get(entry[0], entry[2]) if narrow else entry[2]
+        tokens.append((key, label))
+    return tokens
 
 
 def make_view_bindings(view_id: str) -> list[tuple[str, str, str]]:
     return [
         # "app." prefix: the binding lives on the view container, but the
         # action method lives on the App class.
-        (key, f"app.{KEY_ACTION_DESCRIPTIONS[key][0]}", KEY_ACTION_DESCRIPTIONS[key][1])
+        (key, f"app.{action_entry(view_id, key)[0]}", action_entry(view_id, key)[1])
         for key in VIEW_KEYS.get(view_id, [])
     ] + (
         # Escape clears the table search when one is open in this view.
@@ -1130,10 +1176,25 @@ SEARCH_INPUT_TO_SELECTION: dict[str, str] = {
 }
 
 
-def render_command_rail(active_view: str) -> str:
-    navigation = format_command_tokens([(key, label.lower()) for _view, key, label in SIDEBAR_MODULES])
+def render_command_rail(active_view: str, narrow: bool = False) -> str:
+    """The key legend under every view.
+
+    In the narrow form the Navigate row is dropped: the Modules list in the
+    sidebar already names every view with the key that opens it, one line each,
+    and repeating those seven tokens across the content column is what wrapped and
+    pushed the view's own actions out of the box. The row that carries the actions
+    possible *here* is the one that stays.
+    """
     global_actions = format_command_tokens([("r", "refresh"), ("t", "theme"), ("q", "quit")])
-    context_actions = format_command_tokens(view_command_tokens(active_view))
+    context_actions = format_command_tokens(view_command_tokens(active_view, narrow=narrow))
+    if narrow:
+        return "\n".join(
+            [
+                f"[bold {ACCENT_SKY}]Global[/]    {global_actions}",
+                f"[bold {ACCENT_SKY}]This View[/] {context_actions}",
+            ]
+        )
+    navigation = format_command_tokens([(key, label.lower()) for _view, key, label in SIDEBAR_MODULES])
     return "\n".join(
         [
             f"[bold {ACCENT_SKY}]Navigate[/]  {navigation}",
@@ -3599,7 +3660,9 @@ def create_app(
                     narrow=self.narrow_viewport,
                 )
             )
-            self.query_one("#command-rail", Static).update(render_command_rail(self.active_view))
+            self.query_one("#command-rail", Static).update(
+                render_command_rail(self.active_view, narrow=self.narrow_viewport)
+            )
 
         def modal_open(self) -> bool:
             # Any pushed screen (form, confirm, roster, command palette)
@@ -4684,8 +4747,15 @@ DASHBOARD_CSS = """
             height: 1fr;
         }
 
+        /* The rail is the only place a keyboard operator learns what this view
+           can do, so it may never clip its own rows. Its Navigate row is a list
+           of tokens, and that list wraps when the content column is narrower than
+           about 140 columns; a fixed height of 5 then pushes the third row -- the
+           view's own actions -- out of the box entirely. Height follows content,
+           and the scrollable view above gives the row up instead. */
         #command-rail {
-            height: 5;
+            height: auto;
+            min-height: 5;
             margin-top: 1;
             border: heavy #f59e0b;
             background: #0b1a2a;
