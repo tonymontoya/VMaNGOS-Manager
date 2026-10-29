@@ -2020,18 +2020,43 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str, narrow: boo
     world_restarts = clamp_int(world.get("restart_count_1h", 0))
     summary = snapshot.get("config_summary", {})
 
-    lines = [
-        f"[bold {ACCENT_GOLD}]Realm Services[/]",
-        *([] if narrow else [f"[{ACCENT_MUTED}]Auth and world services, plus the DB check.[/]"]),
-        "",
-        f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
-        f"[{ACCENT_MUTED}]       cpu[/] {auth.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {auth.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {auth_restarts}",
-        "",
-        f"[bold {ACCENT_SKY}]World[/]  {format_state(world.get('health', world.get('state')))}  [{ACCENT_MUTED}]pid[/] {world.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {world.get('uptime_human', 'N/A')}",
-        f"[{ACCENT_MUTED}]       cpu[/] {world.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {world.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {world_restarts}",
-        "",
-        f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}  [{ACCENT_MUTED}]check[/] {escape_markup(db.get('message', 'n/a'))}",
-    ]
+    def service_row(name: str, pad: str, service: dict[str, Any], restarts: int) -> str:
+        row = (
+            f"[bold {ACCENT_SKY}]{name}[/]{pad}{format_state(service.get('health', service.get('state')))}"
+            f"  [{ACCENT_MUTED}]cpu[/] {service.get('cpu_percent', 0)}%"
+            f"  [{ACCENT_MUTED}]mem[/] {service.get('memory_mb', 0)} MB"
+        )
+        # One row has room for one piece of history. A restart in the last hour is
+        # that piece, so it displaces the pid; with nothing to report the pid takes
+        # the slot, and uptime — which the Monitor view's process card carries in
+        # every window size — steps aside rather than pushing a line wrap.
+        if restarts:
+            return row + f"  [{ACCENT_MUTED}]restarts/1h[/] {restarts}"
+        return row + f"  [{ACCENT_MUTED}]pid[/] {service.get('pid', 0)}"
+
+    if narrow:
+        # Stacked, this card gets about a dozen rows for three services. Every
+        # number stays; the indent and the blank separators are what the border
+        # already gives you.
+        lines = [
+            f"[bold {ACCENT_GOLD}]Realm Services[/]",
+            service_row("Auth", "   ", auth, auth_restarts),
+            service_row("World", "  ", world, world_restarts),
+            f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}  [{ACCENT_MUTED}]check[/] {escape_markup(db.get('message', 'n/a'))}",
+        ]
+    else:
+        lines = [
+            f"[bold {ACCENT_GOLD}]Realm Services[/]",
+            f"[{ACCENT_MUTED}]Auth and world services, plus the DB check.[/]",
+            "",
+            f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
+            f"[{ACCENT_MUTED}]       cpu[/] {auth.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {auth.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {auth_restarts}",
+            "",
+            f"[bold {ACCENT_SKY}]World[/]  {format_state(world.get('health', world.get('state')))}  [{ACCENT_MUTED}]pid[/] {world.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {world.get('uptime_human', 'N/A')}",
+            f"[{ACCENT_MUTED}]       cpu[/] {world.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {world.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {world_restarts}",
+            "",
+            f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}  [{ACCENT_MUTED}]check[/] {escape_markup(db.get('message', 'n/a'))}",
+        ]
 
     # Name the realm this console is pointed at: a screen full of green means
     # nothing if it is the wrong host. One line, because this panel's row is
@@ -2166,6 +2191,7 @@ def render_monitor_pressure(
         (
             "CPU",
             f"{cpu_percent:.1f}% / {cpu.get('cores', 'n/a')} cores{compact_metric_state(cpu.get('status', 'unavailable'))}",
+            f"{cpu_percent:.1f}% / {cpu.get('cores', 'n/a')}c{compact_metric_state(cpu.get('status', 'unavailable'))}",
             cpu_history,
             "cpu",
             cpu.get("status", "unavailable"),
@@ -2174,6 +2200,7 @@ def render_monitor_pressure(
         (
             "Memory",
             f"{memory_percent:.1f}% / {format_gb_from_kb(memory.get('used_kb', 0))} of {format_gb_from_kb(memory.get('total_kb', 0))}{compact_metric_state(memory.get('status', 'unavailable'))}",
+            f"{memory_percent:.1f}% / {format_gb_from_kb(memory.get('used_kb', 0)).replace(' GB', 'G')}/{format_gb_from_kb(memory.get('total_kb', 0)).replace(' GB', 'G')}{compact_metric_state(memory.get('status', 'unavailable'))}",
             memory_history,
             "memory",
             memory.get("status", "unavailable"),
@@ -2182,6 +2209,7 @@ def render_monitor_pressure(
         (
             "Load",
             f"1m {load.get('load_1', 0)}  5m {load.get('load_5', 0)}  15m {load.get('load_15', 0)}{compact_metric_state(load.get('status', 'unavailable'))}",
+            f"1m {load.get('load_1', 0)} / 5m {load.get('load_5', 0)}{compact_metric_state(load.get('status', 'unavailable'))}",
             load_history,
             "load",
             load.get("status", "unavailable"),
@@ -2190,6 +2218,7 @@ def render_monitor_pressure(
         (
             "Disk",
             f"{disk_percent:.1f}% used / {format_gb_from_kb(disk.get('available_kb', 0))} free{compact_metric_state(disk.get('status', 'unavailable'))}",
+            f"{disk_percent:.1f}% / {format_gb_from_kb(disk.get('available_kb', 0)).replace(' GB', 'G')} free{compact_metric_state(disk.get('status', 'unavailable'))}",
             disk_history,
             "disk",
             disk.get("status", "unavailable"),
@@ -2197,8 +2226,19 @@ def render_monitor_pressure(
         ),
     ]
 
-    for label, summary, values, metric_key, status, percent in metric_rows:
+    for label, summary, summary_narrow, values, metric_key, status, percent in metric_rows:
         peak_text = format_metric_peak(values, metric_key)
+        if narrow:
+            # One row per metric: the value, a meter short enough to sit beside
+            # it, and the window peak. The trend word and the 15-minute average
+            # are the first things to go, because a wrapped row is a metric an
+            # operator never sees.
+            lines.append(
+                f"[bold {ACCENT_SKY}]{label:<6}[/] {escape_markup(summary_narrow)}  "
+                f"{render_meter(percent, width=10, color=metric_health_color(status), show_minimum_for_positive=(metric_key == 'load'))}"
+                f"  [{ACCENT_MUTED}]peak[/] {peak_text}"
+            )
+            continue
         lines.extend(
             [
                 f"[bold {ACCENT_SKY}]{label:<6}[/] {format_state(status)}  {escape_markup(summary)}",
@@ -2213,15 +2253,24 @@ def render_monitor_pressure(
             f"{io_percent:.1f}% util / {storage_io.get('read_ops_per_sec', 0)}:{storage_io.get('write_ops_per_sec', 0)} ops"
             f"{compact_metric_state(storage_io.get('status', 'unavailable'))}"
         )
-        lines.extend(
-            [
-                f"[bold {ACCENT_SKY}]I/O   [/] {format_state(storage_io.get('status', 'unavailable'))}  {escape_markup(io_summary)}",
-                f"{render_meter(io_percent, width=24, color=metric_health_color(storage_io.get('status', 'unavailable')))}  [{ACCENT_MUTED}]peak[/] {peak_io}  [{ACCENT_MUTED}]trend[/] {describe_trend(io_history, 'io')}",
-            ]
-        )
+        if narrow:
+            lines.append(
+                f"[bold {ACCENT_SKY}]I/O   [/] {io_percent:.1f}% / "
+                f"{storage_io.get('read_ops_per_sec', 0)}:{storage_io.get('write_ops_per_sec', 0)} ops{compact_metric_state(storage_io.get('status', 'unavailable'))}  "
+                f"{render_meter(io_percent, width=10, color=metric_health_color(storage_io.get('status', 'unavailable')))}"
+                f"  [{ACCENT_MUTED}]peak[/] {peak_io}"
+            )
+        else:
+            lines.extend(
+                [
+                    f"[bold {ACCENT_SKY}]I/O   [/] {format_state(storage_io.get('status', 'unavailable'))}  {escape_markup(io_summary)}",
+                    f"{render_meter(io_percent, width=24, color=metric_health_color(storage_io.get('status', 'unavailable')))}  [{ACCENT_MUTED}]peak[/] {peak_io}  [{ACCENT_MUTED}]trend[/] {describe_trend(io_history, 'io')}",
+                ]
+            )
     else:
         lines.append(f"[bold {ACCENT_SKY}]I/O   [/] {format_state(storage_io.get('status', 'unavailable'))}")
-        lines.append(f"[{ACCENT_MUTED}]install [bold {ACCENT_GOLD}]sysstat/iostat[/] for live disk saturation history.")
+        if not narrow:
+            lines.append(f"[{ACCENT_MUTED}]install [bold {ACCENT_GOLD}]sysstat/iostat[/] for live disk saturation history.")
 
     return "\n".join(lines)
 
@@ -2245,20 +2294,48 @@ def render_monitor_processes(snapshot: dict[str, Any], narrow: bool = False) -> 
     for service_name in ("auth", "world"):
         service = services.get(service_name, {})
         label = service_name.title()
+        restarts = clamp_int(service.get("restart_count_1h", 0))
+        if narrow:
+            row = (
+                f"[bold {ACCENT_SKY}]{label}[/]  {format_state(service.get('health', service.get('state', 'unavailable')))}"
+                f"  [{ACCENT_MUTED}]cpu[/] {service.get('cpu_percent', 0)}%"
+                f"  [{ACCENT_MUTED}]mem[/] {service.get('memory_mb', 0)} MB"
+            )
+            # One row of history, most actionable first. "no restarts, no crash
+            # loop" costs a dozen columns to say nothing changed, and the pid is
+            # the least useful number on a row that has news.
+            if service.get("crash_loop_detected"):
+                row += f"  [{ACCENT_MUTED}]crash loop[/] {format_flag(True, true_text='yes', false_text='no', true_color=ACCENT_ROSE)}"
+            elif restarts:
+                row += f"  [{ACCENT_MUTED}]restarts/1h[/] {restarts}"
+            else:
+                row += f"  [{ACCENT_MUTED}]pid[/] {service.get('pid', 0)}"
+            lines.append(row)
+            continue
         lines.extend(
             [
                 f"[bold {ACCENT_SKY}]{label}[/]  {format_state(service.get('health', service.get('state', 'unavailable')))}  [{ACCENT_MUTED}]pid[/] {service.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {service.get('uptime_human', 'n/a')}",
-                f"[{ACCENT_MUTED}]cpu[/] {service.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {service.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {clamp_int(service.get('restart_count_1h', 0))}  [{ACCENT_MUTED}]crash loop[/] {format_flag(service.get('crash_loop_detected'), true_text='yes', false_text='no', true_color=ACCENT_ROSE)}",
+                f"[{ACCENT_MUTED}]cpu[/] {service.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {service.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {restarts}  [{ACCENT_MUTED}]crash loop[/] {format_flag(service.get('crash_loop_detected'), true_text='yes', false_text='no', true_color=ACCENT_ROSE)}",
             ]
         )
 
-    lines.extend(
-        [
-            "",
-            f"[bold {ACCENT_SKY}]DB[/]    {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}",
-            f"[{ACCENT_MUTED}]      check[/] {escape_markup(db.get('message', 'n/a'))}",
-        ]
-    )
+    if narrow and db.get("ok"):
+        lines.extend(
+            [
+                "",
+                f"[bold {ACCENT_SKY}]DB[/]    {format_state('ok')}  [{ACCENT_MUTED}]check[/] {escape_markup(db.get('message', 'n/a'))}",
+            ]
+        )
+    else:
+        # A DB that is not ok has a message, and the message is the reason; it
+        # keeps its own row at every window size.
+        lines.extend(
+            [
+                "",
+                f"[bold {ACCENT_SKY}]DB[/]    {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}",
+                f"[{ACCENT_MUTED}]      check[/] {escape_markup(db.get('message', 'n/a'))}",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -2278,6 +2355,7 @@ def render_sparkline(
     color: str = ACCENT_SKY,
     suffix: str = "",
     trend: str = "",
+    show_scale: bool = True,
 ) -> str:
     """The shape of the window, not just its endpoints.
 
@@ -2301,6 +2379,8 @@ def render_sparkline(
             index = int(round(((value - low) / span) * (len(SPARK_BLOCKS) - 1)))
             cells.append(SPARK_BLOCKS[max(0, min(len(SPARK_BLOCKS) - 1, index))])
 
+    if not show_scale:
+        return f"[{color}]{''.join(cells)}[/]"
     scale = f"steady at {low:.1f}{suffix}" if span <= 0 else f"range {low:.1f}–{high:.1f}{suffix}"
     tail = f"{trend} · {scale}" if trend else scale
     return f"[{color}]{''.join(cells)}[/]  [{ACCENT_MUTED}]{escape_markup(tail)}[/]"
@@ -2314,6 +2394,7 @@ def render_monitor_trends(
     snapshot: dict[str, Any],
     metric_history: list[dict[str, Any]] | None = None,
     refresh_interval: int = 2,
+    narrow: bool = False,
 ) -> str:
     server = snapshot["server"]
     metric_history = metric_history or []
@@ -2345,6 +2426,15 @@ def render_monitor_trends(
         # print below it — "now 42.3  peak 41.0" reads as a broken gauge.
         peak_text = f"{max(available + [current_value]):.1f}{suffix}" if available or current_value is not None else "n/a"
         trend = describe_trend(values, label.lower())
+        if narrow:
+            # One row per metric: value, peak, and a short sparkline. The scale
+            # sentence ("range 20.0–31.0") repeats what the shape already says,
+            # and it is the part that costs the second row.
+            lines.append(
+                f"[bold {ACCENT_SKY}]{label:<6}[/] {current_value:.1f}{suffix}  [{ACCENT_MUTED}]peak[/] {peak_text}  "
+                f"{render_sparkline(values, width=10, color=trend_color(values, label.lower()), show_scale=False)}"
+            )
+            continue
         lines.append(
             f"[bold {ACCENT_SKY}]{label:<6}[/] [{ACCENT_MUTED}]now[/] {current_value:.1f}{suffix}  [{ACCENT_MUTED}]peak[/] {peak_text}"
         )
@@ -2358,12 +2448,18 @@ def render_monitor_trends(
         io_now = clamp_float(storage_io.get("util_percent"))
         peak_io = f"{max(available_io + [io_now]):.1f}%"
         io_trend = describe_trend(io_history, "io")
-        lines.append(
-            f"[bold {ACCENT_SKY}]I/O   [/] [{ACCENT_MUTED}]now[/] {io_now:.1f}%  [{ACCENT_MUTED}]peak[/] {peak_io}"
-        )
-        lines.append(
-            f"         {render_sparkline(io_history, color=trend_color(io_history, 'io'), suffix='%', trend=io_trend)}"
-        )
+        if narrow:
+            lines.append(
+                f"[bold {ACCENT_SKY}]I/O   [/] {io_now:.1f}%  [{ACCENT_MUTED}]peak[/] {peak_io}  "
+                f"{render_sparkline(io_history, width=10, color=trend_color(io_history, 'io'), show_scale=False)}"
+            )
+        else:
+            lines.append(
+                f"[bold {ACCENT_SKY}]I/O   [/] [{ACCENT_MUTED}]now[/] {io_now:.1f}%  [{ACCENT_MUTED}]peak[/] {peak_io}"
+            )
+            lines.append(
+                f"         {render_sparkline(io_history, color=trend_color(io_history, 'io'), suffix='%', trend=io_trend)}"
+            )
     else:
         lines.append(f"[bold {ACCENT_SKY}]I/O   [/] [{ACCENT_MUTED}]now[/] unavailable  [{ACCENT_MUTED}]peak[/] n/a  [{ACCENT_MUTED}]trend[/] warming")
 
@@ -2465,22 +2561,29 @@ def render_player_pulse(
     else:
         coverage_text = "no staff online"
 
-    return "\n".join(
-        [
-            f"[bold {ACCENT_GOLD}]Player Pulse[/]",
-            *([] if narrow else [f"[{ACCENT_MUTED}]Who is online, the window peak, and staff coverage.[/]"]),
-            "",
+    lines = [
+        f"[bold {ACCENT_GOLD}]Player Pulse[/]",
+        *([] if narrow else [f"[{ACCENT_MUTED}]Who is online, the window peak, and staff coverage.[/]"]),
+        "",
             f"[{ACCENT_MUTED}]Online Now[/]   [bold {ACCENT_GOLD}]{online_now}[/]  [{ACCENT_MUTED}]trend[/] {describe_trend(player_history, 'players')}",
             f"[{ACCENT_MUTED}]Peak Window[/] {peak_window}  [{ACCENT_MUTED}]window[/] {history_window_label(metric_history, refresh_interval)}",
             f"[{ACCENT_MUTED}]Count Source[/] {escape_markup(str(summary.get('count_source', 'unavailable')))}",
             f"[{ACCENT_MUTED}]Mix[/]          players={player_count}  staff={staff_count}",
             f"[{ACCENT_MUTED}]GM Coverage[/]  {escape_markup(coverage_text)}",
-            f"[{ACCENT_MUTED}]GMs Online[/]   {staff_count}  [{ACCENT_MUTED}]names[/] {escape_markup(truncate_text(summary.get('gm_summary', 'none'), 36))}",
-            f"[{ACCENT_MUTED}]Roster[/]       {summary.get('roster_count', len(players))} visible  [{ACCENT_MUTED}]mode[/] {escape_markup(str(summary.get('roster_source', 'unknown')))}",
-            "",
-            f"[{ACCENT_MUTED}]Open[/]        [bold {ACCENT_GOLD}]o[/] online roster  [bold {ACCENT_GOLD}]2[/] accounts",
-        ]
-    )
+        f"[{ACCENT_MUTED}]GMs Online[/]   {staff_count}"
+        # The GM names belong to the roster, which is one key away; at narrow
+        # widths the row they cost is a row of counts the operator cannot see.
+        + ("" if narrow else f"  [{ACCENT_MUTED}]names[/] {escape_markup(truncate_text(summary.get('gm_summary', 'none'), 36))}"),
+        f"[{ACCENT_MUTED}]Roster[/]       {summary.get('roster_count', len(players))} visible  [{ACCENT_MUTED}]mode[/] {escape_markup(str(summary.get('roster_source', 'unknown')))}",
+    ]
+    if not narrow:
+        lines.extend(
+            [
+                "",
+                f"[{ACCENT_MUTED}]Open[/]        [bold {ACCENT_GOLD}]o[/] online roster  [bold {ACCENT_GOLD}]2[/] accounts",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def render_account_details(account: dict[str, Any] | None, total_accounts: int) -> str:
@@ -3763,7 +3866,7 @@ def create_app(
             self.query_one("#alerts-pane", Static).update(render_alerts_panel(snapshot, narrow=self.narrow_viewport))
             self.query_one("#monitor-pressure-pane", Static).update(render_monitor_pressure(snapshot, self.metric_history, self.refresh_interval, narrow=self.narrow_viewport))
             self.query_one("#monitor-process-pane", Static).update(render_monitor_processes(snapshot, narrow=self.narrow_viewport))
-            self.query_one("#monitor-trends-pane", Static).update(render_monitor_trends(snapshot, self.metric_history, self.refresh_interval))
+            self.query_one("#monitor-trends-pane", Static).update(render_monitor_trends(snapshot, self.metric_history, self.refresh_interval, narrow=self.narrow_viewport))
             self.query_one("#monitor-storage-pane", Static).update(render_monitor_storage(snapshot))
             self.query_one("#config-pane", Static).update(render_config_panel(snapshot))
             self.query_one("#realm-logs-summary", Static).update(render_realm_logs_summary(snapshot))
@@ -4953,6 +5056,23 @@ DASHBOARD_CSS = """
         .narrow #overview-view,
         .narrow #monitor-view {
             overflow-y: auto;
+        }
+
+        /* The 14-row floor on the monitor cards belongs to the wide two-column
+           layout, where each card had two rows per metric to fill. Stacked, the
+           floor is what decides how many cards a short window can show at all:
+           at 36 rows it showed one and a half. With one row per metric a full
+           card is seven rows of data, so the floor drops to hold that and the
+           scroll is spent on the card that genuinely has more to say. */
+        .narrow #monitor-pressure-pane,
+        .narrow #monitor-process-pane,
+        .narrow #monitor-trends-pane,
+        .narrow #monitor-storage-pane,
+        .narrow #service-pane,
+        .narrow #metrics-pane,
+        .narrow #player-pulse-pane,
+        .narrow #alerts-pane {
+            min-height: 9;
         }
 
         #monitor-grid {

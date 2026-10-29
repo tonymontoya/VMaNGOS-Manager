@@ -39,8 +39,14 @@ from dashboard import (
     render_command_rail,
     view_command_tokens,
     strip_markup,
+    render_alerts_panel,
     render_meter,
+    render_monitor_pressure,
+    render_monitor_processes,
+    render_monitor_trends,
+    render_metrics_panel,
     render_player_pulse,
+    render_service_panel,
     set_palette,
 )
 
@@ -1028,6 +1034,323 @@ def test_a_narrow_window_drops_the_card_prose_and_keeps_the_card(tmp_path):
             )
 
     asyncio.run(wide())
+
+
+def demo_snapshot_path():
+    """The shipped documentation fixture: a fully populated realm host.
+
+    It is the case that produces the most lines per card, and therefore the case
+    in which a card runs out of rows first.
+    """
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "docs",
+        "assets",
+        "dashboard-demo-snapshot.json",
+    )
+
+
+def demo_snapshot():
+    with open(demo_snapshot_path(), encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def demo_history():
+    """Twelve samples so a sparkline has a shape to draw."""
+    return [
+        {
+            "cpu": 20.0 + step,
+            "memory": 40.0 + step / 2,
+            "load": 0.40 + step / 100,
+            "disk": 61.0,
+            "io": 5.0 + step,
+        }
+        for step in range(12)
+    ]
+
+
+def metric_row_blocks(text):
+    """Each metric's block, measured as (label, rows it occupies).
+
+    A metric starts a block on the line that names it, and the block runs to the
+    line before the next metric. That is what an operator counts with their eyes:
+    whether Disk is one row down or two.
+    """
+    labels = ("CPU", "Memory", "Load", "Disk", "I/O")
+    lines = [line.strip() for line in strip_markup(text).splitlines() if line.strip()]
+    marks = [(index, line.split(maxsplit=1)[0]) for index, line in enumerate(lines) if line.split(maxsplit=1)[0] in labels]
+    return [
+        (name, (marks[position + 1][0] - index) if position + 1 < len(marks) else len(lines) - index)
+        for position, (index, name) in enumerate(marks)
+    ]
+
+
+def test_a_narrow_metric_card_gives_each_metric_one_row():
+    """Two rows per metric is a wide-window luxury.
+
+    Host Pressure draws a value row and a meter row per metric, and Trends draws
+    a value row and a sparkline row: eight to ten rows for four numbers. Once the
+    cards stack, that is the difference between seeing Disk and never knowing the
+    card had one. Measured before this change: both cards used two rows per
+    metric at every width.
+    """
+    from dashboard import render_monitor_pressure, render_monitor_trends, strip_markup
+
+    snapshot, history = demo_snapshot(), demo_history()
+    for card, render in (("Host Pressure", render_monitor_pressure), ("Trends", render_monitor_trends)):
+        narrow = metric_row_blocks(render(snapshot, history, 30, narrow=True))
+        assert narrow, f"{card} narrow: no metrics rendered at all"
+        for name, rows in narrow:
+            assert rows == 1, f"{card} narrow: {name} occupies {rows} rows; one row per metric is the point ({narrow})"
+
+        wide = metric_row_blocks(render(snapshot, history, 30))
+        assert len(wide) == len(narrow), f"{card}: the wide card shows {len(wide)} metrics, the narrow one {len(narrow)}"
+        assert all(rows == 2 for _, rows in wide), (
+            f"{card} wide: metric rows are {wide}; a wide window still pays for the meter/sparkline row"
+        )
+
+    # A host with no sysstat has no I/O reading, and the sentence explaining that
+    # is precisely the prose a stacked card cannot afford.
+    snapshot, history = demo_snapshot(), demo_history()
+    no_io = json.loads(json.dumps(snapshot))
+    no_io["server"]["data"]["storage_io"] = {"available": False, "status": "unavailable"}
+    rows_for_io = [rows for name, rows in metric_row_blocks(render_monitor_pressure(no_io, history, 30, narrow=True)) if name == "I/O"]
+    assert rows_for_io and all(rows == 1 for rows in rows_for_io), (
+        f"the narrow card spends {rows_for_io} rows explaining that I/O is unavailable"
+    )
+    assert "install" in strip_markup(render_monitor_pressure(no_io, history, 30)), (
+        "the wide card dropped the sentence that says how to get I/O history"
+    )
+
+    # The narrow sparkline also stops restating its own scale. "range 20.0–31.0%"
+    # is a sentence about the shape, and the shape is right there; spending 17
+    # columns on it is how a row ends up wrapped.
+    trends_narrow = strip_markup(render_monitor_trends(snapshot, history, 30, narrow=True))
+    for phrase in ("range ", "steady at"):
+        assert phrase not in trends_narrow, f"the narrow Trends card still says {phrase!r}"
+    assert "range " in strip_markup(render_monitor_trends(snapshot, history, 30)), (
+        "the wide Trends card dropped the scale sentence its sparkline rows have room for"
+    )
+
+
+def test_the_narrow_window_asks_the_cards_for_their_narrow_form(tmp_path):
+    """A card that *can* render one row per metric is not the same as a live card
+    that does.
+
+    The bug class is a renderer given a narrow form and a call site that never
+    asks for it. Measured here against the text the pane actually drew at 100
+    columns, not against a hand-made call to the same function.
+    """
+    for pane in ("#monitor-pressure-pane", "#monitor-trends-pane"):
+        app, _log_path = build_app(tmp_path, initial_view="monitor", snapshot_file=demo_snapshot_path())
+
+        async def scenario(app=app, pane=pane):
+            async with app.run_test(size=(100, 36)) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                blocks = metric_row_blocks(str(app.query_one(pane).renderable))
+                assert blocks, f"{pane}: the live card drew no metrics"
+                for name, rows in blocks:
+                    assert rows == 1, (
+                        f"{pane}: the live card spends {rows} rows on {name} in a 100-column window ({blocks})"
+                    )
+
+        asyncio.run(scenario())
+
+
+def test_a_short_narrow_window_shows_three_of_the_four_cards(tmp_path):
+    """Stacking makes a view scrollable; it does not make the cards visible.
+
+    The card floors — 14 rows on the monitor cards, 16 on the pulse and alerts
+    cards — were written for the wide two-column layout, where a card spent two
+    rows per metric filling them. Stacked in a 36-row window the floor is what
+    decides how many cards you can see at all. Measured before this change: the
+    monitor cards began at rows 8, 23, 38 and 53 and the overview cards at 8, 23,
+    36 and 53, so in both views the bottom two cards were borders behind a scroll.
+    """
+    for view, grid in (("monitor", "#monitor-grid"), ("overview", "#overview-grid")):
+        app, _log_path = build_app(tmp_path, initial_view=view, snapshot_file=demo_snapshot_path())
+
+        async def scenario(app=app, grid=grid, view=view):
+            async with app.run_test(size=(100, 36)) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                cards = list(app.query(f"{grid} > Static"))
+                assert len(cards) == 4, f"{view}: expected four cards, found {len(cards)}"
+                height = app.screen.size.height
+                inside = [card for card in cards if card.region.y < height - 1]
+                assert len(inside) >= 3, (
+                    f"{view}: only {len(inside)} of four cards begin inside a {height}-row window: "
+                    f"{[(card.id, card.region.y, card.region.height) for card in cards]}"
+                )
+                for card in cards:
+                    drawn = [line for line in strip_markup(str(card.renderable)).splitlines() if line.strip()]
+                    assert card.region.height >= len(drawn) + 2, (
+                        f"{card.id}: {len(drawn)} rows of content in a {card.region.height}-row card, so the card clips itself"
+                    )
+
+        asyncio.run(scenario())
+
+
+def test_a_narrow_service_card_gives_each_service_one_row(tmp_path):
+    """Two rows per service is four rows a short window pays for padding.
+
+    The wide card puts ``cpu``, ``mem`` and ``restarts/1h`` on their own indented
+    line under the service name, and separates the services with blank rows. In a
+    stacked card that is ten rows for three services. The narrow card keeps every
+    number, on the row that names the service, and drops the separators the border
+    already provides.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            rows = [strip_markup(line) for line in str(app.query_one("#service-pane").renderable).splitlines() if line.strip()]
+            for service in ("Auth", "World"):
+                named = [line for line in rows if line.lstrip().startswith(service)]
+                assert len(named) == 1, f"the narrow card spends {len(named)} rows naming {service}: {named}"
+                assert "cpu" in named[0] and "mem" in named[0], (
+                    f"the narrow {service} row holds only: {named[0]!r}"
+                )
+            assert not any(line.lstrip().startswith("cpu") for line in rows), (
+                "a service still has its metrics on a second row"
+            )
+            for needed in ("Realm Services", "DB", "Target", "pid"):
+                assert needed in "\n".join(rows), f"the narrow service card dropped {needed}"
+
+            # A restart in the last hour is the news, so it takes the row and the
+            # uptime sentence steps aside.
+            snapshot = json.loads(json.dumps(app.snapshot))
+            restarted = {"health": "healthy", "state": "running", "pid": 4242, "cpu_percent": 7.4, "memory_mb": 482, "uptime_human": "5h 30m", "restart_count_1h": 2}
+            snapshot["server"]["data"]["services"]["world"] = restarted
+            world_row = next(line for line in strip_markup(render_service_panel(snapshot, "overview", narrow=True)).splitlines() if line.lstrip().startswith("World"))
+            assert "restarts/1h 2" in world_row, f"a restart in the last hour did not reach the row: {world_row!r}"
+            assert "pid" not in world_row, f"a restart row that still carries a pid is a row that wraps: {world_row!r}"
+            assert len(world_row) <= 57, f"the restarted service row is {len(world_row)} columns: {world_row!r}"
+
+    asyncio.run(scenario())
+
+
+def test_a_narrow_pulse_card_keeps_the_numbers_and_drops_the_lists(tmp_path):
+    """The pulse card's long tail is a name list and an action reminder.
+
+    Both are available elsewhere without scrolling the card: GM names are in the
+    roster, and the open-roster key is in the command rail. The counts stay,
+    because the counts are the reason the card exists.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            text = strip_markup(str(app.query_one("#player-pulse-pane").renderable))
+            for needed in ("Online Now", "Peak Window", "Count Source", "Mix", "GM Coverage", "GMs Online", "Roster"):
+                assert needed in text, f"the narrow pulse card dropped {needed}"
+            assert "names" not in text, "the narrow card spends a row on GM names the roster already lists"
+            assert not any(line.strip().startswith("Open") for line in text.splitlines()), (
+                "the narrow card repeats a key the command rail already lists"
+            )
+
+    asyncio.run(scenario())
+
+    app_wide, _ = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+    async def wide():
+        async with app_wide.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app_wide.snapshot_loaded, message="snapshot to load")
+            text = strip_markup(str(app_wide.query_one("#player-pulse-pane").renderable))
+            assert "names" in text, "the wide pulse card dropped the GM names it has room for"
+
+    asyncio.run(wide())
+
+
+def test_a_narrow_process_card_gives_each_process_one_row(tmp_path):
+    """The Monitor view's process card is the last two-rows-per-item card.
+
+    Same arithmetic as the Overview's services card: stacked, the indent row costs
+    the next card its place in the window. What cannot fit on one row is the
+    history, so the row carries one fact of the history — a detected crash loop
+    beats a restart count, and both beat the pid, which is the least actionable of
+    the three when something is actually wrong.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="monitor", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            rows = [strip_markup(line) for line in str(app.query_one("#monitor-process-pane").renderable).splitlines() if line.strip()]
+            for process in ("Auth", "World"):
+                named = [line for line in rows if line.lstrip().startswith(process)]
+                assert len(named) == 1, f"the narrow card spends {len(named)} rows naming {process}: {named}"
+                assert "cpu" in named[0] and "mem" in named[0], f"the narrow {process} row holds only: {named[0]!r}"
+            assert not any(line.lstrip().startswith("cpu") for line in rows), "a process still has its metrics on a second row"
+            assert not any("crash loop no" in line for line in rows), "the narrow card spends columns saying nothing happened"
+            assert not any("restarts/1h 0" in line for line in rows), "the narrow card spends columns saying nothing happened"
+            assert any("pid" in line for line in rows), "a healthy process lost its pid"
+            assert any("DB" in line and "check" in line for line in rows), "the DB check lost its row"
+
+            snapshot = json.loads(json.dumps(app.snapshot))
+            world = dict(snapshot["server"]["data"]["services"]["world"])
+            world["crash_loop_detected"] = True
+            world["restart_count_1h"] = 3
+            snapshot["server"]["data"]["services"]["world"] = world
+            rendered = strip_markup(render_monitor_processes(snapshot, narrow=True))
+            world_row = next(line for line in rendered.splitlines() if line.lstrip().startswith("World"))
+            assert "crash loop yes" in world_row, f"the detected crash loop did not reach the row: {world_row!r}"
+            assert "restarts/1h" not in world_row and "pid" not in world_row, (
+                f"the row that has news also carried the trivia, so it wraps: {world_row!r}"
+            )
+            assert len(world_row) <= 57, f"the crashing process row is {len(world_row)} columns: {world_row!r}"
+
+    asyncio.run(scenario())
+
+
+def test_the_narrow_rows_stay_inside_their_card(tmp_path):
+    """A row that wraps is a row the card loses.
+
+    Every narrow line is measured against the width of the card that draws it in a
+    100-column window: the bound is whatever the card actually has, not a number
+    chosen in the source. Measured before this change, the Realm Services row
+    pushed ``pid 231004`` onto its own line, so the card spent a row on six digits.
+    """
+    panes = {
+        "monitor": (
+            ("#monitor-pressure-pane", lambda snapshot, history: render_monitor_pressure(snapshot, history, 30, narrow=True)),
+            ("#monitor-process-pane", lambda snapshot, history: render_monitor_processes(snapshot, narrow=True)),
+            ("#monitor-trends-pane", lambda snapshot, history: render_monitor_trends(snapshot, history, 30, narrow=True)),
+        ),
+        "overview": (
+            ("#service-pane", lambda snapshot, history: render_service_panel(snapshot, "overview", narrow=True)),
+            ("#metrics-pane", lambda snapshot, history: render_metrics_panel(snapshot, history, 30, narrow=True)),
+            ("#player-pulse-pane", lambda snapshot, history: render_player_pulse(snapshot, history, 30, narrow=True)),
+            ("#alerts-pane", lambda snapshot, history: render_alerts_panel(snapshot, narrow=True)),
+        ),
+    }
+    for view, cards in panes.items():
+        app, _log_path = build_app(tmp_path, initial_view=view, snapshot_file=demo_snapshot_path())
+
+        async def scenario(app=app, cards=cards, view=view):
+            async with app.run_test(size=(100, 36)) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                snapshot, history = app.snapshot, app.metric_history
+                for pane, render in cards:
+                    card = app.query_one(pane)
+                    # The gutter — border and padding — is what the card spends of
+                    # its own width before a single character of content fits.
+                    width = card.content_size.width
+                    assert width > 30, f"{view}: {pane} has {width} columns of content area, which is not a usable card"
+                    for line in strip_markup(render(snapshot, history)).splitlines():
+                        assert len(line) <= width, (
+                            f"{view}: {pane} drew a {len(line)}-column row into {width} columns of content area, so it wraps: {line!r}"
+                        )
+
+        asyncio.run(scenario())
 
 
 def test_the_narrow_banner_says_the_same_thing_in_fewer_rows():

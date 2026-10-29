@@ -26,6 +26,12 @@ A string that does none of these is filler and gets deleted.
 - **One home per fact.** Key hints live in the command rail, not repeated
   in panel footers. Realm/console identity lives in the banner, not again
   in the sidebar.
+- **In a narrow window, words are rows.** A wrapped row is a row the card loses,
+  so the narrow form of a card carries the same facts in fewer columns: uptime
+  steps aside for a restart count, "no restarts, no crash loop" goes because it
+  reports nothing, and a sparkline stops narrating its own range. The limit is the
+  card's own content width read off the layout, never a number picked in the
+  source.
 - **Titles are plain nouns.** Name the thing ("Host Pressure"), don't
   decorate it ("Pressure Deck").
 - **Errors answer three questions:** what failed, why (when known), and the
