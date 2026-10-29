@@ -81,6 +81,26 @@ sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
 
 The `config detect` command performs a read-only scan of your install root, `systemd` services, and `mangosd.conf` / `realmd.conf` to propose a working `manager.conf` without overwriting anything.
 
+### Path C — Manager Only, Realm Later
+
+No realm yet? Install Manager first and let it describe the host as it actually is.
+The same steps work on any supported LTS (22.04, 24.04, 26.04); the dashboard
+environment just needs `python3-venv`:
+
+```bash
+git clone https://github.com/tonymontoya/VMaNGOS-Manager.git
+cd VMaNGOS-Manager/manager
+make test
+sudo make install PREFIX=/opt/mangos/manager
+sudo /opt/mangos/manager/bin/vmangos-manager --version          # proves what you just installed
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
+```
+
+`config detect` finds nothing to adopt and the dashboard shows empty states rather
+than pretending — when you later run the wizard on that host, Manager is already
+present and the wizard's `--bootstrap` step is a no-op.
+
 ---
 
 ## 🖥️ The Dashboard
