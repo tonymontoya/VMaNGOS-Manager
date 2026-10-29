@@ -993,11 +993,11 @@ config_validate() {
     local warnings=()
     
     if [[ ! -f "$config_file" ]]; then
-        errors+=("Config file not found: $config_file")
+        errors+=("Configuration file not found: $config_file")
         if [[ "$output_format" == "json" ]]; then
-            json_output false "null" "CONFIG_NOT_FOUND" "$config_file" "Run 'vmangos-manager config create'"
+            json_output false "null" "CONFIG_NOT_FOUND" "Configuration file not found: $config_file" "Run 'vmangos-manager config create'"
         else
-            log_error "Config file not found: $config_file"
+            log_error "Configuration file not found: $config_file"
             log_info "Run: vmangos-manager config create"
         fi
         return 1
