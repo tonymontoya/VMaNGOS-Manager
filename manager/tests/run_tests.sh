@@ -5671,6 +5671,231 @@ test_installer_clear_install_refuses_unsafe_root() {
     return $all_passed
 }
 
+# Install-layout guards: the manager must not be installed on top of a realm,
+# and a realm must not be installed inside the manager's prefix.
+test_install_guard_realm_marker_detection() {
+    # shellcheck source=../lib/install_guard.sh
+    source "$LIB_DIR/install_guard.sh"
+
+    local all_passed=0 workdir rc
+    workdir=$(mktemp -d)
+
+    mkdir -p "$workdir/clean"
+    rc=0
+    install_guard_is_realm_root "$workdir/clean" || rc=1
+    assert_equals "1" "$rc" "an empty directory is not a realm install" || all_passed=1
+
+    mkdir -p "$workdir/daemon/bin"
+    touch "$workdir/daemon/bin/mangosd"
+    rc=0
+    install_guard_is_realm_root "$workdir/daemon" || rc=1
+    assert_equals "0" "$rc" "bin/mangosd marks a realm install" || all_passed=1
+
+    mkdir -p "$workdir/conf/run/etc"
+    touch "$workdir/conf/run/etc/realmd.conf"
+    rc=0
+    install_guard_is_realm_root "$workdir/conf" || rc=1
+    assert_equals "0" "$rc" "run/etc/realmd.conf marks a realm install" || all_passed=1
+
+    mkdir -p "$workdir/ckpt/.install-checkpoints"
+    rc=0
+    install_guard_is_realm_root "$workdir/ckpt" || rc=1
+    assert_equals "0" "$rc" "the install checkpoint marker marks a realm install" || all_passed=1
+
+    rc=0
+    install_guard_is_realm_root "" || rc=1
+    assert_equals "1" "$rc" "no path is not a realm install" || all_passed=1
+
+    rm -rf "$workdir"
+    return $all_passed
+}
+
+test_install_guard_refuses_manager_prefix_that_is_a_realm() {
+    # shellcheck source=../lib/install_guard.sh
+    source "$LIB_DIR/install_guard.sh"
+
+    local all_passed=0 workdir rc output
+    workdir=$(mktemp -d)
+    mkdir -p "$workdir/realm/bin"
+    touch "$workdir/realm/bin/realmd"
+
+    rc=0
+    output=$(install_guard_refuse_realm_prefix "$workdir/realm" 2>&1) || rc=$?
+    assert_equals "1" "$rc" "the manager is refused in a realm root" || all_passed=1
+    assert_true "[[ \"\$output\" == *'is a VMaNGOS realm install'* ]]" "the refusal names what it found" || all_passed=1
+    assert_true "[[ \"\$output\" == *'Makefile'* ]]" "the refusal says which file is at risk" || all_passed=1
+    assert_true "[[ \"\$output\" == *\"PREFIX=\$workdir/realm/manager\"* ]]" "the refusal gives the layout that works" || all_passed=1
+
+    rc=0
+    output=$(install_guard_refuse_realm_prefix "$workdir/realm/manager" 2>&1) || rc=$?
+    assert_equals "0" "$rc" "a manager prefix inside the realm root is the documented layout" || all_passed=1
+
+    rc=0
+    output=$(install_guard_refuse_realm_prefix "" 2>&1) || rc=$?
+    assert_equals "1" "$rc" "an empty prefix is refused rather than guessed" || all_passed=1
+
+    rm -rf "$workdir"
+    return $all_passed
+}
+
+test_install_guard_refuses_realm_root_inside_manager_prefix() {
+    # shellcheck source=../lib/install_guard.sh
+    source "$LIB_DIR/install_guard.sh"
+
+    local all_passed=0 workdir rc output
+    workdir=$(mktemp -d)
+    mkdir -p "$workdir/opt/mangos/manager/bin"
+
+    # The documented layout: realm at /opt/mangos, manager at /opt/mangos/manager.
+    rc=0
+    install_guard_refuse_root_inside_manager "$workdir/opt/mangos" "$workdir/opt/mangos/manager" || rc=1
+    assert_equals "0" "$rc" "a realm root that contains the manager is allowed" || all_passed=1
+
+    for target in "$workdir/opt/mangos/manager" "$workdir/opt/mangos/manager/realm" "$workdir/opt/mangos/manager/bin/inner"; do
+        rc=0
+        output=$(install_guard_refuse_root_inside_manager "$target" "$workdir/opt/mangos/manager" 2>&1) || rc=$?
+        assert_equals "1" "$rc" "a realm root at or inside the manager prefix is refused" || all_passed=1
+    done
+    assert_true "[[ \"\$output\" == *\"INSTALLROOT=\$workdir/opt/mangos\"* ]]" "the refusal names the root that works" || all_passed=1
+
+    # A sibling that merely shares a parent is not inside the prefix.
+    rc=0
+    install_guard_refuse_root_inside_manager "$workdir/opt/mangos-other" "$workdir/opt/mangos/manager" || rc=1
+    assert_equals "0" "$rc" "a sibling directory is not inside the prefix" || all_passed=1
+
+    # A relative root would be resolved somewhere the operator never typed.
+    rc=0
+    output=$(install_guard_refuse_root_inside_manager "opt/mangos" "$workdir/opt/mangos/manager" 2>&1) || rc=$?
+    assert_equals "1" "$rc" "a relative install root is refused" || all_passed=1
+    assert_true "[[ \"\$output\" == *'absolute path'* ]]" "the refusal says why the root is rejected" || all_passed=1
+
+    # No manager prefix known (a sourced library with no CLI around): the guard
+    # has nothing to compare against and must not invent one.
+    rc=0
+    install_guard_refuse_root_inside_manager "$workdir/opt/mangos" "" || rc=1
+    assert_equals "0" "$rc" "the guard stays silent when it cannot name the prefix" || all_passed=1
+
+    rm -rf "$workdir"
+    return $all_passed
+}
+
+test_installer_unit_start_refuses_root_inside_manager_prefix() {
+    # shellcheck source=../lib/installer.sh
+    source "$LIB_DIR/installer.sh"
+
+    local all_passed=0 workdir secrets_file setup_script systemd_run_log output rc
+    workdir=$(mktemp -d)
+    secrets_file="$workdir/secrets.conf"
+    setup_script="$workdir/setup/vmangos_setup.sh"
+    systemd_run_log="$workdir/systemd-run.log"
+    mkdir -p "$workdir/setup" "$workdir/opt/mangos/manager"
+    printf '#!/bin/bash\nexit 0\n' > "$setup_script"
+    printf 'CLIENTDATA=/data\nINSTALLROOT=%s/opt/mangos/manager/realm\n' "$workdir" > "$secrets_file"
+
+    check_root() { :; }
+    installer_unit_active() { return 1; }
+    installer_systemd_run() {
+        printf 'MUST_NOT_RUN\n' >> "$systemd_run_log"
+        return 0
+    }
+
+    MANAGER_ROOT="$workdir/opt/mangos/manager"
+    rc=0
+    output=$(installer_unit_start "$secrets_file" "$setup_script" 2>&1) || rc=$?
+    assert_equals "1" "$rc" "an install inside the manager prefix is refused" || all_passed=1
+    assert_true "[[ \"\$output\" == *\"manager's own prefix\"* ]]" "the refusal names the manager prefix" || all_passed=1
+    assert_true "! [[ -f \"\$systemd_run_log\" ]]" "systemd-run is never invoked for a refused layout" || all_passed=1
+
+    # The same secrets file, corrected to the real root, must start.
+    printf 'CLIENTDATA=/data\nINSTALLROOT=%s/opt/mangos\n' "$workdir" > "$secrets_file"
+    rc=0
+    output=$(installer_unit_start "$secrets_file" "$setup_script" 2>&1) || rc=$?
+    assert_equals "0" "$rc" "the corrected root installs" || all_passed=1
+    assert_true "[[ -f \"\$systemd_run_log\" ]]" "systemd-run runs for the corrected root" || all_passed=1
+
+    rm -rf "$workdir"
+    return $all_passed
+}
+
+test_installer_clear_install_refuses_manager_prefix() {
+    # shellcheck source=../lib/installer.sh
+    source "$LIB_DIR/installer.sh"
+
+    local all_passed=0 workdir output rc
+    workdir=$(mktemp -d)
+    mkdir -p "$workdir/opt/mangos/manager/lib" "$workdir/opt/mangos/manager/realm/.install-checkpoints"
+    printf 'x\n' > "$workdir/opt/mangos/manager/lib/server.sh"
+    printf 'x\n' > "$workdir/opt/mangos/manager/Makefile"
+
+    MANAGER_ROOT="$workdir/opt/mangos/manager"
+
+    rc=0
+    output=$(installer_clear_install "$workdir/opt/mangos/manager/realm" 2>&1) || rc=$?
+    assert_equals "1" "$rc" "clearing a realm root inside the manager prefix is refused" || all_passed=1
+    assert_true "[[ -d \"\$workdir/opt/mangos/manager/realm\" ]]" "nothing was removed" || all_passed=1
+    assert_true "[[ \"\$output\" == *\"manager's own prefix\"* ]]" "the refusal says why" || all_passed=1
+
+    rm -rf "$workdir"
+    return $all_passed
+}
+
+test_make_install_refuses_a_realm_root_prefix() {
+    # The guard has to be in the install target itself, not only in the CLI:
+    # `make install PREFIX=...` is the path an operator reaches for when the
+    # CLI is the thing that is broken.
+    local all_passed=0 workdir realm_root output rc
+    workdir=$(mktemp -d)
+    realm_root="$workdir/opt/mangos"
+    mkdir -p "$realm_root/bin" "$realm_root/run/etc"
+    printf 'realm makefile\n' > "$realm_root/Makefile"
+    touch "$realm_root/bin/mangosd" "$realm_root/run/etc/mangosd.conf"
+
+    rc=0
+    output=$(make -C "$MANAGER_DIR" install PREFIX="$realm_root" 2>&1) || rc=$?
+    assert_equals "2" "$rc" "make install into a realm root fails" || all_passed=1
+    assert_true "[[ \"\$output\" == *'is a VMaNGOS realm install'* ]]" "make install explains the refusal" || all_passed=1
+    assert_true "[[ \"\$(cat \"\$realm_root/Makefile\")\" == 'realm makefile' ]]" "the realm's Makefile survived" || all_passed=1
+    assert_true "! [[ -d \"\$realm_root/lib\" ]]" "no manager lib directory was created" || all_passed=1
+
+    # Same tree, documented layout: the manager goes one level down.
+    rc=0
+    output=$(make -C "$MANAGER_DIR" install PREFIX="$realm_root/manager" 2>&1) || rc=$?
+    assert_equals "0" "$rc" "the documented layout installs" || all_passed=1
+    assert_file_exists "$realm_root/manager/VERSION" "manager installed under the realm root" || all_passed=1
+    assert_true "[[ \"\$(cat \"\$realm_root/Makefile\")\" == 'realm makefile' ]]" "the realm's Makefile still intact" || all_passed=1
+
+    rm -rf "$workdir"
+    return $all_passed
+}
+
+test_wizard_run_names_the_setup_script_fix() {
+    # An installed manager has no vmangos_setup.sh above its prefix, and the
+    # old answer was a path with no way forward. The refusal has to be pasteable.
+    # shellcheck source=../lib/wizard.sh
+    source "$LIB_DIR/wizard.sh"
+
+    local all_passed=0 workdir output rc
+    workdir=$(mktemp -d)
+    CONFIG_FILE=/dev/null
+
+    installer_unit_active() { return 1; }
+    wizard_python_bin() { command -v python3; }
+    wizard_textual_available() { return 0; }
+    wizard_gate_action() { printf 'GATE_RAN\n'; return 0; }
+
+    rc=0
+    output=$(wizard_run /bin/true "$workdir/secrets.conf" "$workdir/opt/mangos/vmangos_setup.sh" false 2>&1) || rc=$?
+    assert_equals "1" "$rc" "a missing setup script stops the wizard" || all_passed=1
+    assert_true "! [[ \"\$output\" == *'GATE_RAN'* ]]" "the gate is never evaluated without the script" || all_passed=1
+    assert_true "[[ \"\$output\" == *'Setup script not found'* ]]" "the refusal names the missing file" || all_passed=1
+    assert_true "[[ \"\$output\" == *'ln -sfn'* ]]" "the refusal carries a pasteable fix" || all_passed=1
+    assert_true "[[ \"\$output\" == *\"\$workdir/opt/mangos/vmangos_setup.sh\"* ]]" "the fix targets the exact path that was missing" || all_passed=1
+    assert_true "[[ \"\$output\" == *'docs/troubleshooting.md'* ]]" "the refusal points at the written-up remedy" || all_passed=1
+
+    rm -rf "$workdir"
+    return $all_passed
+}
+
 test_installer_clear_install_marker_guard() {
     # A non-empty directory is only deletable when it is a VMaNGOS install
     # root (carries .install-checkpoints). Empty or missing directories are
@@ -5903,6 +6128,13 @@ main() {
     run_test "Installer: clear marker guard (non-empty needs marker)" test_installer_clear_install_marker_guard
     run_test "Wizard: gate ignores noisy secrets file" test_wizard_gate_action_ignores_noisy_secrets
     run_test "Wizard: bootstrap runs before the active-unit check" test_cli_install_bootstrap_during_active_unit
+    run_test "Install guard: realm markers detected" test_install_guard_realm_marker_detection
+    run_test "Install guard: manager prefix cannot be a realm root" test_install_guard_refuses_manager_prefix_that_is_a_realm
+    run_test "Install guard: realm root cannot sit inside the manager prefix" test_install_guard_refuses_realm_root_inside_manager_prefix
+    run_test "Installer: start refuses an install root inside the manager prefix" test_installer_unit_start_refuses_root_inside_manager_prefix
+    run_test "Installer: clear refuses a realm root inside the manager prefix" test_installer_clear_install_refuses_manager_prefix
+    run_test "Install guard: make install refuses a realm root as PREFIX" test_make_install_refuses_a_realm_root_prefix
+    run_test "Wizard: missing setup script carries a pasteable fix" test_wizard_run_names_the_setup_script_fix
 
     local unregistered_failed=0
     if ! report_unregistered_tests; then

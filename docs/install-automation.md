@@ -48,6 +48,8 @@ sudo bash auto_install.sh
 
 **Reinstall safety:** If `/opt/mangos` already exists, the installer decides how to proceed: a partial install with checkpoints resumes from the last completed phase; an install without checkpoints follows `REINSTALL_POLICY` in `/root/.vmangos-secrets/setup.conf` (`abort` by default, or `replace` to wipe and reinstall).
 
+**Install layout:** the realm owns the install root and the manager sits inside it — `/opt/mangos` and `/opt/mangos/manager`. Nested the other way round (a realm root at or under the manager's prefix, or the manager installed over a realm) the installer refuses before writing a single file; see [The installer refused my install root](troubleshooting.md#the-installer-refused-my-install-root).
+
 ### Guided Interactive Install
 
 Use this when you want to choose values during install.

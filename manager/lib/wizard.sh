@@ -200,6 +200,17 @@ wizard_run() {
         return 1
     fi
 
+    # The setup script is resolved relative to the manager's own location, so
+    # an installed manager (as opposed to a repo checkout) usually has no such
+    # file. Say where it goes, in the form that can be pasted.
+    if [[ ! -f "$setup_script" ]]; then
+        log_error "Setup script not found: $setup_script"
+        log_error "The wizard looks one level above the manager's prefix. Put the VMaNGOS setup script there:"
+        log_error "  ln -sfn /path/to/VMaNGOS-Manager/vmangos_setup.sh \"$setup_script\""
+        log_error "See docs/troubleshooting.md if your checkout lives elsewhere."
+        return 1
+    fi
+
     gate_action=$(wizard_gate_action "$secrets_file" "$setup_script") || return 1
 
     # The wizard needs the install root the gate evaluated against; it is
