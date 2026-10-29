@@ -30,6 +30,8 @@ from dashboard import (
     DARK_PALETTE,
     LIGHT_PALETTE,
     NARROW_VIEWPORT_WIDTH,
+    SCROLL_KEYS_CLAIMED_BY_SEARCH,
+    SCROLL_KEYS_CLAIMED_BY_TABLE,
     TWO_COLUMN_MINIMUM_WIDTH,
     create_app,
     empty_snapshot,
@@ -1729,6 +1731,297 @@ def test_the_rail_is_tall_enough_for_what_it_says(tmp_path):
                     )
 
     asyncio.run(scenario())
+
+
+def test_a_chrome_restatement_with_a_form_open_leaves_the_form_alone(tmp_path):
+    """The resize that makes the rail recount its rows must not reach into a modal.
+
+    A pushed screen is the whole display, and the sidebar, banner, and rail it
+    covers are not in its widget tree. Restating them then queried nodes that do
+    not exist on this screen, and the resulting crash took the open form down with
+    it -- the operator losing a half-filled account form because the window
+    happened to change size. The chrome waits for the modal to go away.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            await pilot.press("x")  # stop realm: a confirmation on its own screen
+            await pilot.pause()
+            assert app.screen.__class__.__name__ == "ConfirmScreen", "no modal opened to test against"
+            app.call_after_refresh(app.refresh_chrome)
+            await pilot.pause()
+            assert app.screen.__class__.__name__ == "ConfirmScreen", (
+                "restating the chrome dismissed or crashed the open modal"
+            )
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.screen.__class__.__name__ != "ConfirmScreen", "the modal outstayed its cancel"
+            above, below = app.view_scroll_extent()
+            assert below > 0, "the base screen forgot how much of the view was out of sight"
+
+    asyncio.run(scenario())
+
+
+def test_a_stacked_view_can_be_reached_by_keyboard(tmp_path):
+    """Cards below the fold have to be reachable without a mouse.
+
+    Measured at 140 columns -- the width the documentation screenshot is taken at
+    -- the Overview needs more rows than the window has, and Textual gives that
+    overflow to the mouse wheel alone. So the operator on a terminal with no wheel
+    did not have a hidden Alerts card; they had no Alerts card at all. These keys
+    are the difference between content off-screen and content that does not exist,
+    and the assertion is about the last card being inside the window, not about
+    any scroll offset.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            view = app.query_one("#overview-view")
+            alerts = app.query_one("#alerts-pane")
+            assert view.max_scroll_y > 0, "this has to be a size where the view overflows"
+            assert alerts.region.y >= view.content_region.bottom, (
+                "the Alerts card should start out of sight, or the test proves nothing"
+            )
+            await pilot.press("end")
+            await pilot.pause()
+            assert alerts.region.bottom <= view.content_region.bottom, (
+                "End left the last card out of the window"
+            )
+            assert app.view_scroll_extent()[0] > 0, "at the bottom, the rows must count as above"
+            await pilot.press("home")
+            await pilot.pause()
+            above, below = app.view_scroll_extent()
+            assert above == 0, "Home did not return to the top"
+            assert below == int(view.max_scroll_y)
+            assert alerts.region.y >= view.content_region.bottom
+
+    asyncio.run(scenario())
+
+
+def test_the_view_also_rolls_one_line_and_one_page_at_a_time(tmp_path):
+    """End and Home jump; the operator also wants to stop somewhere in between."""
+    app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            view = app.query_one("#overview-view")
+            for _ in range(3):
+                await pilot.press("down")
+                await pilot.pause()
+            assert view.scroll_y == 3, f"three Downs moved it {view.scroll_y} rows"
+            await pilot.press("pageup")
+            await pilot.pause()
+            assert view.scroll_y < 3, "Page Up did not move the view back up"
+            await pilot.press("up")
+            await pilot.pause()
+            assert view.scroll_y < 2, "Up did not move the view one row further"
+
+    asyncio.run(scenario())
+
+
+def test_the_rail_offers_scroll_only_for_a_view_that_has_more_in_it():
+    """No scroll row for a view that fits; the exact count when it does not."""
+    plain = strip_markup(render_command_rail("overview")).splitlines()
+    assert not any(row.startswith("Scroll") for row in plain), (
+        "a view that fits advertised a scroll it cannot perform"
+    )
+    below = strip_markup(render_command_rail("overview", rows_below=26)).splitlines()
+    assert len(below) == len(plain) + 1, "the scroll row did not get its own line"
+    assert below[-1].startswith("Scroll"), "the scroll row is not labelled"
+    assert "26 rows below" in below[-1]
+    for token in ("↑", "↓", "PgUp", "PgDn", "Home", "End"):
+        assert token in below[-1], f"the rail named a scroll without naming {token}"
+    both = strip_markup(render_command_rail("overview", rows_above=3, rows_below=26)).splitlines()[-1]
+    assert "3 rows above" in both and "26 rows below" in both, (
+        "standing in the middle of a view, the rail counted only one direction"
+    )
+    single = strip_markup(render_command_rail("overview", rows_below=1)).splitlines()[-1]
+    assert "1 row below" in single and "1 rows" not in single
+    narrow = strip_markup(render_command_rail("overview", narrow=True, rows_below=26)).splitlines()
+    assert narrow[-1] == below[-1], "the narrow rail reworded the scroll row into something else"
+    assert not any(row.startswith("Navigate") for row in narrow)
+
+
+def test_the_scroll_count_comes_from_the_layout_and_not_from_wish(tmp_path):
+    """The rail's promise is measured off the window it is drawn in.
+
+    A 180-column window lays the cards out in two columns and fits them all; the
+    same Overview at 140 stacks into a single column and overflows. Both facts are
+    the layout's, and the rail has to agree with the layout in each case rather
+    than with a constant in the code.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        for cols, lines, expect_overflow in ((180, 52, False), (140, 52, True), (100, 36, True)):
+            app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo)
+            async with app.run_test(size=(cols, lines)) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                above, below = app.view_scroll_extent()
+                rail = strip_markup(str(app.query_one("#command-rail", Static).renderable))
+                if expect_overflow:
+                    assert below > 0, f"{cols}x{lines}: the view overflows but reported nothing"
+                    assert f"{below} rows below" in rail, (
+                        f"{cols}x{lines}: the rail did not say {below} rows were below"
+                    )
+                else:
+                    assert (above, below) == (0, 0), (
+                        f"{cols}x{lines}: reported {above} above and {below} below for a view that fits"
+                    )
+                    assert "Scroll" not in rail, f"{cols}x{lines}: offered a scroll with nothing to scroll"
+
+    asyncio.run(scenario())
+
+
+def test_a_focused_table_keeps_its_cursor_when_the_view_also_scrolls(tmp_path):
+    """Scroll keys live on the view, not on top of the table being read.
+
+    Accounts at 100 columns stacks, so the view scrolls and the table has its own
+    cursor keys for the same arrows. The table is deeper in the tree, so Textual
+    gives it the key first; if that ever reverses, the operator moving through a
+    list of accounts would instead move the whole view and never notice.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="accounts")
+
+    async def scenario():
+        async with app.run_test(size=(100, 36)) as pilot:
+            table = app.query_one("#accounts-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="accounts table to load")
+            view = app.query_one("#accounts-view")
+            await pilot.pause()
+            assert view.max_scroll_y > 0, "this has to be a size where the view overflows"
+            table.focus()
+            await pilot.pause()
+            for _ in range(2):
+                await pilot.press("down")
+                await pilot.pause()
+            assert table.cursor_row == 2, f"the table cursor moved to row {table.cursor_row}"
+            assert view.scroll_y == 0, "the view moved instead of the table cursor"
+
+    asyncio.run(scenario())
+
+
+def test_a_scroll_key_over_a_modal_does_not_move_the_view_behind_it(tmp_path):
+    """A modal is its own screen, so the view underneath keeps its place."""
+    app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            view = app.query_one("#overview-view")
+            await pilot.press("end")
+            await pilot.pause()
+            scrolled = view.scroll_y
+            assert scrolled > 0
+            await pilot.press("x")  # stop realm: a confirmation on its own screen
+            await pilot.pause()
+            assert app.screen.__class__.__name__ == "ConfirmScreen", "no modal opened to test against"
+            await pilot.press("end")
+            await pilot.press("pagedown")
+            await pilot.pause()
+            assert app.screen.__class__.__name__ == "ConfirmScreen", "a scroll key dismissed the modal"
+            assert view.scroll_y == scrolled, "the keys under the modal moved the view behind it"
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.press("home")
+            await pilot.pause()
+            assert view.scroll_y == 0, "the view stopped answering its scroll keys after the modal closed"
+
+    asyncio.run(scenario())
+
+
+def test_the_rail_stops_naming_keys_a_focused_table_is_already_keeping(tmp_path):
+    """A table answers the arrows itself, so the legend must not promise them twice.
+
+    At 100 columns the Accounts table takes the whole width and the account details
+    under it fall outside the window, which is a Scroll row the rail has to report.
+    The keys it names there cannot be the arrows: DataTable binds all six for its own
+    cursor, bindings resolve from the focused widget outward, and pressing down in
+    that window moves a row rather than the view. Measured against Textual 0.89: the
+    table keeps the view exactly where it is.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="accounts", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            table = app.query_one("#accounts-table")
+            assert table.has_focus, "the accounts table is not what this window focuses"
+            above, below = app.view_scroll_extent()
+            assert above + below > 0, "the accounts view stopped overflowing, so this proves nothing"
+            await pilot.pause()
+            rail = strip_markup(str(app.query_one("#command-rail", Static).renderable))
+            assert "the table keeps the arrow keys" in rail, rail
+            for glyph in ("\u2191", "\u2193", "PgUp", "PgDn", "Home", "End"):
+                assert glyph not in rail, f"the rail still offers {glyph} to a focused table"
+            before = app.view_scroll_extent()
+            await pilot.press("down")
+            await pilot.pause()
+            assert app.query_one("#accounts-table").cursor_row == 1, "the table did not keep its own arrow"
+            assert app.view_scroll_extent() == before, "the view moved under a key the table owns"
+
+    asyncio.run(scenario())
+
+
+def test_a_search_box_keeps_its_caret_keys_and_the_rail_says_which(tmp_path):
+    """Home and End belong to a focused search field; the arrows still scroll the view.
+
+    The split matters because the legend is read while the operator is typing: naming
+    Home over a search box would promise a jump to the top of the view that the Input
+    swallows for its caret, and hiding the arrows would hide a scroll that does work.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="accounts", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            await pilot.press("/")
+            await pilot.pause()
+            search = app.query_one("#accounts-search")
+            assert search.has_focus, "the search field did not take focus"
+            rail = strip_markup(str(app.query_one("#command-rail", Static).renderable))
+            assert "Home" not in rail and "End" not in rail, rail
+            for glyph in ("\u2191", "\u2193", "PgUp", "PgDn"):
+                assert glyph in rail, f"the rail stopped offering {glyph}, which the search field does not claim"
+            await pilot.press("home")
+            await pilot.pause()
+            assert app.view_scroll_extent()[1] > 0, "the view scrolled under a key the search field owns"
+
+    asyncio.run(scenario())
+
+
+def test_the_widgets_named_as_keeping_keys_really_do(tmp_path):
+    """The legend's honesty rests on what Textual's widgets bind, so that is measured.
+
+    The two claim sets are a fact about a dependency, not about this dashboard, and a
+    Textual upgrade that hands Home and End to a table would leave the rail quoting a
+    key the table eats. Re-reading BINDINGS is the cheapest way to notice.
+    """
+    from textual.widgets import DataTable, Input
+
+    def bound_keys(widget_class) -> set[str]:
+        # A BINDINGS entry can name several keys for one action ("end,ctrl+e").
+        return {key.strip() for binding in widget_class.BINDINGS for key in binding.key.split(",")}
+
+    table_keys = bound_keys(DataTable)
+    search_keys = bound_keys(Input)
+    assert SCROLL_KEYS_CLAIMED_BY_TABLE <= table_keys, sorted(SCROLL_KEYS_CLAIMED_BY_TABLE - table_keys)
+    assert SCROLL_KEYS_CLAIMED_BY_SEARCH <= search_keys, sorted(SCROLL_KEYS_CLAIMED_BY_SEARCH - search_keys)
+    assert {"up", "down", "pageup", "pagedown"}.isdisjoint(search_keys), (
+        "a search field now answers the arrows, and the rail needs to know"
+    )
 
 
 def test_the_narrow_rail_rewords_the_actions_and_keeps_all_of_them():

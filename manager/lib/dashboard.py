@@ -1144,6 +1144,96 @@ NARROW_ACTION_TOKENS: dict[str, str] = {
 }
 
 
+# A stacked view is taller than the window that holds it, and Textual hands that
+# overflow to the mouse wheel alone. On a 140-column terminal -- the width the
+# README screenshot is taken at -- the Overview needs 61 rows inside a 35-row
+# view, so the Alerts card sits 26 rows past the fold and an operator with a
+# keyboard and no wheel never learns it exists. These keys go on every view
+# container so the cards below the fold can be reached, and the command rail
+# says so with the number of rows still out of sight, measured from the layout
+# rather than guessed.
+#
+# They belong to the view container and not the app: a modal is a separate
+# screen, so a scroll key over a form can never move the view underneath it, and
+# in a table view the table has focus and keeps its own cursor keys, because
+# Textual resolves bindings from the focused widget outward.
+VIEW_SCROLL_KEYS: list[tuple[str, str, str]] = [
+    ("up", "scroll_view_up", "Scroll Up"),
+    ("down", "scroll_view_down", "Scroll Down"),
+    ("pageup", "scroll_view_page_up", "Page Up"),
+    ("pagedown", "scroll_view_page_down", "Page Down"),
+    ("home", "scroll_view_home", "To Top"),
+    ("end", "scroll_view_end", "To Bottom"),
+]
+
+# Spelled the way a terminal labels those keys, because unlike a command key the
+# name of the key is the whole of what it does: "pageup page" would be two words
+# for one idea, and this row has to stay short enough to fit beside the count.
+SCROLL_RAIL_TOKENS: tuple[str, ...] = ("↑", "↓", "PgUp", "PgDn", "Home", "End")
+
+# A focused table binds those same six keys for its own cursor, and a focused
+# search box binds Home and End for its own caret. Bindings resolve from the
+# focused widget outward, so in those windows the view never hears the key and the
+# rail would be advertising a scroll that a table is quietly eating. Measured off
+# Textual 0.89's DataTable.BINDINGS and Input.BINDINGS -- the same measurement the
+# test re-takes, because this is a claim about a dependency and not about this file.
+SCROLL_KEYS_CLAIMED_BY_TABLE: frozenset[str] = frozenset(
+    {"up", "down", "pageup", "pagedown", "home", "end"}
+)
+SCROLL_KEYS_CLAIMED_BY_SEARCH: frozenset[str] = frozenset({"home", "end"})
+
+
+def scroll_rail_tokens(focused: object) -> tuple[str, ...]:
+    """Which scroll keys the rail may name, given what has focus right now."""
+    from textual.widgets import DataTable, Input  # local: as in the app factory, so the
+    # render layer stays importable by code that never opens a terminal.
+
+    claimed: frozenset[str] = frozenset()
+    if isinstance(focused, DataTable):
+        claimed = SCROLL_KEYS_CLAIMED_BY_TABLE
+    elif isinstance(focused, Input):
+        claimed = SCROLL_KEYS_CLAIMED_BY_SEARCH
+    return tuple(
+        token
+        for (key, _action, _description), token in zip(VIEW_SCROLL_KEYS, SCROLL_RAIL_TOKENS)
+        if key not in claimed
+    )
+
+
+def scroll_rail_row(
+    rows_above: int,
+    rows_below: int,
+    tokens: tuple[str, ...] | None = None,
+) -> str:
+    """The rail row that says this view has more in it, and how to reach it.
+
+    Returns "" when the view fits: a legend for a scroll that cannot happen is a
+    promise the layout would break, and it costs a row the cards could use.
+
+    ``tokens`` names the keys that will actually reach the view from here; left
+    unset it names all of them. When the focused widget has claimed every one -- a
+    table answers the arrows itself -- the row says who holds them instead of
+    inventing a binding, because a legend is a promise about a keypress.
+    """
+    parts = []
+    if rows_above > 0:
+        parts.append(f"{rows_above} row{'s' if rows_above != 1 else ''} above")
+    if rows_below > 0:
+        parts.append(f"{rows_below} row{'s' if rows_below != 1 else ''} below")
+    if not parts:
+        return ""
+    if tokens is None:
+        tokens = SCROLL_RAIL_TOKENS
+    if tokens:
+        keys = "  ".join(f"[bold {ACCENT_GOLD}]{token}[/]" for token in tokens)
+    else:
+        keys = f"[{ACCENT_MUTED}]the table keeps the arrow keys[/]"
+    return (
+        f"[bold {ACCENT_SKY}]Scroll[/]    {keys}  "
+        f"[{ACCENT_MUTED}]{' · '.join(parts)}[/]"
+    )
+
+
 def view_command_tokens(active_view: str, narrow: bool = False) -> list[tuple[str, str]]:
     keys = VIEW_KEYS.get(active_view, VIEW_KEYS["overview"])
     tokens = []
@@ -1160,6 +1250,12 @@ def make_view_bindings(view_id: str) -> list[tuple[str, str, str]]:
         # action method lives on the App class.
         (key, f"app.{action_entry(view_id, key)[0]}", action_entry(view_id, key)[1])
         for key in VIEW_KEYS.get(view_id, [])
+    ] + [
+        # Same arrangement for the scroll keys: the letter is only live while
+        # this view is the focused one, and the App does the moving so it can
+        # repaint the rail's count in the same breath.
+        (key, f"app.{action}", description)
+        for key, action, description in VIEW_SCROLL_KEYS
     ] + (
         # Escape clears the table search when one is open in this view.
         [("escape", "app.table_search_escape", "Clear Search")]
@@ -1187,7 +1283,13 @@ SEARCH_INPUT_TO_SELECTION: dict[str, str] = {
 }
 
 
-def render_command_rail(active_view: str, narrow: bool = False) -> str:
+def render_command_rail(
+    active_view: str,
+    narrow: bool = False,
+    rows_above: int = 0,
+    rows_below: int = 0,
+    scroll_tokens: tuple[str, ...] | None = None,
+) -> str:
     """The key legend under every view.
 
     In the narrow form the Navigate row is dropped: the Modules list in the
@@ -1195,24 +1297,32 @@ def render_command_rail(active_view: str, narrow: bool = False) -> str:
     and repeating those seven tokens across the content column is what wrapped and
     pushed the view's own actions out of the box. The row that carries the actions
     possible *here* is the one that stays.
+
+    The Scroll row appears only when the caller -- which reads it from the live
+    layout -- reports rows sitting outside the window, so a window that fits
+    everything does not advertise a scroll it cannot perform. Which keys the row
+    names is the caller's business too: a focused table answers the arrows itself,
+    and the legend quotes the keys this window will honour, not the ones some other
+    widget has already taken.
     """
     global_actions = format_command_tokens([("r", "refresh"), ("t", "theme"), ("q", "quit")])
     context_actions = format_command_tokens(view_command_tokens(active_view, narrow=narrow))
     if narrow:
-        return "\n".join(
-            [
-                f"[bold {ACCENT_SKY}]Global[/]    {global_actions}",
-                f"[bold {ACCENT_SKY}]This View[/] {context_actions}",
-            ]
-        )
-    navigation = format_command_tokens([(key, label.lower()) for _view, key, label in SIDEBAR_MODULES])
-    return "\n".join(
-        [
+        rows = [
+            f"[bold {ACCENT_SKY}]Global[/]    {global_actions}",
+            f"[bold {ACCENT_SKY}]This View[/] {context_actions}",
+        ]
+    else:
+        navigation = format_command_tokens([(key, label.lower()) for _view, key, label in SIDEBAR_MODULES])
+        rows = [
             f"[bold {ACCENT_SKY}]Navigate[/]  {navigation}",
             f"[bold {ACCENT_SKY}]Global[/]    {global_actions}",
             f"[bold {ACCENT_SKY}]This View[/] {context_actions}",
         ]
-    )
+    scroll_row = scroll_rail_row(rows_above, rows_below, scroll_tokens)
+    if scroll_row:
+        rows.append(scroll_row)
+    return "\n".join(rows)
 
 
 def validate_command_form_values(action_name: str, values: dict[str, Any]) -> str:
@@ -3746,6 +3856,12 @@ def create_app(
 
         def on_resize(self, event: object) -> None:
             self.apply_view_density()
+            # The rail quotes how many rows of this view sit outside the window,
+            # and a resize is precisely the moment that number changes. The scroll
+            # extents are only known once the new layout has been worked out, so
+            # the restatement waits for the layout pass instead of measuring the
+            # window that is already gone.
+            self.call_after_refresh(self.refresh_chrome)
 
         def apply_view_state(self) -> None:
             for view_name in ("overview", "monitor", "accounts", "backups", "config", "logs", "operations"):
@@ -3773,6 +3889,13 @@ def create_app(
                 self.set_focus(self.query_one(f"#{self.active_view}-view", Container))
 
         def refresh_chrome(self) -> None:
+            if self.modal_open():
+                # The sidebar, the banner, and the rail live on the base screen,
+                # so a query for them fails while a form or a confirmation covers
+                # it. Nothing on that covered screen is being read, so there is
+                # nothing to restate: the chrome comes back when the modal closes
+                # and the next refresh finds the base screen current again.
+                return
             self.query_one("#sidebar-head", Static).update(
                 render_sidebar_head(self.release_info, self.snapshot.get("setup"))
             )
@@ -3798,9 +3921,44 @@ def create_app(
                     narrow=self.narrow_viewport,
                 )
             )
+            rows_above, rows_below = self.view_scroll_extent()
             self.query_one("#command-rail", Static).update(
-                render_command_rail(self.active_view, narrow=self.narrow_viewport)
+                render_command_rail(
+                    self.active_view,
+                    narrow=self.narrow_viewport,
+                    rows_above=rows_above,
+                    rows_below=rows_below,
+                    scroll_tokens=scroll_rail_tokens(self.focused),
+                )
             )
+
+        async def on_key(self, event: object) -> None:
+            """Restate the legend after any key, because a key is how focus moves.
+
+            Which scroll keys the rail may quote depends on what holds focus, and a
+            Textual 0.89 Focus event never reaches the App -- measured, not assumed:
+            an on_focus handler on this class was never called, while on_key sees
+            every key including Tab. The restatement is deferred a beat so the legend
+            is drawn from the focus the key produced, not the focus it replaced.
+            """
+            self.call_after_refresh(self.refresh_chrome)
+
+        def view_scroll_extent(self) -> tuple[int, int]:
+            """Rows of the active view above and below what the window shows.
+
+            Read from the live layout rather than counted from the cards: the
+            rail is about to quote these numbers, and a count that disagreed with
+            what the window could actually move would be a figure nobody could
+            check. Before the first layout pass both are zero, which is the
+            truthful answer -- there is nothing to report yet.
+            """
+            try:
+                view = self.query_one(f"#{self.active_view}-view", Container)
+            except Exception:
+                return 0, 0
+            above = int(round(view.scroll_y))
+            below = int(round(view.max_scroll_y - view.scroll_y))
+            return max(0, above), max(0, below)
 
         def modal_open(self) -> bool:
             # Any pushed screen (form, confirm, roster, command palette)
@@ -4192,6 +4350,39 @@ def create_app(
 
         def action_show_operations(self) -> None:
             self.switch_view("operations")
+
+        def move_active_view(self, move: str) -> None:
+            """Scroll the view the operator is standing in, and restate what is left.
+
+            The scroll keys sit on the view container, so a modal -- which is a
+            different screen -- can never move the view behind it, and a focused
+            table keeps its own cursor keys because Textual resolves bindings from
+            the focused widget outward. No animation: over SSH an animated scroll
+            reads as lag before it reads as movement.
+            """
+            view = self.query_one(f"#{self.active_view}-view", Container)
+            getattr(view, move)(animate=False)
+            # The rail's count is the only clue that a card is out of sight, so it
+            # moves with the view rather than waiting for the next refresh tick.
+            self.refresh_chrome()
+
+        def action_scroll_view_up(self) -> None:
+            self.move_active_view("scroll_up")
+
+        def action_scroll_view_down(self) -> None:
+            self.move_active_view("scroll_down")
+
+        def action_scroll_view_page_up(self) -> None:
+            self.move_active_view("scroll_page_up")
+
+        def action_scroll_view_page_down(self) -> None:
+            self.move_active_view("scroll_page_down")
+
+        def action_scroll_view_home(self) -> None:
+            self.move_active_view("scroll_home")
+
+        def action_scroll_view_end(self) -> None:
+            self.move_active_view("scroll_end")
 
         def action_manual_refresh(self) -> None:
             self.set_action_result(
