@@ -30,6 +30,7 @@ from dashboard import (
     DARK_PALETTE,
     LIGHT_PALETTE,
     NARROW_VIEWPORT_WIDTH,
+    TWO_COLUMN_MINIMUM_WIDTH,
     create_app,
     empty_snapshot,
     format_flag,
@@ -978,11 +979,18 @@ def test_the_narrow_overview_and_monitor_stack_rather_than_draw_empty_frames(tmp
 
 
 def test_the_wide_overview_keeps_its_two_columns(tmp_path):
-    """Stacking is a response to width, not a new default."""
+    """Stacking is a response to width, not a new default.
+
+    "Wide" means wide enough for the *cards*, not merely wider than the old
+    NARROW_VIEWPORT_WIDTH: at 140 columns two columns handed each card 45 columns of
+    content area while the longest row these cards draw is 53, so the honest layout
+    at that window is one column. The sweep in
+    test_no_card_draws_a_row_wider_than_the_column_it_was_given pins both sides.
+    """
     app, _log_path = build_app(tmp_path, initial_view="overview")
 
     async def scenario():
-        async with app.run_test(size=(140, 52)) as pilot:
+        async with app.run_test(size=(180, 52)) as pilot:
             await pilot.pause()
             cards = list(app.query("#overview-grid > Static"))
             assert len(cards) >= 4, "the overview lost a card"
@@ -992,7 +1000,7 @@ def test_the_wide_overview_keeps_its_two_columns(tmp_path):
                 for b in cards
                 if a is not b
             )
-            assert side_by_side, "the wide overview stacked its cards"
+            assert side_by_side, "an overview wide enough for two columns stacked them anyway"
 
     asyncio.run(scenario())
 
@@ -1324,6 +1332,102 @@ def test_a_narrow_process_card_gives_each_process_one_row(tmp_path):
             assert len(world_row) <= 57, f"the crashing process row is {len(world_row)} columns: {world_row!r}"
 
     asyncio.run(scenario())
+
+
+def test_the_wide_process_card_prints_no_denials(tmp_path):
+    """"crash loop no" is not a fact anyone acts on, at any width.
+
+    The narrow row already refuses denials; the wide row used to print one per
+    service, which spends a dozen columns saying nothing happened and puts the
+    denials in the same block as the news — so the eye learns to skim the block.
+    The affirmative keeps the narrow row's exact wording, and the wide row is
+    measured against the card that draws it rather than a number chosen here
+    (standing rule 13 in the ops book: a dropped denial is only a win if the row
+    that keeps the news still fits).
+    """
+    app, _log_path = build_app(tmp_path, initial_view="monitor", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            pane = app.query_one("#monitor-process-pane")
+            rendered = str(pane.renderable)
+            width = pane.content_size.width
+            assert width > 30, f"the monitor process card has {width} columns of content area at 140 columns wide"
+            for line in strip_markup(rendered).splitlines():
+                if line.strip():
+                    assert len(line) <= width, f"a wide process row is {len(line)} columns in {width} of content area: {line!r}"
+            assert "crash loop" not in strip_markup(rendered), "the wide card printed a denial next to a healthy service"
+            assert "restarts/1h" in strip_markup(rendered), "the wide card lost the restart count it has room for"
+
+            snapshot = json.loads(json.dumps(app.snapshot))
+            world = dict(snapshot["server"]["data"]["services"]["world"])
+            world["crash_loop_detected"] = True
+            snapshot["server"]["data"]["services"]["world"] = world
+            flagged = strip_markup(render_monitor_processes(snapshot, narrow=False))
+            line = next(l for l in flagged.splitlines() if "crash loop" in l)
+            assert "crash loop yes" in line, f"the crash loop is not stated in the row's own wording: {line!r}"
+            assert flagged.count("crash loop") == 1, "a service that is not looping still got a denial"
+            for l in flagged.splitlines():
+                if l.strip():
+                    assert len(l) <= width, (
+                        f"the row that gained news grew to {len(l)} columns in {width} of content area: {l!r}"
+                    )
+
+    asyncio.run(scenario())
+
+
+def test_no_card_draws_a_row_wider_than_the_column_it_was_given(tmp_path):
+    """Two columns of window is not two columns of card.
+
+    The card grids used to go two-across as soon as the window passed
+    NARROW_VIEWPORT_WIDTH, and at 140 columns that handed each Overview card 45
+    columns of content area and the Monitor's process card 37 -- while the longest
+    row those cards draw is 53. The row wraps, and in a grid a wrapped row is a row
+    the card loses: the older narrow rule exists because somebody saw empty bordered
+    frames at 100 columns, and this is the same fault at a width nobody had probed.
+    Every line the app actually drew is measured against the content area of the
+    card that drew it, at widths on both sides of the breakpoint, and the layout is
+    checked to still be two columns above it -- a guard that passes because the
+    dashboard gave up on side-by-side cards is guarding nothing.
+    """
+    panes = {
+        "overview": ("#overview-grid", ("#service-pane", "#metrics-pane", "#player-pulse-pane", "#alerts-pane")),
+        "monitor": ("#monitor-grid", ("#monitor-pressure-pane", "#monitor-process-pane", "#monitor-trends-pane")),
+    }
+    for width in (100, 122, 140, 150, 158, 170, 200):
+        for view, (grid, cards) in panes.items():
+            app, _log_path = build_app(tmp_path, initial_view=view, snapshot_file=demo_snapshot_path())
+
+            async def scenario(app=app, grid=grid, cards=cards, width=width, view=view):
+                async with app.run_test(size=(width, 52)) as pilot:
+                    await pilot.pause()
+                    await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                    grid_width = app.query_one(grid).content_size.width
+                    assert grid_width > 20, f"{view} at {width}: the card grid has {grid_width} columns"
+                    for pane in cards:
+                        card = app.query_one(pane)
+                        area = card.content_size.width
+                        # How many columns the grid is really drawing, measured off
+                        # the card instead of read out of a Textual style the test
+                        # could misread: a single-column card nearly fills the grid,
+                        # a two-column card gets about half of it.
+                        across = 1 if area > grid_width * 0.8 else 2
+                        expected = 2 if width >= TWO_COLUMN_MINIMUM_WIDTH else 1
+                        assert across == expected, (
+                            f"{view} at {width}: {pane} sits in {area} of {grid_width} grid columns, "
+                            f"which is {across} across; expected {expected}"
+                        )
+                        assert area > 0, f"{view} at {width}: {pane} has no content area"
+                        for line in strip_markup(str(card.renderable)).splitlines():
+                            if line.strip():
+                                assert len(line) <= area, (
+                                    f"{view} at {width}: {pane} drew a {len(line)}-column row into "
+                                    f"{area} columns of content area, so it wraps: {line!r}"
+                                )
+
+            asyncio.run(scenario())
 
 
 def test_the_narrow_rows_stay_inside_their_card(tmp_path):

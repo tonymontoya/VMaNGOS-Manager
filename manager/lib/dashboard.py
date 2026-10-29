@@ -233,6 +233,17 @@ COMPACT_VIEWPORT_HEIGHT = 46
 # once a 40-wide detail panel and the 32-wide sidebar are subtracted.
 NARROW_VIEWPORT_WIDTH = 122
 
+# A second column is only worth taking if it can hold the widest row the cards in
+# it draw. Measured rather than remembered: the longest line any card produces in
+# wide mode is 53 columns (the Monitor process card's cpu/mem/restarts row), and
+# the card grids share out what the 32-wide sidebar and the gutters leave over. At
+# a 140-column window that handed each Overview card 45 columns and the Monitor's
+# process card 37, so those rows wrapped and the card spent a row on the overflow
+# -- the same failure the .narrow rule already prevents below 122 columns, at a
+# width nobody had probed. Two columns need this much window; below it the grids
+# stack and the view scrolls.
+TWO_COLUMN_MINIMUM_WIDTH = 158
+
 # Sidebar module rows (view_id, nav key, label). The sidebar items, the
 # command-rail Navigate row, and the command palette all derive from this.
 SIDEBAR_MODULES: list[tuple[str, str, str]] = [
@@ -2275,6 +2286,17 @@ def render_monitor_pressure(
     return "\n".join(lines)
 
 
+def crash_loop_flag() -> str:
+    """The crash-loop flag, in the one wording both card widths print.
+
+    Only the affirmative is ever drawn. A denial next to every service is not a fact
+    an operator acts on, and a block that leads with denials trains the eye to skip
+    the block that carries the news — which is the same reason the narrow row omits
+    it, and it applies just as hard when the card has room to spare.
+    """
+    return f"[{ACCENT_MUTED}]crash loop[/] {format_flag(True, true_text='yes', true_color=ACCENT_ROSE)}"
+
+
 def render_monitor_processes(snapshot: dict[str, Any], narrow: bool = False) -> str:
     server = snapshot["server"]
     lines = [
@@ -2305,7 +2327,7 @@ def render_monitor_processes(snapshot: dict[str, Any], narrow: bool = False) -> 
             # loop" costs a dozen columns to say nothing changed, and the pid is
             # the least useful number on a row that has news.
             if service.get("crash_loop_detected"):
-                row += f"  [{ACCENT_MUTED}]crash loop[/] {format_flag(True, true_text='yes', false_text='no', true_color=ACCENT_ROSE)}"
+                row += f"  {crash_loop_flag()}"
             elif restarts:
                 row += f"  [{ACCENT_MUTED}]restarts/1h[/] {restarts}"
             else:
@@ -2315,7 +2337,9 @@ def render_monitor_processes(snapshot: dict[str, Any], narrow: bool = False) -> 
         lines.extend(
             [
                 f"[bold {ACCENT_SKY}]{label}[/]  {format_state(service.get('health', service.get('state', 'unavailable')))}  [{ACCENT_MUTED}]pid[/] {service.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {service.get('uptime_human', 'n/a')}",
-                f"[{ACCENT_MUTED}]cpu[/] {service.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {service.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {restarts}  [{ACCENT_MUTED}]crash loop[/] {format_flag(service.get('crash_loop_detected'), true_text='yes', false_text='no', true_color=ACCENT_ROSE)}",
+                f"[{ACCENT_MUTED}]cpu[/] {service.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {service.get('memory_mb', 0)} MB  "
+                + (f"{crash_loop_flag()}  " if service.get("crash_loop_detected") else "")
+                + f"[{ACCENT_MUTED}]restarts/1h[/] {restarts}",
             ]
         )
 
@@ -3708,6 +3732,10 @@ def create_app(
             self.screen.set_class(compact, "compact")
             narrow = self.size.width < NARROW_VIEWPORT_WIDTH
             self.screen.set_class(narrow, "narrow")
+            # The card grids stack on their own rule: two columns of card content
+            # need more window than two columns of *window*, because a column that
+            # is narrower than the row inside it is a row the card loses.
+            self.screen.set_class(self.size.width < TWO_COLUMN_MINIMUM_WIDTH, "stacked")
             if narrow != self.narrow_viewport:
                 # The banner text is written for the room available, not merely
                 # styled for it, so the decision has to be re-taken here: a window
@@ -5046,7 +5074,9 @@ DASHBOARD_CSS = """
            NARROW_VIEWPORT_WIDTH the cards take the full width and stack, and the
            view scrolls -- which is what a small window is for. */
         .narrow #overview-grid,
-        .narrow #monitor-grid {
+        .narrow #monitor-grid,
+        .stacked #overview-grid,
+        .stacked #monitor-grid {
             grid-size: 1 4;
             grid-columns: 1fr;
             grid-rows: auto auto auto auto;
@@ -5054,7 +5084,9 @@ DASHBOARD_CSS = """
         }
 
         .narrow #overview-view,
-        .narrow #monitor-view {
+        .narrow #monitor-view,
+        .stacked #overview-view,
+        .stacked #monitor-view {
             overflow-y: auto;
         }
 
@@ -5071,14 +5103,26 @@ DASHBOARD_CSS = """
         .narrow #service-pane,
         .narrow #metrics-pane,
         .narrow #player-pulse-pane,
-        .narrow #alerts-pane {
+        .narrow #alerts-pane,
+        .stacked #monitor-pressure-pane,
+        .stacked #monitor-process-pane,
+        .stacked #monitor-trends-pane,
+        .stacked #monitor-storage-pane,
+        .stacked #service-pane,
+        .stacked #metrics-pane,
+        .stacked #player-pulse-pane,
+        .stacked #alerts-pane {
             min-height: 9;
         }
 
+        /* Equal columns. The split used to be 7fr 5fr, which handed the narrower
+           column to the card with the longest row: the process card needs 53
+           columns and got 37 at a 140-column window, while the pressure card needed
+           50 and got 54. */
         #monitor-grid {
             layout: grid;
             grid-size: 2 2;
-            grid-columns: 7fr 5fr;
+            grid-columns: 1fr 1fr;
             grid-rows: 18 1fr;
             grid-gutter: 1 2;
             height: 1fr;
