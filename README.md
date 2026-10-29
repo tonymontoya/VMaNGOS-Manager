@@ -1,7 +1,7 @@
 # VMANGOS Manager
 
 ![CI](https://github.com/tonymontoya/VMaNGOS-Manager/actions/workflows/ci.yml/badge.svg)
-![Ubuntu 22.04](https://img.shields.io/badge/ubuntu-22.04-E95420)
+![Ubuntu 22.04–26.04](https://img.shields.io/badge/ubuntu-22.04--26.04-E95420)
 ![Release](https://img.shields.io/badge/release-v0.5.0-0f766e)
 ![Interface](https://img.shields.io/badge/interface-Textual%20TUI-0f172a)
 
@@ -55,9 +55,19 @@ An SSH terminal-native administration suite for VMANGOS private servers optimize
 
 ### Prerequisites
 
-- Ubuntu 22.04 LTS (fresh or existing)
+- **Ubuntu 22.04, 24.04, or 26.04 LTS** (fresh or existing) — each is exercised in CI
 - Root access (`sudo`)
+- `python3-venv` on the host if you want the dashboard (`sudo apt-get install -y python3-venv`)
 - WoW 1.12.1 client data (for extraction)
+
+Manager installs and runs read-only against a host before any realm exists, and
+tells you its exact release and build:
+
+```bash
+/opt/mangos/manager/bin/vmangos-manager --version
+# VMANGOS Manager version 0.6.0
+#   build: git=2a55757 describe=v0.5.0-7-g2a55757 built=2026-10-28T21:04:11Z
+```
 
 ### Option A — Fresh Host: the Install Wizard (recommended)
 

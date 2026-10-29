@@ -86,9 +86,19 @@ dashboard_bootstrap() {
         return 1
     fi
 
+    # A stock Ubuntu server image ships python3 without python3-venv, in which
+    # case `python3 -m venv` fails halfway through with an error that names no
+    # package. Check for the capability first so the fix is actionable.
+    if ! "$bootstrap_python" -c 'import ensurepip' >/dev/null 2>&1; then
+        log_error "This python3 cannot create virtual environments (missing ensurepip)"
+        log_info "Install the venv module first: sudo apt-get install -y python3-venv"
+        return 1
+    fi
+
     log_info "Bootstrapping dashboard environment at $venv_dir"
     "$bootstrap_python" -m venv "$venv_dir" || {
         log_error "Failed to create dashboard virtual environment"
+        log_info "If python3-venv is installed, check that $venv_dir is writable (run with sudo)"
         return 1
     }
 
@@ -98,10 +108,17 @@ dashboard_bootstrap() {
         return 1
     fi
 
-    "$python_bin" -m pip install -r "$requirements_file" >/dev/null || {
-        log_error "Failed to install dashboard dependencies"
+    if ! "$python_bin" -m pip --version >/dev/null 2>&1; then
+        log_error "The dashboard virtual environment has no pip"
+        log_info "On Debian/Ubuntu the venv module ships without pip: sudo apt-get install -y python3-venv"
         return 1
-    }
+    fi
+
+    if ! "$python_bin" -m pip install -r "$requirements_file" >/dev/null; then
+        log_error "Failed to install dashboard dependencies"
+        log_info "Check network access to PyPI, or pre-seed the venv and re-run without --bootstrap"
+        return 1
+    fi
 
     log_info "Dashboard dependencies installed"
 }

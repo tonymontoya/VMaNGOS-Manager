@@ -4,6 +4,10 @@ CLAUDE.md
 .local-tools/
 manager/.venv-dashboard/
 
+# Operator notes for live hosts (host facts, deploy journals, staged diffs).
+# Local/SRE working material: promote anything generic to docs/ deliberately.
+ops/
+
 # Environment files
 .env
 .env.local
@@ -34,5 +38,4 @@ Thumbs.db
 
 # Logs (except examples)
 *.log
-.github/
 docs/assets/dashboard-demo-snapshot.json

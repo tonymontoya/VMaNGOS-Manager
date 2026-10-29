@@ -10,6 +10,9 @@ RUFF_RULES := E9,F63,F7,F82
 PREFIX ?= /opt/mangos/manager
 DESTDIR ?=
 INSTALL_ROOT := $(DESTDIR)$(PREFIX)
+# Override for reproducible packaging (e.g. from a tarball with no .git):
+#   make install VMANGOS_BUILD_INFO='git=abc1234 describe=v0.6.0 built=2026-01-01T00:00:00Z'
+VMANGOS_BUILD_INFO ?=
 INSTALL_BIN_DIR := $(INSTALL_ROOT)/bin
 INSTALL_LIB_DIR := $(INSTALL_ROOT)/lib
 INSTALL_TEST_DIR := $(INSTALL_ROOT)/tests
@@ -55,8 +58,17 @@ install:
 	@install -m 644 lib/*.py "$(INSTALL_LIB_DIR)/" 2>/dev/null || true
 	@install -m 644 tests/*.sh "$(INSTALL_TEST_DIR)/"
 	@install -m 644 Makefile "$(INSTALL_ROOT)/Makefile"
+	@install -m 644 VERSION "$(INSTALL_ROOT)/VERSION"
 	@install -m 644 dashboard-requirements.txt "$(INSTALL_ROOT)/dashboard-requirements.txt"
-	@echo "Installation complete"
+	@if [ -n "$(VMANGOS_BUILD_INFO)" ]; then \
+		printf '%s\n' "$(VMANGOS_BUILD_INFO)" > "$(INSTALL_ROOT)/build-info"; \
+	else \
+		printf 'git=%s describe=%s built=%s\n' \
+			"$(shell git -C "$(CURDIR)" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+			"$(shell git -C "$(CURDIR)" describe --tags --always 2>/dev/null || echo unknown)" \
+			"$(shell date -u +%Y-%m-%dT%H:%M:%SZ)" > "$(INSTALL_ROOT)/build-info"; \
+	fi
+	@echo "Installation complete (version $$(tr -d '\n' < "$(INSTALL_ROOT)/VERSION"))"
 
 # Uninstall from system without removing config/
 uninstall:
@@ -66,6 +78,8 @@ uninstall:
 	@rm -f "$(INSTALL_LIB_DIR)"/*.py
 	@rm -f "$(INSTALL_TEST_DIR)"/*.sh
 	@rm -f "$(INSTALL_ROOT)/Makefile"
+	@rm -f "$(INSTALL_ROOT)/VERSION"
+	@rm -f "$(INSTALL_ROOT)/build-info"
 	@rm -f "$(INSTALL_ROOT)/dashboard-requirements.txt"
 	@rmdir "$(INSTALL_BIN_DIR)" 2>/dev/null || true
 	@rmdir "$(INSTALL_LIB_DIR)" 2>/dev/null || true

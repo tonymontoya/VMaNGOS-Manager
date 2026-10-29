@@ -102,6 +102,20 @@ If the venv fails to create, install the required packages:
 sudo apt-get install -y python3 python3-pip python3-venv
 ```
 
+### Bootstrap stops with "missing ensurepip"
+
+`python3` is installed but the `venv` module is not — typical on a minimal Ubuntu
+server image. Manager refuses to create a half-broken environment and tells you the
+package to add:
+
+```bash
+sudo apt-get install -y python3-venv
+sudo /opt/mangos/manager/bin/vmangos-manager dashboard --bootstrap
+```
+
+The realm installer already pulls `python3-venv` in; only a Manager-only host (no
+realm) hits this.
+
 ### Dashboard opens but data is missing
 
 Validate the backend directly:
@@ -232,6 +246,22 @@ Live restore needs either a terminal (you type `RESTORE`) or `--yes`. This is in
 ---
 
 ## 🧪 Validation Commands
+
+Confirm which build is actually on this host:
+
+```bash
+/opt/mangos/manager/bin/vmangos-manager --version
+```
+
+The second line (`build: git=… describe=… built=…`) is written by `make install`, so
+it identifies the exact commit and the moment it was installed — which is what you
+need when a host and a checkout disagree. A tree installed without `git` available
+reports `unknown` for those fields, and a package built from a tarball can pin them
+explicitly:
+
+```bash
+make install VMANGOS_BUILD_INFO='git=1a2b3c4 describe=v0.6.0 built=2026-04-01T00:00:00Z'
+```
 
 Run the test suite:
 

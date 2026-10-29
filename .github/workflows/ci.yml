@@ -28,11 +28,27 @@ jobs:
         run: make lint
 
   test:
-    name: Unit Tests
-    runs-on: ubuntu-22.04
+    name: Unit Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every LTS VM claims to support, including the host we actually operate
+        # (bds runs 26.04). A supported release without a CI job for it is a
+        # support claim nobody is enforcing.
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # fetch-depth 0 so the tag-vs-VERSION release check has history to compare
+          fetch-depth: 0
+
+      - name: Record toolchain under test
+        run: |
+          lsb_release -ds
+          python3 --version
+          bash --version | head -1
 
       - name: Run installer tests
         run: bash tests/installer/run_tests.sh
@@ -42,8 +58,12 @@ jobs:
         run: make test
 
       - name: Install dashboard pilot deps
-        run: python3 -m pip install -r manager/dashboard-requirements.txt pytest
+        run: |
+          # A venv works identically across the matrix; a bare `pip install`
+          # trips PEP 668 (externally managed) on the newer runners.
+          python3 -m venv .venv-pilot
+          .venv-pilot/bin/python -m pip install --quiet -r manager/dashboard-requirements.txt pytest
 
       - name: Run dashboard pilot tests
         working-directory: ./manager
-        run: python3 -m pytest tests/test_dashboard.py -q
+        run: ../.venv-pilot/bin/python -m pytest tests/test_dashboard.py tests/test_wizard.py -q
