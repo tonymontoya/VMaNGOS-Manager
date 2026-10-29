@@ -11,6 +11,7 @@ Seams (agreed):
 import asyncio
 import json
 import os
+import textwrap
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -43,10 +44,20 @@ def write_recorder_stub(directory):
 
 
 def recorded_commands(log_path):
+    """Commands the dashboard dispatched at the stub manager.
+
+    The one-off `--version` probe is how the console learns what it is
+    driving: read-only, no side effects, and not an action — so tests that
+    assert "nothing was dispatched" must not trip over it.
+    """
     if not os.path.exists(log_path):
         return []
     with open(log_path, "r", encoding="utf-8") as handle:
-        return [line.strip() for line in handle.read().splitlines() if line.strip()]
+        return [
+            line.strip()
+            for line in handle.read().splitlines()
+            if line.strip() and not line.strip().endswith("--version")
+        ]
 
 
 def make_accounts(count):
@@ -542,5 +553,203 @@ def test_command_palette_switches_view(tmp_path):
             await pilot.pause()
             assert app.screen.__class__.__name__ != "CommandPalette"
             assert not app.query_one("#overview-view").has_class("hidden")
+
+    asyncio.run(scenario())
+
+
+def write_version_stub(directory):
+    """Stub that answers --version, so the console can name what it drives."""
+    log_path = os.path.join(directory, "commands.log")
+    stub_path = os.path.join(directory, "manager-stub-version")
+    with open(stub_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' \"$*\" >> '{log_path}'\n"
+            "if [[ \"$*\" == *--version* ]]; then\n"
+            "  printf 'VMaNGOS Manager version 0.6.0\\n  build: git=deadbeef describe=v0.6.0\\n'\n"
+            "fi\n"
+            "exit 0\n"
+        )
+    os.chmod(stub_path, 0o755)
+    return stub_path, log_path
+
+
+def panel_text(app, selector):
+    rendered = app.query_one(selector).render()
+    return getattr(rendered, "plain", None) or str(rendered)
+
+
+def test_dashboard_panels_fit_their_grid_cells(tmp_path):
+    """A line that does not fit its panel is a line the operator never sees.
+
+    The Overview quietly lost Disk and I/O to exactly this: each metric row
+    wrapped to two lines, the panel was already at its height, and the last
+    metrics simply disappeared. Panels are measured against their cells here
+    so that class of bug cannot come back quietly.
+    """
+    from dashboard import (
+        render_alerts_panel,
+        render_metrics_panel,
+        render_monitor_pressure,
+        render_monitor_processes,
+        render_monitor_storage,
+        render_monitor_trends,
+        render_player_pulse,
+        render_service_panel,
+        strip_markup,
+    )
+
+    grid_panes = {
+        "overview": (
+            "#service-pane",
+            "#metrics-pane",
+            "#player-pulse-pane",
+            "#alerts-pane",
+        ),
+        "monitor": (
+            "#monitor-pressure-pane",
+            "#monitor-process-pane",
+            "#monitor-trends-pane",
+            "#monitor-storage-pane",
+        ),
+    }
+    # The shipped documentation fixture: a fully populated host, which is the
+    # case that produces the most lines and therefore the one that clips.
+    demo_snapshot = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "docs",
+        "assets",
+        "dashboard-demo-snapshot.json",
+    )
+
+    for view, panes in grid_panes.items():
+        app = create_app(
+            manager_bin=write_recorder_stub(tmp_path)[0],
+            config_path="/dev/null",
+            refresh=30,
+            theme="dark",
+            initial_view=view,
+            screenshot_path=None,
+            snapshot_file=demo_snapshot,
+        )
+
+        async def scenario(app=app, view=view, panes=panes):
+            async with app.run_test(size=(140, 52)) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                snapshot, history = app.snapshot, app.metric_history
+                producers = {
+                    "#service-pane": lambda: render_service_panel(snapshot, view),
+                    "#metrics-pane": lambda: render_metrics_panel(snapshot, history, 30),
+                    "#player-pulse-pane": lambda: render_player_pulse(snapshot, history, 30),
+                    "#alerts-pane": lambda: render_alerts_panel(snapshot),
+                    "#monitor-pressure-pane": lambda: render_monitor_pressure(snapshot, history, 30),
+                    "#monitor-process-pane": lambda: render_monitor_processes(snapshot),
+                    "#monitor-trends-pane": lambda: render_monitor_trends(snapshot, history, 30),
+                    "#monitor-storage-pane": lambda: render_monitor_storage(snapshot),
+                }
+                for selector in panes:
+                    widget = app.query_one(selector)
+                    inner_width = widget.size.width
+                    needed = sum(
+                        len(textwrap.wrap(line, inner_width)) or 1
+                        for line in strip_markup(producers[selector]()).splitlines()
+                    )
+                    assert needed <= widget.size.height, (
+                        f"{view} {selector} needs {needed} lines, shows {widget.size.height}"
+                    )
+
+        asyncio.run(scenario())
+
+
+def test_sidebar_names_the_release_it_drives(tmp_path):
+    """A console that cannot name its build cannot be trusted to audit one."""
+    stub, _log_path = write_version_stub(tmp_path)
+    app = create_app(
+        manager_bin=stub,
+        config_path="/dev/null",
+        refresh=30,
+        theme="dark",
+        initial_view="overview",
+        screenshot_path=None,
+        snapshot_file=write_snapshot_fixture(tmp_path, make_accounts(4)),
+    )
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await wait_for(lambda: "0.6.0" in panel_text(app, "#sidebar-head"), message="release version in the sidebar")
+
+    asyncio.run(scenario())
+
+
+def test_unconfigured_host_is_told_once(tmp_path):
+    """A fresh host reads as 'set me up', not as a wall of identical failures."""
+    stub, _log_path = write_recorder_stub(tmp_path)
+    failure = {
+        "ok": False,
+        "data": {},
+        "error": (
+            '{"success":false,"error":{"code":"CONFIG_NOT_FOUND",'
+            '"message":"Configuration file not found: /opt/mangos/manager/config/manager.conf",'
+            '"suggestion":"Create one with: vmangos-manager config create --path /opt/mangos/manager/config/manager.conf"}}'
+        ),
+    }
+    snapshot = {
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "config_path": "/opt/mangos/manager/config/manager.conf",
+        "players": [],
+        "all_accounts": [],
+        "log_events": [],
+        "schedules": [],
+        "backups": {"entries": [], "summary": {}},
+        "config_summary": {},
+        "config_content": "",
+        "metric_history": [],
+    }
+    for key in (
+        "server",
+        "logs",
+        "realm_logs",
+        "schedule_list",
+        "accounts_online",
+        "accounts",
+        "backup_list",
+        "backup_schedule_status",
+        "config_validate",
+        "config_show",
+        "update_check",
+        "update_inspect",
+    ):
+        snapshot[key] = dict(failure)
+
+    fixture_path = os.path.join(tmp_path, "fresh.json")
+    with open(fixture_path, "w", encoding="utf-8") as handle:
+        json.dump(snapshot, handle)
+
+    app = create_app(
+        manager_bin=stub,
+        config_path="/opt/mangos/manager/config/manager.conf",
+        refresh=30,
+        theme="dark",
+        initial_view="overview",
+        screenshot_path=None,
+        snapshot_file=fixture_path,
+    )
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            banner = panel_text(app, "#action-banner")
+            services = panel_text(app, "#service-pane")
+            alerts = panel_text(app, "#alerts-pane")
+            assert "Setup" in banner, "banner names the setup problem"
+            assert "no configuration" in banner, "banner states the state in plain words"
+            assert "config create" in banner, "banner carries the command that resolves it"
+            assert "awaiting configuration" in services, "panels say what they are waiting for"
+            assert "Getting this host online" in alerts, "alerts panel carries the checklist"
+            combined = banner + services + alerts
+            assert "CONFIG_NOT_FOUND" not in combined, "internal error codes stay internal"
+            assert "not fetched for this view" not in combined, "unfetched bookkeeping stays invisible"
 
     asyncio.run(scenario())

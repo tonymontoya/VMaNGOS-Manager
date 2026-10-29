@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -88,7 +89,7 @@ LOG_LIMIT_PATTERN = re.compile(r"^[1-9][0-9]{0,2}$")
 
 TREND_HISTORY_LIMIT = 24
 METER_FILLED = "█"
-METER_EMPTY = "░"
+METER_EMPTY = "·"
 
 # Logs filter dropdown options (label, value). The Select widgets in the
 # logs filter form offer exactly these; the regex backstays in
@@ -294,18 +295,185 @@ def escape_markup(value: Any) -> str:
     return str(value or "").replace("[", "\\[").replace("]", "\\]")
 
 
-def format_error_text(value: Any, max_length: int = 92) -> str:
-    text = " ".join(str(value or "unknown error").split())
-    message_match = re.search(r'"message":"([^"]+)"', text)
-    suggestion_match = re.search(r'"suggestion":"([^"]+)"', text)
+LOG_TIMESTAMP_RE = re.compile(
+    r"^\s*\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:[+-]\d{4}|Z)?\]\s*"
+)
+LOG_LEVEL_RE = re.compile(
+    r"^\s*\[(?:DEBUG|INFO|NOTICE|WARNING|WARN|ERROR|ERR|CRITICAL|CRIT|ALERT|EMERG)\]\s*",
+    re.IGNORECASE,
+)
+LOG_SEVERITY_RE = re.compile(
+    r"\[(DEBUG|INFO|NOTICE|WARNING|WARN|ERROR|ERR|CRITICAL|CRIT|ALERT|EMERG)\]",
+    re.IGNORECASE,
+)
+LOG_SEVERITY_RANK = {
+    "debug": 0,
+    "info": 0,
+    "notice": 1,
+    "warn": 2,
+    "warning": 2,
+    "err": 3,
+    "error": 3,
+    "crit": 4,
+    "critical": 4,
+    "alert": 5,
+    "emerg": 5,
+}
 
+
+def split_log_lines(value: Any) -> list[str]:
+    """Turn a captured Manager stderr blob into human message lines.
+
+    Manager's logger prefixes each line with a bracketed timestamp and level.
+    A panel quotes one line, so those prefixes are noise — and truncation
+    used to cut them mid-timestamp, which is how a fresh host ended up
+    reading a message whose tail was a chopped-off clock.
+    """
+    lines: list[str] = []
+    for raw in str(value or "").splitlines():
+        line = LOG_LEVEL_RE.sub("", LOG_TIMESTAMP_RE.sub("", raw.strip()))
+        if line:
+            lines.append(line)
+    return lines
+
+
+def primary_log_line(lines: list[str]) -> str:
+    """Pick the line that explains the failure.
+
+    Manager logs the failure and then a follow-up hint, both at `[ERROR]`.
+    The message comes first, so severity wins and ties go to the earliest
+    line — the hint belongs in the banner's Next step, not the panel body.
+    """
+    if not lines:
+        return "unknown error"
+    best_line = lines[0]
+    best_rank = -1
+    for line in lines:
+        match = LOG_SEVERITY_RE.search(line)
+        rank = LOG_SEVERITY_RANK.get(match.group(1).lower(), 0) if match else 0
+        if rank > best_rank:
+            best_line, best_rank = line, rank
+    return best_line
+
+
+def error_message_text(value: Any, *, with_suggestion: bool = True) -> str:
+    """The human message inside a captured failure, log prefixes removed."""
+    raw = str(value or "unknown error")
+    message_match = re.search(r'"message":"([^"]+)"', raw)
+    suggestion_match = re.search(r'"suggestion":"([^"]+)"', raw)
     if message_match:
         parts = [message_match.group(1)]
-        if suggestion_match:
+        if suggestion_match and with_suggestion:
             parts.append(suggestion_match.group(1))
-        text = " ".join(parts)
+        return " ".join(parts)
+    return primary_log_line(split_log_lines(raw))
 
-    return escape_markup(truncate_text(text, max_length))
+
+def format_error_text(value: Any, max_length: int = 92, *, with_suggestion: bool = True) -> str:
+    return escape_markup(
+        truncate_text(" ".join(error_message_text(value, with_suggestion=with_suggestion).split()), max_length)
+    )
+
+
+# A host with no usable manager.conf fails *every* backend call with the same
+# error. Recognising that state once turns four panels of identical raw log
+# noise into one sentence and the command that fixes it.
+SETUP_STATE_LABELS = {
+    "ready": "configured",
+    "missing": "no configuration",
+    "unreadable": "configuration not readable",
+    "invalid": "configuration invalid",
+}
+CONFIG_MISSING_MARKERS = (
+    "configuration file not found",
+    "config file not found",
+    "no such file or directory",
+)
+CONFIG_UNREADABLE_MARKERS = (
+    "configuration file is not readable",
+    "permission denied",
+)
+
+
+def setup_state_for_error(error_text: Any) -> str:
+    """Classify one backend failure as a configuration problem, or ''."""
+    message = error_message_text(error_text).lower()
+    if any(marker in message for marker in CONFIG_MISSING_MARKERS):
+        return "missing"
+    if any(marker in message for marker in CONFIG_UNREADABLE_MARKERS):
+        return "unreadable"
+    return ""
+
+
+def classify_setup_state(snapshot: dict[str, Any], manager_bin: str = "") -> dict[str, Any]:
+    """One verdict for the whole dashboard, plus the command that resolves it."""
+    states = []
+    detail_source = ""
+    for key in ("server", "config_show", "config_validate", "accounts_online"):
+        result = snapshot.get(key)
+        if isinstance(result, dict) and not result.get("ok", True):
+            state = setup_state_for_error(result.get("error", ""))
+            if state:
+                states.append(state)
+                if not detail_source:
+                    detail_source = str(result.get("error", ""))
+
+    state = ""
+    for candidate in ("missing", "unreadable"):
+        if candidate in states:
+            state = candidate
+            break
+    if not states:
+        validate = snapshot.get("config_validate")
+        if isinstance(validate, dict) and validate.get("ok") and validate.get("data", {}).get("valid") is False:
+            state = "invalid"
+
+    if not state:
+        return {"state": "ready", "label": SETUP_STATE_LABELS["ready"], "next_step": "", "detail": ""}
+
+    bin_name = manager_bin or "vmangos-manager"
+    if state == "missing":
+        next_step = (
+            f"sudo {bin_name} config create   — or provision the whole host with "
+            f"sudo {bin_name} install"
+        )
+    elif state == "unreadable":
+        try:
+            operator = getpass.getuser()
+        except Exception:
+            operator = "<username>"
+        next_step = f"sudo {bin_name} config grant --user {operator}"
+    else:
+        detail = format_error_text(snapshot.get("config_validate", {}).get("error", ""), 160)
+        next_step = f"sudo {bin_name} config validate   — {detail}"
+
+    return {
+        "state": state,
+        "label": SETUP_STATE_LABELS[state],
+        "next_step": next_step,
+        "bin": bin_name,
+        # Message only: the remedy already lives in next_step, and quoting it
+        # twice turns the banner headline into a run-on sentence.
+        "detail": format_error_text(detail_source, 160, with_suggestion=False),
+    }
+
+
+def is_setup_failure(snapshot: dict[str, Any], error_text: Any) -> bool:
+    """True when this error is just the dashboard-wide setup state echoing."""
+    state = (snapshot.get("setup") or {}).get("state", "ready")
+    return state in ("missing", "unreadable") and setup_state_for_error(error_text) == state
+
+
+def backend_failure_lines(snapshot: dict[str, Any], result: dict[str, Any], subject: str) -> list[str]:
+    """One explanation per failure instead of one per panel.
+
+    While the host is unconfigured, panels say what they are waiting for and
+    point at the banner, which carries the single actionable error once.
+    """
+    error = result.get("error", "unknown error")
+    if is_setup_failure(snapshot, error):
+        return [f"[{ACCENT_MUTED}]{escape_markup(subject)} — awaiting configuration.[/]"]
+    return [f"[bold {ACCENT_ROSE}]{escape_markup(subject)}:[/] {format_error_text(error)}"]
 
 
 def parse_optional_float(value: Any) -> float | None:
@@ -1213,6 +1381,7 @@ def empty_snapshot(error_message: str) -> dict[str, Any]:
     return {
         "captured_at": now_iso(),
         "config_path": "",
+        "setup": {"state": "pending", "label": "starting up", "next_step": "", "detail": ""},
         "server": {"ok": False, "data": {}, "error": error_message},
         "logs": {"ok": False, "data": {}, "error": error_message},
         "realm_logs": {"ok": False, "data": {}, "error": error_message},
@@ -1240,6 +1409,8 @@ def load_snapshot_fixture(snapshot_file: str) -> dict[str, Any]:
         payload = json.load(handle)
     if not isinstance(payload, dict):
         raise ValueError("snapshot fixture must be a JSON object")
+    # Fixtures render like live hosts, including the setup verdict.
+    payload.setdefault("setup", classify_setup_state(payload, ""))
     return payload
 
 
@@ -1395,6 +1566,15 @@ def build_snapshot(
     password_file = str(config_values.get("database.password_file", "") or "")
     inline_password = str(config_values.get("database.password", "") or "")
     backup_summary = summarize_backups(backup_entries, backup_dir)
+    setup = classify_setup_state(
+        {
+            "server": server,
+            "config_show": config_show,
+            "config_validate": config_validate,
+            "accounts_online": online_accounts,
+        },
+        manager_bin,
+    )
 
     config_summary = {
         "install_root": config_values.get("server.install_root", ""),
@@ -1413,6 +1593,7 @@ def build_snapshot(
     return {
         "captured_at": now_iso(),
         "config_path": config_path,
+        "setup": setup,
         "server": server,
         "logs": logs,
         "realm_logs": realm_logs,
@@ -1452,6 +1633,7 @@ def render_action_banner(
     action_receipt: str = "",
     action_next_step: str = "",
     action_view_context: str | None = None,
+    setup: dict[str, Any] | None = None,
 ) -> str:
     tone_label, tone_color = ACTION_STYLES.get(action_tone, ACTION_STYLES["info"])
     captured_at = escape_markup(iso_to_display(snapshot.get("captured_at")))
@@ -1467,6 +1649,17 @@ def render_action_banner(
     ]
     if view_summary:
         lines.extend(["", f"[bold {ACCENT_SKY}]This View[/] {escape_markup(view_summary)}"])
+    # A host that cannot serve data yet gets one explanation here, not one
+    # per panel — and the command that resolves it.
+    setup_state = (setup or {}).get("state", "ready")
+    if setup_state not in ("ready", "pending"):
+        label = str((setup or {}).get("label", ""))
+        detail = str((setup or {}).get("detail", ""))
+        headline = f"{label} — {detail}" if detail else label
+        lines.extend(["", f"[bold {ACCENT_ROSE}]Setup[/] {escape_markup(truncate_text(headline, 150))}"])
+        setup_next = str((setup or {}).get("next_step", ""))
+        if setup_next:
+            lines.append(f"[{ACCENT_MUTED}]Next[/] {escape_markup(truncate_text(setup_next, 150))}")
     if show_follow_up and receipt:
         lines.append(f"[{ACCENT_MUTED}]Receipt[/] {receipt}")
     if show_follow_up and next_step:
@@ -1474,14 +1667,41 @@ def render_action_banner(
     return "\n".join(lines)
 
 
-def render_sidebar_head() -> str:
-    return "\n".join(
-        [
-            f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]",
-            "",
-            f"[bold {ACCENT_SKY}]Modules[/]",
-        ]
-    )
+def fetch_release_info(manager_bin: str, config_path: str) -> dict[str, Any]:
+    """Ask the CLI what it is, so the dashboard can say the same thing.
+
+    The TUI used to have no idea which Manager build it was driving, which is
+    the same identity gap that made a deployed host unverifiable.
+    """
+    result = run_manager_command(manager_bin, config_path, ["--version"], parser_mode="raw")
+    release = {"version": "", "build": "", "available": bool(result["ok"])}
+    if not result["ok"]:
+        return release
+    for line in str(result["data"]).splitlines():
+        line = line.strip()
+        match = re.search(r"version\s+([0-9][\w.\-]*)", line)
+        if match and not release["version"]:
+            release["version"] = match.group(1)
+        elif line.startswith("build:"):
+            release["build"] = line[len("build:"):].strip()
+    return release
+
+
+def render_sidebar_head(
+    release: dict[str, Any] | None = None,
+    setup: dict[str, Any] | None = None,
+) -> str:
+    release = release or {}
+    setup = setup or {}
+    lines = [f"[bold {ACCENT_GOLD}]VMaNGOS Manager[/]"]
+    version = release.get("version", "") if release else ""
+    if version:
+        lines.append(f"[{ACCENT_MUTED}]release[/] [bold {ACCENT_SKY}]{escape_markup(version)}[/]")
+    state = (setup or {}).get("state", "ready")
+    if state not in ("ready", "pending"):
+        lines.append(f"[bold {ACCENT_ROSE}]![/] [{ACCENT_MUTED}]{escape_markup((setup or {}).get('label', ''))}[/]")
+    lines.extend(["", f"[bold {ACCENT_SKY}]Modules[/]"])
+    return "\n".join(lines)
 
 
 def render_sidebar_module(view_id: str, key: str, label: str, active: bool) -> str:
@@ -1516,15 +1736,14 @@ def render_sidebar_pulse(snapshot: dict[str, Any], refresh_interval: int) -> str
 def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
     server = snapshot["server"]
     if not server["ok"]:
-        return "\n".join(
-            [
-                f"[bold {ACCENT_GOLD}]Realm Services[/]",
-                "",
-                f"[bold {ACCENT_ROSE}]Server snapshot failed:[/] {format_error_text(server['error'])}",
-                "",
-                f"[{ACCENT_MUTED}]Current view:[/] {active_view}",
-            ]
-        )
+        lines = [
+            f"[bold {ACCENT_GOLD}]Realm Services[/]",
+            "",
+            *backend_failure_lines(snapshot, server, "Server snapshot failed"),
+        ]
+        if not is_setup_failure(snapshot, server["error"]):
+            lines.extend(["", f"[{ACCENT_MUTED}]Current view:[/] {active_view}"])
+        return "\n".join(lines)
 
     data = server["data"]
     auth = data.get("services", {}).get("auth", {})
@@ -1533,21 +1752,33 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
     db = checks.get("database_connectivity", {})
     auth_restarts = clamp_int(auth.get("restart_count_1h", 0))
     world_restarts = clamp_int(world.get("restart_count_1h", 0))
+    summary = snapshot.get("config_summary", {})
 
-    return "\n".join(
-        [
-            f"[bold {ACCENT_GOLD}]Realm Services[/]",
-            f"[{ACCENT_MUTED}]Auth and world services plus the database connectivity check.[/]",
-            "",
-            f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
-            f"[{ACCENT_MUTED}]       cpu[/] {auth.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {auth.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {auth_restarts}",
-            "",
-            f"[bold {ACCENT_SKY}]World[/]  {format_state(world.get('health', world.get('state')))}  [{ACCENT_MUTED}]pid[/] {world.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {world.get('uptime_human', 'N/A')}",
-            f"[{ACCENT_MUTED}]       cpu[/] {world.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {world.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {world_restarts}",
-            "",
-            f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}  [{ACCENT_MUTED}]check[/] {escape_markup(db.get('message', 'n/a'))}",
-        ]
-    )
+    lines = [
+        f"[bold {ACCENT_GOLD}]Realm Services[/]",
+        f"[{ACCENT_MUTED}]Auth and world services, plus the DB check.[/]",
+        "",
+        f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
+        f"[{ACCENT_MUTED}]       cpu[/] {auth.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {auth.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {auth_restarts}",
+        "",
+        f"[bold {ACCENT_SKY}]World[/]  {format_state(world.get('health', world.get('state')))}  [{ACCENT_MUTED}]pid[/] {world.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {world.get('uptime_human', 'N/A')}",
+        f"[{ACCENT_MUTED}]       cpu[/] {world.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {world.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {world_restarts}",
+        "",
+        f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}  [{ACCENT_MUTED}]check[/] {escape_markup(db.get('message', 'n/a'))}",
+    ]
+
+    # Name the realm this console is pointed at: a screen full of green means
+    # nothing if it is the wrong host. One line, because this panel's row is
+    # fixed and a wrapped line is a silently dropped line.
+    install_root = str(summary.get("install_root", "") or "")
+    if install_root:
+        services = ", ".join(part for part in (summary.get("auth_service", ""), summary.get("world_service", "")) if part)
+        lines.append(
+            f"[bold {ACCENT_SKY}]Target[/]  {escape_markup(install_root)}"
+            + (f"  [{ACCENT_MUTED}]units[/] {escape_markup(services)}" if services else "")
+        )
+
+    return "\n".join(lines)
 
 
 def render_metrics_panel(
@@ -1604,9 +1835,11 @@ def render_metrics_panel(
         ]
         for label, summary, status, percent in metric_rows:
             label_segment = f"[bold {ACCENT_SKY}]{label:<6}[/]"
-            summary_segment = pad_markup(f"[bold {metric_health_color(status)}]{escape_markup(summary)}[/]", 31)
+            # Bar first, value after: the row stays inside the panel width,
+            # which previously wrapped every metric onto two lines and pushed
+            # Disk and I/O out of the panel entirely.
             lines.append(
-                f"{label_segment} {summary_segment}  {render_meter(percent, width=8, color=metric_health_color(status), show_minimum_for_positive=(label == 'Load'))}"
+                f"{label_segment} {render_meter(percent, width=12, color=metric_health_color(status), show_minimum_for_positive=(label == 'Load'))} {escape_markup(summary)}"
             )
         if storage_io.get("available"):
             io_percent = normalize_percent(storage_io.get("util_percent", 0))
@@ -1614,19 +1847,15 @@ def render_metrics_panel(
                 f"{io_percent:.1f}% / {storage_io.get('read_ops_per_sec', 0)}:{storage_io.get('write_ops_per_sec', 0)} rw"
                 f"{compact_metric_state(storage_io.get('status', 'unavailable'))}"
             )
-            io_summary = pad_markup(
-                f"[bold {metric_health_color(storage_io.get('status', 'unavailable'))}]{escape_markup(io_summary_text)}[/]",
-                31,
-            )
             lines.append(
-                f"[bold {ACCENT_SKY}]{'I/O':<6}[/] {io_summary}  {render_meter(io_percent, width=8, color=metric_health_color(storage_io.get('status', 'unavailable')))}"
+                f"[bold {ACCENT_SKY}]{'I/O':<6}[/] {render_meter(io_percent, width=12, color=metric_health_color(storage_io.get('status', 'unavailable')))} {escape_markup(io_summary_text)}"
             )
         else:
             lines.append(
-                f"[bold {ACCENT_SKY}]I/O[/]      {format_state(storage_io.get('status', 'unavailable'))}  [{ACCENT_MUTED}]install sysstat/iostat for live disk history[/]"
+                f"[bold {ACCENT_SKY}]I/O[/]      {format_state(storage_io.get('status', 'unavailable'))}  [{ACCENT_MUTED}]sysstat/iostat gives live disk history[/]"
             )
     else:
-        lines.append(f"[bold {ACCENT_ROSE}]Server metrics unavailable:[/] {format_error_text(server['error'])}")
+        lines.extend(backend_failure_lines(snapshot, server, "Server metrics unavailable"))
 
     return "\n".join(lines)
 
@@ -1645,7 +1874,7 @@ def render_monitor_pressure(
     ]
 
     if not server["ok"]:
-        lines.append(f"[bold {ACCENT_ROSE}]Monitor snapshot unavailable:[/] {format_error_text(server['error'])}")
+        lines.extend(backend_failure_lines(snapshot, server, "Monitor snapshot unavailable"))
         return "\n".join(lines)
 
     data = server["data"]
@@ -1738,7 +1967,7 @@ def render_monitor_processes(snapshot: dict[str, Any]) -> str:
     ]
 
     if not server["ok"]:
-        lines.append(f"[bold {ACCENT_ROSE}]Process data unavailable:[/] {format_error_text(server['error'])}")
+        lines.extend(backend_failure_lines(snapshot, server, "Process data unavailable"))
         return "\n".join(lines)
 
     data = server["data"]
@@ -1765,6 +1994,54 @@ def render_monitor_processes(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
+TREND_COLORS = {
+    "rising": ACCENT_GOLD,
+    "falling": ACCENT_TEAL,
+    "steady": ACCENT_SKY,
+    "warming": ACCENT_MUTED,
+}
+
+
+def render_sparkline(
+    values: list[float | None],
+    *,
+    width: int = 22,
+    color: str = ACCENT_SKY,
+    suffix: str = "",
+    trend: str = "",
+) -> str:
+    """The shape of the window, not just its endpoints.
+
+    `now` and `peak` say what happened; the eye wants the path that got
+    there, and the refresh loop already keeps that history.
+    """
+    samples = values[-width:]
+    available = [value for value in samples if value is not None]
+    if len(available) < 2:
+        return f"[{ACCENT_MUTED}]collecting samples…[/]"
+
+    low, high = min(available), max(available)
+    span = high - low
+    cells: list[str] = []
+    for value in samples:
+        if value is None:
+            cells.append("·")
+        elif span <= 0:
+            cells.append(SPARK_BLOCKS[len(SPARK_BLOCKS) // 2])
+        else:
+            index = int(round(((value - low) / span) * (len(SPARK_BLOCKS) - 1)))
+            cells.append(SPARK_BLOCKS[max(0, min(len(SPARK_BLOCKS) - 1, index))])
+
+    scale = f"steady at {low:.1f}{suffix}" if span <= 0 else f"range {low:.1f}–{high:.1f}{suffix}"
+    tail = f"{trend} · {scale}" if trend else scale
+    return f"[{color}]{''.join(cells)}[/]  [{ACCENT_MUTED}]{escape_markup(tail)}[/]"
+
+
+def trend_color(values: list[float | None], metric_key: str) -> str:
+    return TREND_COLORS.get(describe_trend(values, metric_key).split()[0], ACCENT_SKY)
+
+
 def render_monitor_trends(
     snapshot: dict[str, Any],
     metric_history: list[dict[str, Any]] | None = None,
@@ -1772,15 +2049,15 @@ def render_monitor_trends(
 ) -> str:
     server = snapshot["server"]
     metric_history = metric_history or []
+    # The window rides on the title line: this panel has exactly enough rows
+    # for five metrics, and a spent row is a metric nobody sees.
     lines = [
-        f"[bold {ACCENT_GOLD}]Trends[/]",
-        f"[{ACCENT_MUTED}]Now vs window peak vs direction.[/]",
-        f"[{ACCENT_MUTED}]Window[/] {history_window_label(metric_history, refresh_interval)}",
+        f"[bold {ACCENT_GOLD}]Trends[/]  [{ACCENT_MUTED}]{history_window_label(metric_history, refresh_interval)}[/]",
         "",
     ]
 
     if not server["ok"]:
-        lines.append(f"[bold {ACCENT_ROSE}]Trend data unavailable:[/] {format_error_text(server['error'])}")
+        lines.extend(backend_failure_lines(snapshot, server, "Trend data unavailable"))
         return "\n".join(lines)
 
     data = server["data"]
@@ -1796,17 +2073,28 @@ def render_monitor_trends(
 
     for label, current_value, values, suffix in rows:
         available = [value for value in values if value is not None]
-        peak_text = f"{max(available):.1f}{suffix}" if available else "n/a"
+        # The reading on screen is part of the window, so the peak can never
+        # print below it — "now 42.3  peak 41.0" reads as a broken gauge.
+        peak_text = f"{max(available + [current_value]):.1f}{suffix}" if available or current_value is not None else "n/a"
+        trend = describe_trend(values, label.lower())
         lines.append(
-            f"[bold {ACCENT_SKY}]{label:<6}[/] [{ACCENT_MUTED}]now[/] {current_value:.1f}{suffix}  [{ACCENT_MUTED}]peak[/] {peak_text}  [{ACCENT_MUTED}]trend[/] {describe_trend(values, label.lower())}"
+            f"[bold {ACCENT_SKY}]{label:<6}[/] [{ACCENT_MUTED}]now[/] {current_value:.1f}{suffix}  [{ACCENT_MUTED}]peak[/] {peak_text}"
+        )
+        lines.append(
+            f"         {render_sparkline(values, color=trend_color(values, label.lower()), suffix=suffix, trend=trend)}"
         )
 
     io_history = history_values(metric_history, "io")
     if storage_io.get("available"):
         available_io = [value for value in io_history if value is not None]
-        peak_io = f"{max(available_io):.1f}%" if available_io else "n/a"
+        io_now = clamp_float(storage_io.get("util_percent"))
+        peak_io = f"{max(available_io + [io_now]):.1f}%"
+        io_trend = describe_trend(io_history, "io")
         lines.append(
-            f"[bold {ACCENT_SKY}]I/O   [/] [{ACCENT_MUTED}]now[/] {clamp_float(storage_io.get('util_percent')):.1f}%  [{ACCENT_MUTED}]peak[/] {peak_io}  [{ACCENT_MUTED}]trend[/] {describe_trend(io_history, 'io')}"
+            f"[bold {ACCENT_SKY}]I/O   [/] [{ACCENT_MUTED}]now[/] {io_now:.1f}%  [{ACCENT_MUTED}]peak[/] {peak_io}"
+        )
+        lines.append(
+            f"         {render_sparkline(io_history, color=trend_color(io_history, 'io'), suffix='%', trend=io_trend)}"
         )
     else:
         lines.append(f"[bold {ACCENT_SKY}]I/O   [/] [{ACCENT_MUTED}]now[/] unavailable  [{ACCENT_MUTED}]peak[/] n/a  [{ACCENT_MUTED}]trend[/] warming")
@@ -1816,14 +2104,15 @@ def render_monitor_trends(
 
 def render_monitor_storage(snapshot: dict[str, Any]) -> str:
     server = snapshot["server"]
+    # This pane sits in the narrow right column, so its rows are kept inside
+    # roughly 40 columns: a wrapped row here is a row the operator never sees.
     lines = [
         f"[bold {ACCENT_GOLD}]Storage[/]",
-        f"[{ACCENT_MUTED}]Filesystem space plus device rates and disk wait.[/]",
         "",
     ]
 
     if not server["ok"]:
-        lines.append(f"[bold {ACCENT_ROSE}]Storage data unavailable:[/] {format_error_text(server['error'])}")
+        lines.extend(backend_failure_lines(snapshot, server, "Storage data unavailable"))
         return "\n".join(lines)
 
     data = server["data"]
@@ -1831,9 +2120,10 @@ def render_monitor_storage(snapshot: dict[str, Any]) -> str:
     storage_io = data.get("storage_io", {})
     lines.extend(
         [
-            f"[{ACCENT_MUTED}]Path[/]        {escape_markup(disk.get('path', 'n/a'))}",
-            f"[{ACCENT_MUTED}]FS[/]          {escape_markup(disk.get('filesystem', 'n/a'))}  [{ACCENT_MUTED}]used[/] {disk.get('used_percent', 0)}%  [{ACCENT_MUTED}]free[/] {format_gb_from_kb(disk.get('available_kb', 0))}",
-            f"[{ACCENT_MUTED}]Status[/]      {format_state(disk.get('status', 'unavailable'))}",
+            f"[{ACCENT_MUTED}]Path[/]    {escape_markup(disk.get('path', 'n/a'))}",
+            f"[{ACCENT_MUTED}]FS[/]      {escape_markup(disk.get('filesystem', 'n/a'))}",
+            f"[{ACCENT_MUTED}]Space[/]   {disk.get('used_percent', 0)}% used  {format_gb_from_kb(disk.get('available_kb', 0))} free",
+            f"[{ACCENT_MUTED}]Status[/]  {format_state(disk.get('status', 'unavailable'))}",
             "",
         ]
     )
@@ -1841,19 +2131,19 @@ def render_monitor_storage(snapshot: dict[str, Any]) -> str:
     if storage_io.get("available"):
         lines.extend(
             [
-                f"[{ACCENT_MUTED}]Device[/]      {escape_markup(storage_io.get('device', 'n/a'))}  [{ACCENT_MUTED}]source[/] {escape_markup(storage_io.get('source', 'n/a'))}",
-                f"[{ACCENT_MUTED}]Ops/s[/]       read {storage_io.get('read_ops_per_sec', 0)}  write {storage_io.get('write_ops_per_sec', 0)}",
-                f"[{ACCENT_MUTED}]KB/s[/]        read {storage_io.get('read_kbps', 0)}  write {storage_io.get('write_kbps', 0)}",
-                f"[{ACCENT_MUTED}]Await[/]       {storage_io.get('await_ms', 0)} ms  [{ACCENT_MUTED}]util[/] {storage_io.get('util_percent', 0)}%",
-                f"[{ACCENT_MUTED}]I/O[/]         {format_state(storage_io.get('status', 'unavailable'))}",
+                f"[{ACCENT_MUTED}]Device[/]  {escape_markup(storage_io.get('device', 'n/a'))} [{ACCENT_MUTED}]from[/] {escape_markup(storage_io.get('source', 'n/a'))}",
+                f"[{ACCENT_MUTED}]Ops/s[/]   read {storage_io.get('read_ops_per_sec', 0)}  write {storage_io.get('write_ops_per_sec', 0)}",
+                f"[{ACCENT_MUTED}]KB/s[/]    read {storage_io.get('read_kbps', 0)}  write {storage_io.get('write_kbps', 0)}",
+                f"[{ACCENT_MUTED}]Await[/]   {storage_io.get('await_ms', 0)} ms  [{ACCENT_MUTED}]util[/] {storage_io.get('util_percent', 0)}%",
+                f"[{ACCENT_MUTED}]I/O[/]     {format_state(storage_io.get('status', 'unavailable'))}",
             ]
         )
     else:
         lines.extend(
             [
-                f"[{ACCENT_MUTED}]Device[/]      n/a",
-                f"[{ACCENT_MUTED}]I/O[/]         {format_state(storage_io.get('status', 'unavailable'))}",
-                f"[{ACCENT_MUTED}]Note[/]        install [bold {ACCENT_GOLD}]sysstat/iostat[/] to expose live read/write rates and disk wait.",
+                f"[{ACCENT_MUTED}]Device[/]  n/a",
+                f"[{ACCENT_MUTED}]I/O[/]     {format_state(storage_io.get('status', 'unavailable'))}",
+                f"[{ACCENT_MUTED}]Note[/]    install [bold {ACCENT_GOLD}]sysstat/iostat[/] for live disk rates.",
             ]
         )
 
@@ -1951,12 +2241,71 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
     )
 
 
+def view_nav_key(view_id: str) -> str:
+    for candidate, key, _label in SIDEBAR_MODULES:
+        if candidate == view_id:
+            return key
+    return "?"
+
+
+def render_setup_checklist(snapshot: dict[str, Any], *, compact: bool = False) -> list[str]:
+    """How to get an unconfigured host online, shown where the operator looks.
+
+    A brand-new host used to answer with the same raw error in four panels.
+    One short path replaces that: the compact form fits an Overview tile, the
+    full form belongs on the Config screen where there is room for the actual
+    commands.
+    """
+    setup = snapshot.get("setup") or {}
+    state = setup.get("state", "ready")
+    bin_name = setup.get("bin") or "vmangos-manager"
+
+    if state == "missing":
+        if compact:
+            return [
+                f"[bold {ACCENT_SKY}]Getting this host online[/]",
+                f"[{ACCENT_MUTED}]Manager is installed; it has no configuration here yet.[/]",
+                f"[{ACCENT_MUTED}]Open Config ({view_nav_key('config')}) — it names the command that finishes setup.[/]",
+            ]
+        return [
+            f"[bold {ACCENT_SKY}]Getting this host online[/]",
+            f"[{ACCENT_MUTED}]Manager is installed; it just has no configuration here yet.[/]",
+            "",
+            f"[bold {ACCENT_GOLD}]1[/]  Adopt a realm that already exists:   [bold {ACCENT_SKY}]sudo {bin_name} config detect[/]",
+            f"[bold {ACCENT_GOLD}]2[/]  Or describe this host by hand:       [bold {ACCENT_SKY}]sudo {bin_name} config create[/]",
+            f"[bold {ACCENT_GOLD}]3[/]  Or build the realm from scratch:     [bold {ACCENT_SKY}]sudo {bin_name} install[/]",
+            "",
+            f"[{ACCENT_MUTED}]Every panel on this screen fills in once that config exists.[/]",
+        ]
+    if state == "unreadable":
+        if compact:
+            return [
+                f"[bold {ACCENT_SKY}]Reading the configuration[/]",
+                f"[{ACCENT_MUTED}]It exists; this user cannot open it.[/]",
+                f"[{ACCENT_MUTED}]Open Config ({view_nav_key('config')}) for the grant command.[/]",
+            ]
+        return [
+            f"[bold {ACCENT_SKY}]Reading the configuration[/]",
+            f"[{ACCENT_MUTED}]The config exists but this user cannot open it.[/]",
+            "",
+            f"[bold {ACCENT_GOLD}]1[/]  Grant this account access:  [bold {ACCENT_SKY}]{escape_markup(setup.get('next_step', ''))}[/]",
+            f"[bold {ACCENT_GOLD}]2[/]  Re-open the dashboard — no sudo needed after that.",
+            "",
+            f"[{ACCENT_MUTED}]Manager keeps its config group-readable (mode 640) so operators are never root.[/]",
+        ]
+    return []
+
+
 def render_alerts_panel(snapshot: dict[str, Any]) -> str:
     server = snapshot["server"]
     lines = [f"[bold {ACCENT_GOLD}]Alerts and Events[/]", f"[{ACCENT_MUTED}]Anything currently wrong, plus recent service events.[/]", ""]
 
     if not server["ok"]:
-        lines.append(f"[bold {ACCENT_ROSE}]Alerts unavailable:[/] {format_error_text(server['error'])}")
+        lines.extend(backend_failure_lines(snapshot, server, "Alerts unavailable"))
+        checklist = render_setup_checklist(snapshot, compact=True)
+        if checklist:
+            lines.append("")
+            lines.extend(checklist)
         return "\n".join(lines)
 
     data = server["data"]
@@ -2028,7 +2377,7 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
         else:
             lines.append(f"[{ACCENT_MUTED}]No backup timers configured yet.[/]")
     else:
-        lines.append(f"[bold {ACCENT_ROSE}]Schedule state unavailable:[/] {format_error_text(backup_schedule_status.get('error', 'unknown error'))}")
+        lines.extend(backend_failure_lines(snapshot, backup_schedule_status, "Schedule state unavailable"))
 
     readiness = summarize_restore_readiness(snapshot)
     lines.extend(
@@ -2099,6 +2448,28 @@ def render_config_panel(snapshot: dict[str, Any]) -> str:
         secret_label = "not configured"
 
     lines = [f"[bold {ACCENT_GOLD}]Configuration[/]", ""]
+    setup = snapshot.get("setup") or {}
+    if setup.get("state") in ("missing", "unreadable"):
+        # A host with nothing to show should say what is missing and how to
+        # finish, not print a column of n/a.
+        lines.extend(render_setup_checklist(snapshot))
+        state_note = (
+            "the file does not exist yet"
+            if setup.get("state") == "missing"
+            else "the file exists but this user cannot read it"
+        )
+        lines.extend(
+            [
+                "",
+                f"[{ACCENT_MUTED}]Config Path[/]   {escape_markup(config_path)}  [{ACCENT_MUTED}]({state_note})[/]",
+                "",
+                f"[bold {ACCENT_SKY}]Safety[/]",
+                f"[{ACCENT_MUTED}]Read-only[/]     edit manager.conf and .dbpass in the shell, never here.",
+                f"[{ACCENT_MUTED}]Least-privilege[/] config stays mode 640 group-readable so operators run without root.",
+            ]
+        )
+        return "\n".join(lines)
+
     if validate["ok"]:
         valid = validate["data"].get("valid", True)
         lines.append(f"Validation  {format_state('healthy' if valid else 'critical')}")
@@ -2193,7 +2564,7 @@ def render_realm_logs_summary(snapshot: dict[str, Any]) -> str:
     if not realm_logs.get("ok"):
         lines.extend(
             [
-                f"[bold {ACCENT_ROSE}]Log view unavailable:[/] {format_error_text(realm_logs.get('error', 'unknown error'))}",
+                *backend_failure_lines(snapshot, realm_logs, "Log view unavailable"),
                 "",
                 f"[{ACCENT_MUTED}]Next[/] verify logs recent works from the CLI, then retry [bold {ACCENT_GOLD}]r[/] refresh.",
                 f"[{ACCENT_MUTED}]Filters[/] [bold {ACCENT_GOLD}]f[/] adjust source, window, severity, and limit",
@@ -2294,7 +2665,7 @@ def render_logs_panel(snapshot: dict[str, Any]) -> str:
     ]
 
     if not logs.get("ok"):
-        lines.append(f"[bold {ACCENT_ROSE}]Logs snapshot unavailable:[/] {format_error_text(logs.get('error', 'unknown error'))}")
+        lines.extend(backend_failure_lines(snapshot, logs, "Logs snapshot unavailable"))
         return "\n".join(lines)
 
     data = logs.get("data", {})
@@ -2796,6 +3167,7 @@ def create_app(
             self.last_action_view = self.active_view
             self.action_tone = "info"
             self.snapshot = empty_snapshot("waiting for first refresh")
+            self.release_info: dict[str, Any] = {}
             self.metric_history: list[dict[str, Any]] = []
             self.selected_account_id = ""
             self.selected_backup_file = ""
@@ -2901,6 +3273,10 @@ def create_app(
                 "schedules": SelectionTable(schedules_table, titles=["Type", "Schedule", "Next Run", "ID"]),
             }
 
+            # Identity before data: the console states which Manager build it
+            # is driving even when nothing on the host answers yet.
+            self.release_info = fetch_release_info(self.manager_bin, self.config_path)
+
             self.apply_theme()
             self.apply_view_state()
             self.set_interval(self.refresh_interval, self.request_snapshot_refresh)
@@ -2937,7 +3313,9 @@ def create_app(
                 self.set_focus(self.query_one(f"#{self.active_view}-view", Container))
 
         def refresh_chrome(self) -> None:
-            self.query_one("#sidebar-head", Static).update(render_sidebar_head())
+            self.query_one("#sidebar-head", Static).update(
+                render_sidebar_head(self.release_info, self.snapshot.get("setup"))
+            )
             for view_id, key, label in SIDEBAR_MODULES:
                 item = self.query_one(f"#sidebar-item-{view_id}", SidebarItem)
                 item.update(render_sidebar_module(view_id, key, label, active=view_id == self.active_view))
@@ -2955,6 +3333,7 @@ def create_app(
                     self.last_action_receipt,
                     self.last_action_next_step,
                     self.last_action_view,
+                    self.snapshot.get("setup"),
                 )
             )
             self.query_one("#command-rail", Static).update(render_command_rail(self.active_view))

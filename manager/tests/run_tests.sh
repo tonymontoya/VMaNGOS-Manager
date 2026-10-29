@@ -2908,14 +2908,14 @@ PY
     assert_true "[[ \$compact_overview_command == *'Navigate[/][bold#f59e0b]1[/]overview'* && \$compact_overview_command == *'[bold#f59e0b]2[/]monitor'* && \$compact_overview_command == *'[bold#f59e0b]6[/]logs'* && \$compact_overview_command == *'[bold#f59e0b]7[/]ops'* && \$compact_overview_command == *'ThisView[/][bold#f59e0b]o[/]roster'* && \$compact_overview_command == *'[bold#f59e0b]k[/]validateconfig'* ]]" "dashboard overview command rail exposes the expanded seven-module navigation plus core actions" || all_passed=1
     assert_true "[[ \$compact_logs_command == *'Navigate[/]'* && \$compact_logs_command == *'[bold#f59e0b]6[/]logs'* && \$compact_logs_command == *'[bold#f59e0b]7[/]ops'* && \$compact_logs_command == *'ThisView[/][bold#f59e0b]f[/]filters'* ]]" "dashboard logs command rail exposes dedicated logs navigation and filter controls" || all_passed=1
     assert_true "[[ \$compact_command == *'Navigate[/][bold#f59e0b]1[/]overview'* && \$compact_command == *'[bold#f59e0b]2[/]monitor'* && \$compact_command == *'[bold#f59e0b]6[/]logs'* && \$compact_command == *'[bold#f59e0b]7[/]ops'* && \$compact_command == *'Global[/][bold#f59e0b]r[/]refresh'* && \$compact_command == *'ThisView[/][bold#f59e0b]h[/]maintenance'* && \$compact_command == *'[bold#f59e0b]j[/]removetask'* && \$compact_command == *'[bold#f59e0b]P[/]plan'* && \$compact_command == *'[bold#f59e0b]T[/]testconfig'* && \$compact_command == *'[bold#f59e0b]l[/]rotate'* ]]" "dashboard command rail provides the canonical contextual action surface across seven modules without clipped operations labels" || all_passed=1
-    assert_true "[[ \$compact_metrics == *'HostMetrics'* && \$compact_metrics == *'CPU,memory,load,disk,andI/Oontherealmhost.'* && \$compact_metrics == *'Window[/]4samples/~6s'* && \$compact_metrics == *'CPU[/][bold#22c55e]31.5%/8c'* && \$compact_metrics == *'Memory[/][bold#22c55e]48.0%/3.0G/6.0G'* && \$compact_metrics == *'Load[/][bold#22c55e]1m0.62/5m0.55'* && \$compact_metrics == *'Disk[/][bold#22c55e]24.0%/6.0Gfree'* && \$compact_metrics == *'I/O[/][bold#22c55e]33.0%/1.4:2.6rw'* && \$compact_metrics == *'█[/][#cbd5e1]░░░░░░░'* && \$compact_metrics != *'Players[/]'* && \$compact_metrics != *'Logs[/]'* ]]" "dashboard metrics panel stays scoped to host pressure and capacity without leaking non-host data" || all_passed=1
-    assert_true "[[ \$compact_monitor_pressure == *'HostPressure'* && \$compact_monitor_pressure == *'Currentvalue,windowpeak,andtrendpermetric.'* && \$compact_monitor_pressure == *'CPU[/][bold#22c55e]ok[/]31.5%/8cores'* && \$compact_monitor_pressure == *'Memory[/][bold#22c55e]ok[/]48.0%/3.0GBof6.0GB'* && \$compact_monitor_pressure == *'Load[/][bold#22c55e]ok[/]1m0.625m0.5515m0.44'* && \$compact_monitor_pressure == *'peak[/]0.62'* && \$compact_monitor_pressure == *'Disk[/][bold#22c55e]ok[/]24.0%used/6.0GBfree'* && \$compact_monitor_pressure == *'I/O[/][bold#22c55e]ok[/]33.0%util/1.4:2.6ops'* && \$compact_monitor_pressure == *'█[/][#cbd5e1]░░░░░░░░░░░░░░░░░░░░░░░'* && \$compact_monitor_pressure != *'Players[/]'* ]]" "dashboard monitor pressure panel presents denser host diagnostics without leaking non-monitor data" || all_passed=1
+    assert_true "[[ \$compact_metrics == *'HostMetrics'* && \$compact_metrics == *'CPU,memory,load,disk,andI/Oontherealmhost.'* && \$compact_metrics == *'Window[/]4samples/~6s'* && \$compact_metrics == *'CPU[/]'* && \$compact_metrics == *'31.5%/8c'* && \$compact_metrics == *'48.0%/3.0G/6.0G'* && \$compact_metrics == *'1m0.62/5m0.55'* && \$compact_metrics == *'24.0%/6.0Gfree'* && \$compact_metrics == *'33.0%/1.4:2.6rw'* && \$compact_metrics == *'█[/][#cbd5e1]········'* && \$compact_metrics != *'Players[/]'* && \$compact_metrics != *'Logs[/]'* ]]" "dashboard metrics panel stays scoped to host pressure and capacity without leaking non-host data" || all_passed=1
+    assert_true "[[ \$compact_monitor_pressure == *'HostPressure'* && \$compact_monitor_pressure == *'Currentvalue,windowpeak,andtrendpermetric.'* && \$compact_monitor_pressure == *'CPU[/][bold#22c55e]ok[/]31.5%/8cores'* && \$compact_monitor_pressure == *'Memory[/][bold#22c55e]ok[/]48.0%/3.0GBof6.0GB'* && \$compact_monitor_pressure == *'Load[/][bold#22c55e]ok[/]1m0.625m0.5515m0.44'* && \$compact_monitor_pressure == *'peak[/]0.62'* && \$compact_monitor_pressure == *'Disk[/][bold#22c55e]ok[/]24.0%used/6.0GBfree'* && \$compact_monitor_pressure == *'I/O[/][bold#22c55e]ok[/]33.0%util/1.4:2.6ops'* && \$compact_monitor_pressure == *'█[/][#cbd5e1]·'* && \$compact_monitor_pressure != *'Players[/]'* ]]" "dashboard monitor pressure panel presents denser host diagnostics without leaking non-monitor data" || all_passed=1
     assert_true "[[ \$load_warning_percent == '50.0' && \$load_critical_percent == '100.0' ]]" "dashboard load meters align to backend warning and critical thresholds" || all_passed=1
     assert_true "[[ \$monitor_pressure_line_count -le 13 ]]" "dashboard pressure deck stays compact enough for the shipped monitor layout" || all_passed=1
     assert_true "[[ \$compact_monitor_processes == *'RealmProcesses'* && \$compact_monitor_processes == *'Auth[/][bold#2dd4bf]active[/]'* && \$compact_monitor_processes == *'World[/][bold#f59e0b]warning[/]'* && \$compact_monitor_processes == *'cpu[/]12.5%'* && \$compact_monitor_processes == *'mem[/]512MB'* && \$compact_monitor_processes == *'crashloop[/][bold#cbd5e1]no[/]'* && \$compact_monitor_processes == *'DB[/][bold#22c55e]ok[/]'* ]]" "dashboard monitor process panel surfaces auth/world footprint and DB readiness" || all_passed=1
-    assert_true "[[ \$compact_monitor_trends == *'Trends'* && \$compact_monitor_trends == *'Nowvswindowpeakvsdirection.'* && \$compact_monitor_trends == *'CPU[/][#cbd5e1]now[/]31.5%'* && \$compact_monitor_trends == *'peak[/]31.5%'* && \$compact_monitor_trends == *'Memory[/][#cbd5e1]now[/]48.0%'* && \$compact_monitor_trends == *'I/O[/][#cbd5e1]now[/]33.0%'* ]]" "dashboard monitor trends panel compares live values against the recent window" || all_passed=1
-    assert_true "[[ \$compact_monitor_storage == *'Storage[/]'* && \$compact_monitor_storage == *'FS[/]n/a[#cbd5e1]used[/]24%'* && \$compact_monitor_storage == *'Device[/]sda'* && \$compact_monitor_storage == *'Ops/s[/]read1.4write2.6'* && \$compact_monitor_storage == *'Await[/]0ms'* && \$compact_monitor_storage == *'I/O[/][bold#22c55e]ok[/]'* ]]" "dashboard monitor storage panel exposes device-level detail when iostat data is present" || all_passed=1
-    assert_true "[[ \$compact_monitor_storage_missing == *'I/O[/][bold#94a3b8]unavailable[/]'* && \$compact_monitor_storage_missing == *'install[bold#f59e0b]sysstat/iostat[/]toexposeliveread/writeratesanddiskwait.'* ]]" "dashboard monitor storage panel degrades cleanly when optional iostat data is absent" || all_passed=1
+    assert_true "[[ \$compact_monitor_trends == *'Trends'* && \$compact_monitor_trends == *'CPU[/][#cbd5e1]now[/]31.5%'* && \$compact_monitor_trends == *'peak[/]31.5%'* && \$compact_monitor_trends == *'Memory[/][#cbd5e1]now[/]48.0%'* && \$compact_monitor_trends == *'I/O[/][#cbd5e1]now[/]33.0%'* && \$compact_monitor_trends == *'▁'* && \$compact_monitor_trends == *'█'* && \$compact_monitor_trends == *'range'* ]]" "dashboard monitor trends panel compares live values against the recent window" || all_passed=1
+    assert_true "[[ \$compact_monitor_storage == *'Storage[/]'* && \$compact_monitor_storage == *'FS[/]n/a'* && \$compact_monitor_storage == *'Space[/]24%used'* && \$compact_monitor_storage == *'Device[/]sda'* && \$compact_monitor_storage == *'Ops/s[/]read1.4write2.6'* && \$compact_monitor_storage == *'Await[/]0ms'* && \$compact_monitor_storage == *'I/O[/][bold#22c55e]ok[/]'* ]]" "dashboard monitor storage panel exposes device-level detail when iostat data is present" || all_passed=1
+    assert_true "[[ \$compact_monitor_storage_missing == *'I/O[/][bold#94a3b8]unavailable[/]'* && \$compact_monitor_storage_missing == *'install[bold#f59e0b]sysstat/iostat[/]forlivediskrates.'* ]]" "dashboard monitor storage panel degrades cleanly when optional iostat data is absent" || all_passed=1
     assert_true "[[ \$compact_player_pulse == *'PlayerPulse'* && \$compact_player_pulse == *'OnlineNow[/][bold#f59e0b]1[/]'* && \$compact_player_pulse == *'Mix[/]players=0staff=1'* && \$compact_player_pulse == *'GMCoverage[/]1GM/1online'* && \$compact_player_pulse == *'GMsOnline[/]1'* && \$compact_player_pulse == *'Roster[/]1visible[#cbd5e1]mode[/]onlineroster'* && \$compact_player_pulse == *'Open[/][bold#f59e0b]o[/]onlineroster'* ]]" "dashboard player pulse keeps summary stats aligned with roster visibility context" || all_passed=1
     assert_true "[[ \$compact_alerts == *'AlertsandEvents'* && \$compact_alerts == *'Anythingcurrentlywrong,plusrecentserviceevents.'* && \$compact_alerts == *'Overall[/][bold#34d399]healthy[/][#cbd5e1]active[/]0'* && \$compact_alerts == *'Noactivealerts'* && \$compact_alerts == *'Honorqueuerefreshed'* ]]" "dashboard alerts panel stays scoped to risks and recent realm-side events" || all_passed=1
     assert_true "[[ \$compact_backups == *'BackupReadiness'* && \$compact_backups == *'Protection[/][bold#34d399]healthy[/]'* && \$compact_backups == *'TimerState'* && \$compact_backups == *'Daily[/]'* && \$compact_backups == *'daily04:00'* && \$compact_backups == *'RestoreReadiness'* && \$compact_backups == *'SafetyCopy[/][bold#f59e0b]warning[/]latestbackupageunknown'* && \$compact_backups == *'Preflight[/]pressponaselectedbackup,orrunvmangos-managerbackuprestore<file>--preflight'* && \$compact_backups == *'Safety[/]liverestoreisCLI-only:preflight,thenrunvmangos-managerbackuprestore<file>--yes'* && \$compact_backups != *'Readyfor'* ]]" "dashboard backups panel centers protection posture, restore readiness, and an explicit CLI restore boundary" || all_passed=1
@@ -2944,7 +2944,7 @@ spec = importlib.util.spec_from_file_location("dashboard_module", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-HOSTILE = "[Warning] [$ecret] [/root] access denied for 'root'@localhost"
+HOSTILE = "[$ecret] [/root] access denied for 'root'@localhost [Warning]"
 MARKERS = ("[Warning]", "[$ecret]", "[/root]")
 
 error_snapshot = {
@@ -3084,6 +3084,97 @@ PY
     ) || all_passed=1
 
     assert_true "[[ \$all_passed -eq 0 && \$output == *'MARKUP-SAFE'* ]]" "dashboard renders bracket-hostile errors and fields through markup escaping in every panel" || all_passed=1
+
+    return $all_passed
+}
+
+test_dashboard_setup_and_context_helpers() {
+    local all_passed=0 output
+
+    output=$(python3 - "$MANAGER_DIR/lib/dashboard.py" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("dashboard_module", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+checks = []
+
+
+def check(name, condition):
+    checks.append((name, bool(condition)))
+
+
+# One captured failure is one human sentence, chosen by severity then order.
+lines = module.split_log_lines(
+    "[2026-10-29 04:28:17] [ERROR] Configuration file not found: /opt/mangos/manager/config/manager.conf\n"
+    "[2026-10-29 04:28:17] [ERROR] Create one with: vmangos-manager config create --path /x"
+)
+check("log prefixes removed", lines[0].startswith("Configuration file not found"))
+check("earliest wins at equal severity", module.primary_log_line(lines).startswith("Configuration file not found"))
+check("severity beats order", "boom" in module.primary_log_line(["plain note", "[ERROR] boom"]))
+
+# A host with no config gets one dashboard-wide verdict, not twelve echoes.
+missing_server = {"ok": False, "error": "[ERROR] Configuration file not found: /opt/mangos/manager/config/manager.conf"}
+verdict = module.classify_setup_state(
+    {
+        "server": missing_server,
+        "config_show": {
+            "ok": False,
+            "error": '{"success":false,"error":{"code":"CONFIG_NOT_FOUND","message":"Configuration file not found: /opt/mangos/manager/config/manager.conf","suggestion":"Create one with: vmangos-manager config create"}}',
+        },
+    },
+    "/opt/mangos/manager/bin/vmangos-manager",
+)
+check("missing verdict", verdict["state"] == "missing")
+check("missing detail", verdict["detail"].startswith("Configuration file not found"))
+check("next step names config create", "config create" in verdict["next_step"])
+check("install path is quoted back", verdict["bin"] == "/opt/mangos/manager/bin/vmangos-manager")
+
+snapshot = {"setup": verdict, "server": missing_server}
+panel = module.backend_failure_lines(snapshot, missing_server, "Server snapshot failed")
+check("one line, not four", len(panel) == 1)
+check("panel says what it waits for", "awaiting configuration" in module.strip_markup(panel[0]))
+check("raw log echo is gone", "not found:" not in module.strip_markup(panel[0]))
+
+refused = {"ok": False, "error": "[ERROR] connection refused while probing authd"}
+other = module.backend_failure_lines({"setup": {"state": "ready"}}, refused, "Server snapshot failed")
+check("real failures are still quoted", "connection refused" in module.strip_markup(other[0]))
+
+checklist = "".join(module.render_setup_checklist(snapshot))
+check("checklist offers detect", "config detect" in checklist)
+check("checklist offers install", "install" in checklist)
+check("compact checklist fits an overview tile", len(module.render_setup_checklist(snapshot, compact=True)) <= 3)
+
+unreadable = module.classify_setup_state(
+    {"config_show": {"ok": False, "error": "[ERROR] Configuration file is not readable: /opt/mangos/manager/config/manager.conf"}},
+    "vmangos-manager",
+)
+check("unreadable verdict", unreadable["state"] == "unreadable")
+check("unreadable offers the grant", "config grant --user" in unreadable["next_step"])
+
+# Gauges stay inside their column; a wrapped row used to silently drop metrics.
+check("meter halves", module.strip_markup(module.render_meter(50, width=10)) == "█████·····")
+check("meter clamps high", module.strip_markup(module.render_meter(140, width=6)) == "██████")
+check("meter clamps low", module.strip_markup(module.render_meter(-5, width=4)) == "····")
+
+spark = module.strip_markup(module.render_sparkline([1.0, 2.0, 3.0, 4.0], width=8, suffix="%", trend="rising"))
+check("sparkline starts low and ends high", spark.startswith("▁") and "█" in spark)
+check("sparkline states its scale", "range 1.0–4.0%" in spark)
+check("sparkline warms up", "collecting" in module.strip_markup(module.render_sparkline([1.0])))
+check("sparkline says steady", "steady at 2.0" in module.strip_markup(module.render_sparkline([2.0, 2.0, 2.0])))
+
+failed = [name for name, passed in checks if not passed]
+if failed:
+    print("FAILED: " + ", ".join(failed))
+    raise SystemExit(1)
+
+print(f"CONTEXT-HELPERS-OK {len(checks)}")
+PY
+    ) || all_passed=1
+
+    assert_true "[[ \$output == *'CONTEXT-HELPERS-OK'* ]]" "dashboard setup verdict, error dedup, gauges, and sparklines behave" || all_passed=1
 
     return $all_passed
 }
@@ -5726,6 +5817,7 @@ main() {
     run_test "Dashboard: Action requests" test_dashboard_action_request_builder
     run_test "Dashboard: Render helpers" test_dashboard_render_helpers
     run_test "Dashboard: Render markup safety" test_dashboard_render_markup_safety
+    run_test "Dashboard: Setup verdict and context helpers" test_dashboard_setup_and_context_helpers
     run_test "Dashboard: Monitoring history" test_dashboard_monitoring_history_helpers
     run_test "Common: Standalone suite" test_common_standalone_suite
     run_test "Dashboard: Snapshot fixture helpers" test_dashboard_snapshot_fixture_helpers
