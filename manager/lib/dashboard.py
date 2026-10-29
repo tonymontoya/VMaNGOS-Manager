@@ -1999,7 +1999,7 @@ def render_sidebar_target(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
+def render_service_panel(snapshot: dict[str, Any], active_view: str, narrow: bool = False) -> str:
     server = snapshot["server"]
     if not server["ok"]:
         lines = [
@@ -2022,7 +2022,7 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
 
     lines = [
         f"[bold {ACCENT_GOLD}]Realm Services[/]",
-        f"[{ACCENT_MUTED}]Auth and world services, plus the DB check.[/]",
+        *([] if narrow else [f"[{ACCENT_MUTED}]Auth and world services, plus the DB check.[/]"]),
         "",
         f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
         f"[{ACCENT_MUTED}]       cpu[/] {auth.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {auth.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {auth_restarts}",
@@ -2051,12 +2051,13 @@ def render_metrics_panel(
     snapshot: dict[str, Any],
     metric_history: list[dict[str, Any]] | None = None,
     refresh_interval: int = 2,
+    narrow: bool = False,
 ) -> str:
     server = snapshot["server"]
     metric_history = metric_history or []
     lines = [
         f"[bold {ACCENT_GOLD}]Host Metrics[/]",
-        f"[{ACCENT_MUTED}]CPU, memory, load, disk, and I/O on the realm host.[/]",
+        *([] if narrow else [f"[{ACCENT_MUTED}]CPU, memory, load, disk, and I/O on the realm host.[/]"]),
         f"[{ACCENT_MUTED}]Window[/] {history_window_label(metric_history, refresh_interval)}",
         "",
     ]
@@ -2130,12 +2131,13 @@ def render_monitor_pressure(
     snapshot: dict[str, Any],
     metric_history: list[dict[str, Any]] | None = None,
     refresh_interval: int = 2,
+    narrow: bool = False,
 ) -> str:
     server = snapshot["server"]
     metric_history = metric_history or []
     lines = [
         f"[bold {ACCENT_GOLD}]Host Pressure[/]",
-        f"[{ACCENT_MUTED}]Current value, window peak, and trend per metric.[/]",
+        *([] if narrow else [f"[{ACCENT_MUTED}]Current value, window peak, and trend per metric.[/]"]),
         f"[{ACCENT_MUTED}]Window[/] {history_window_label(metric_history, refresh_interval)}",
     ]
 
@@ -2224,11 +2226,11 @@ def render_monitor_pressure(
     return "\n".join(lines)
 
 
-def render_monitor_processes(snapshot: dict[str, Any]) -> str:
+def render_monitor_processes(snapshot: dict[str, Any], narrow: bool = False) -> str:
     server = snapshot["server"]
     lines = [
         f"[bold {ACCENT_GOLD}]Realm Processes[/]",
-        f"[{ACCENT_MUTED}]Per-service CPU, memory, uptime, and restart history.[/]",
+        *([] if narrow else [f"[{ACCENT_MUTED}]Per-service CPU, memory, uptime, and restart history.[/]"]),
         "",
     ]
 
@@ -2447,6 +2449,7 @@ def render_player_pulse(
     snapshot: dict[str, Any],
     metric_history: list[dict[str, Any]] | None = None,
     refresh_interval: int = 2,
+    narrow: bool = False,
 ) -> str:
     metric_history = metric_history or []
     players = snapshot.get("players", [])
@@ -2465,7 +2468,7 @@ def render_player_pulse(
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]Player Pulse[/]",
-            f"[{ACCENT_MUTED}]Who is online, the window peak, and staff coverage.[/]",
+            *([] if narrow else [f"[{ACCENT_MUTED}]Who is online, the window peak, and staff coverage.[/]"]),
             "",
             f"[{ACCENT_MUTED}]Online Now[/]   [bold {ACCENT_GOLD}]{online_now}[/]  [{ACCENT_MUTED}]trend[/] {describe_trend(player_history, 'players')}",
             f"[{ACCENT_MUTED}]Peak Window[/] {peak_window}  [{ACCENT_MUTED}]window[/] {history_window_label(metric_history, refresh_interval)}",
@@ -2562,9 +2565,13 @@ def render_setup_checklist(snapshot: dict[str, Any], *, compact: bool = False) -
     return []
 
 
-def render_alerts_panel(snapshot: dict[str, Any]) -> str:
+def render_alerts_panel(snapshot: dict[str, Any], narrow: bool = False) -> str:
     server = snapshot["server"]
-    lines = [f"[bold {ACCENT_GOLD}]Alerts and Events[/]", f"[{ACCENT_MUTED}]Anything currently wrong, plus recent service events.[/]", ""]
+    lines = [
+        f"[bold {ACCENT_GOLD}]Alerts and Events[/]",
+        *([] if narrow else [f"[{ACCENT_MUTED}]Anything currently wrong, plus recent service events.[/]"]),
+        "",
+    ]
 
     if not server["ok"]:
         lines.extend(backend_failure_lines(snapshot, server, "Alerts unavailable"))
@@ -3750,12 +3757,12 @@ def create_app(
             step: same data, new colours.
             """
             snapshot = self.snapshot
-            self.query_one("#service-pane", Static).update(render_service_panel(snapshot, self.active_view))
-            self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot, self.metric_history, self.refresh_interval))
-            self.query_one("#player-pulse-pane", Static).update(render_player_pulse(snapshot, self.metric_history, self.refresh_interval))
-            self.query_one("#alerts-pane", Static).update(render_alerts_panel(snapshot))
-            self.query_one("#monitor-pressure-pane", Static).update(render_monitor_pressure(snapshot, self.metric_history, self.refresh_interval))
-            self.query_one("#monitor-process-pane", Static).update(render_monitor_processes(snapshot))
+            self.query_one("#service-pane", Static).update(render_service_panel(snapshot, self.active_view, narrow=self.narrow_viewport))
+            self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot, self.metric_history, self.refresh_interval, narrow=self.narrow_viewport))
+            self.query_one("#player-pulse-pane", Static).update(render_player_pulse(snapshot, self.metric_history, self.refresh_interval, narrow=self.narrow_viewport))
+            self.query_one("#alerts-pane", Static).update(render_alerts_panel(snapshot, narrow=self.narrow_viewport))
+            self.query_one("#monitor-pressure-pane", Static).update(render_monitor_pressure(snapshot, self.metric_history, self.refresh_interval, narrow=self.narrow_viewport))
+            self.query_one("#monitor-process-pane", Static).update(render_monitor_processes(snapshot, narrow=self.narrow_viewport))
             self.query_one("#monitor-trends-pane", Static).update(render_monitor_trends(snapshot, self.metric_history, self.refresh_interval))
             self.query_one("#monitor-storage-pane", Static).update(render_monitor_storage(snapshot))
             self.query_one("#config-pane", Static).update(render_config_panel(snapshot))
@@ -4599,7 +4606,7 @@ def create_app(
             self.last_action_view = view_context or self.active_view
             self.action_tone = tone
             self.refresh_chrome()
-            self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view))
+            self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view, narrow=self.narrow_viewport))
             if self.active_view == "operations":
                 self.query_one("#schedule-details", Static).update(
                     render_schedule_details(self.selected_schedule(), len(self.snapshot.get("schedules", [])))
@@ -4926,6 +4933,25 @@ DASHBOARD_CSS = """
         .narrow #logs-view,
         .narrow #config-view,
         .narrow #operations-view {
+            overflow-y: auto;
+        }
+
+        /* The card grids never got a narrow form. At 100 columns each card is
+           handed about 46 columns, which cannot hold a title, a sentence about
+           what the card contains, and a line of data: the second row of the grid
+           collapsed into bordered frames with nothing in them. Below
+           NARROW_VIEWPORT_WIDTH the cards take the full width and stack, and the
+           view scrolls -- which is what a small window is for. */
+        .narrow #overview-grid,
+        .narrow #monitor-grid {
+            grid-size: 1 4;
+            grid-columns: 1fr;
+            grid-rows: auto auto auto auto;
+            height: auto;
+        }
+
+        .narrow #overview-view,
+        .narrow #monitor-view {
             overflow-y: auto;
         }
 

@@ -23,7 +23,7 @@ readonly MANAGER_ROOT
 # exists only for running an unpackaged tree; a unit test asserts it agrees with
 # the VERSION file, which is what stops the fallback silently rotting between
 # releases (the reason a 0.5.x host reported "version 0.3.1" when you asked it).
-readonly VERSION_FALLBACK="0.7.4"
+readonly VERSION_FALLBACK="0.7.5"
 
 manager_read_version() {
     local version_file="$MANAGER_ROOT/VERSION"
