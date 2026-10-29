@@ -2097,6 +2097,105 @@ test_make_install_and_uninstall_targets() {
     return $all_passed
 }
 
+# Release hygiene: the version a host reports must be the version we shipped.
+# An installed 0.5.x host once answered "0.3.1" because the CLI carried a
+# hand-typed constant; these assertions make that impossible to repeat.
+test_version_single_source_of_truth() {
+    local all_passed=0
+    local temp_dir install_root version_file file_version fallback_version
+    local output newest_tag tag_version order
+
+    version_file="$MANAGER_DIR/VERSION"
+    assert_file_exists "$version_file" "VERSION file is the release source of truth" || all_passed=1
+
+    file_version=$(tr -d '[:space:]' <"$version_file" 2>/dev/null || echo "")
+    assert_true "[[ \"$file_version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]" \
+        "VERSION holds a plain semver (got: $file_version)" || all_passed=1
+
+    fallback_version=$(sed -n 's/^readonly VERSION_FALLBACK="\([^"]*\)".*/\1/p' "$MANAGER_DIR/bin/vmangos-manager")
+    assert_equals "$file_version" "$fallback_version" \
+        "embedded fallback agrees with the VERSION file" || all_passed=1
+
+    temp_dir=$(mktemp -d)
+    install_root="$temp_dir/opt/mangos/manager"
+    make -C "$MANAGER_DIR" install DESTDIR="$temp_dir" PREFIX=/opt/mangos/manager \
+        VMANGOS_BUILD_INFO='git=deadbee describe=v9.9.9-test built=2026-01-01T00:00:00Z' >/dev/null
+
+    assert_file_exists "$install_root/VERSION" "make install ships the VERSION file" || all_passed=1
+    assert_file_exists "$install_root/build-info" "make install stamps build-info" || all_passed=1
+
+    output=$(bash "$install_root/bin/vmangos-manager" --version 2>&1)
+    assert_true "[[ \$output == *\"version $file_version\"* ]]" \
+        "installed CLI names its own release" || all_passed=1
+    assert_true "[[ \$output == *'git=deadbee describe=v9.9.9-test'* ]]" \
+        "installed CLI names the exact build it came from" || all_passed=1
+
+    output=$(bash "$install_root/bin/vmangos-manager" --help 2>&1)
+    assert_true "[[ \$output == *\"Version: $file_version\"* ]]" \
+        "help text is generated from the version, not typed by hand" || all_passed=1
+
+    rm -f "$install_root/VERSION" "$install_root/build-info"
+    output=$(bash "$install_root/bin/vmangos-manager" --version 2>&1)
+    assert_true "[[ \$output == *\"version $fallback_version\"* ]]" \
+        "a tree with no VERSION file still answers with the fallback" || all_passed=1
+
+    make -C "$MANAGER_DIR" uninstall DESTDIR="$temp_dir" PREFIX=/opt/mangos/manager >/dev/null
+    assert_true "[[ ! -e \"$install_root/VERSION\" ]]" "make uninstall removes the VERSION file" || all_passed=1
+    assert_true "[[ ! -e \"$install_root/build-info\" ]]" "make uninstall removes build-info" || all_passed=1
+
+    if command -v git >/dev/null 2>&1 && git -C "$MANAGER_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+        newest_tag=$(git -C "$MANAGER_DIR" describe --tags --abbrev=0 2>/dev/null || echo "")
+        if [[ -n "$newest_tag" ]]; then
+            tag_version=${newest_tag#v}
+            order=$(printf '%s\n%s\n' "$tag_version" "$file_version" | sort -V | head -n1)
+            assert_equals "$tag_version" "$order" \
+                "VERSION ($file_version) is not behind the newest tag ($newest_tag)" || all_passed=1
+        fi
+    fi
+
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
+# A stock Ubuntu server has python3 but not python3-venv, and `python3 -m venv`
+# then fails without naming the missing package. Bootstrap must diagnose it.
+test_dashboard_bootstrap_requires_venv_module() {
+    # shellcheck source=../lib/dashboard.sh
+    source "$LIB_DIR/dashboard.sh"
+
+    local all_passed=0
+    local temp_dir stub_python output rc
+
+    temp_dir=$(mktemp -d)
+    stub_python="$temp_dir/python3"
+    cat >"$stub_python" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-c" && "${2:-}" == *ensurepip* ]]; then
+    echo "No module named 'ensurepip'" >&2
+    exit 1
+fi
+echo "STUB_VENV_ATTEMPTED"
+exit 0
+STUB
+    chmod +x "$stub_python"
+
+    export VMANGOS_DASHBOARD_BOOTSTRAP_PYTHON="$stub_python"
+    export VMANGOS_DASHBOARD_VENV_DIR="$temp_dir/venv"
+
+    output=$(dashboard_bootstrap 2>&1) || rc=$?
+    rc=${rc:-0}
+    unset VMANGOS_DASHBOARD_BOOTSTRAP_PYTHON VMANGOS_DASHBOARD_VENV_DIR
+
+    assert_true "[[ \$rc -ne 0 ]]" "bootstrap fails when python3 cannot make venvs" || all_passed=1
+    assert_true "[[ \$output == *'python3-venv'* ]]" "bootstrap names the package to install" || all_passed=1
+    assert_true "[[ \$output != *'Bootstrapping dashboard environment'* ]]" "bootstrap stops before creating a broken venv" || all_passed=1
+    assert_true "[[ \$output != *'STUB_VENV_ATTEMPTED'* ]]" "bootstrap never invokes the failing venv creation" || all_passed=1
+    assert_true "[[ ! -d \"$temp_dir/venv\" ]]" "no half-built venv is left behind" || all_passed=1
+
+    rm -rf "$temp_dir"
+    return $all_passed
+}
+
 test_dashboard_bootstrap_and_run() {
     # shellcheck source=../lib/dashboard.sh
     source "$LIB_DIR/dashboard.sh"
@@ -5618,7 +5717,9 @@ main() {
     run_test "Update: Apply rejects dirty tree" test_update_apply_rejects_dirty_source_tree
     run_test "Update: Apply include-db migrations" test_update_apply_include_db_runs_migrations
     run_test "Packaging: Install and uninstall" test_make_install_and_uninstall_targets
+    run_test "Packaging: Version single source of truth" test_version_single_source_of_truth
     run_test "Dashboard: Bootstrap and launch" test_dashboard_bootstrap_and_run
+    run_test "Dashboard: Bootstrap needs python3-venv" test_dashboard_bootstrap_requires_venv_module
     run_test "Dashboard: Snapshot aggregation" test_dashboard_snapshot_json_aggregates_backend
     run_test "Dashboard: View-scoped snapshot" test_dashboard_view_scoped_snapshot
     run_test "Dashboard: Selection table churn" test_dashboard_selection_table_skips_unchanged

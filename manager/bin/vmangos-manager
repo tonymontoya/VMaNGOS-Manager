@@ -9,12 +9,48 @@ set -euo pipefail
 # GLOBALS
 # ============================================================================
 
-readonly VERSION="0.3.1"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 
 readonly LIB_DIR="$SCRIPT_DIR/../lib"
+MANAGER_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+readonly MANAGER_ROOT
+
+# Version handling
+#
+# `manager/VERSION` is the single source of truth and is installed beside the
+# CLI, so a running host can always name its own release. The embedded fallback
+# exists only for running an unpackaged tree; a unit test asserts it agrees with
+# the VERSION file, which is what stops the fallback silently rotting between
+# releases (the reason a 0.5.x host reported "version 0.3.1" when you asked it).
+readonly VERSION_FALLBACK="0.6.0"
+
+manager_read_version() {
+    local version_file="$MANAGER_ROOT/VERSION"
+    local version=""
+
+    if [[ -f "$version_file" ]]; then
+        version=$(tr -d '[:space:]' <"$version_file" 2>/dev/null || echo "")
+    fi
+
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        version="$VERSION_FALLBACK"
+    fi
+
+    printf '%s' "$version"
+}
+
+VERSION="$(manager_read_version)"
+readonly VERSION
+
+# Written by `make install`: one line identifying the exact build on this host,
+# so an operator can prove what is deployed instead of trusting a checkout.
+manager_build_info() {
+    local info_file="$MANAGER_ROOT/build-info"
+    if [[ -f "$info_file" ]]; then
+        tr -d '\n' <"$info_file" 2>/dev/null || true
+    fi
+}
 
 # Global options (exported for use by sourced libraries)
 VERBOSE=0
@@ -25,9 +61,9 @@ OUTPUT_FORMAT="text"
 # ============================================================================
 
 show_help() {
-    cat << 'EOF'
+    cat << EOF
 VMANGOS Manager - Server Management Tool
-Version: 0.3.1
+Version: $VERSION
 
 USAGE:
     vmangos-manager [GLOBAL_OPTIONS] [<COMMAND> [SUBCOMMAND_OPTIONS]]
@@ -67,7 +103,12 @@ EOF
 }
 
 show_version() {
+    local build_info
     echo "VMANGOS Manager version $VERSION"
+    build_info=$(manager_build_info)
+    if [[ -n "$build_info" ]]; then
+        echo "  build: $build_info"
+    fi
 }
 
 # ============================================================================
