@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/tonymontoya/VMaNGOS-Manager/actions/workflows/ci.yml/badge.svg)
 ![Ubuntu 22.04–26.04](https://img.shields.io/badge/ubuntu-22.04--26.04-E95420)
-![Release](https://img.shields.io/badge/release-v0.6.0-0f766e)
+![Release](https://img.shields.io/badge/release-v0.7.0-0f766e)
 ![Interface](https://img.shields.io/badge/interface-Textual%20TUI-0f172a)
 
 An SSH terminal-native administration suite for VMANGOS private servers optimized for performance and security. 
@@ -65,8 +65,8 @@ tells you its exact release and build:
 
 ```bash
 /opt/mangos/manager/bin/vmangos-manager --version
-# VMANGOS Manager version 0.6.0
-#   build: git=2a55757 describe=v0.5.0-7-g2a55757 built=2026-10-28T21:04:11Z
+# VMANGOS Manager version 0.7.0
+#   build: git=2a55757 describe=v0.6.0-4-g2a55757 built=2026-10-29T05:52:03Z
 ```
 
 ### Option A — Fresh Host: the Install Wizard (recommended)

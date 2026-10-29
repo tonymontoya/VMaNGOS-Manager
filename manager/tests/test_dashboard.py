@@ -11,6 +11,7 @@ Seams (agreed):
 import asyncio
 import json
 import os
+import textwrap
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -576,6 +577,89 @@ def write_version_stub(directory):
 def panel_text(app, selector):
     rendered = app.query_one(selector).render()
     return getattr(rendered, "plain", None) or str(rendered)
+
+
+def test_dashboard_panels_fit_their_grid_cells(tmp_path):
+    """A line that does not fit its panel is a line the operator never sees.
+
+    The Overview quietly lost Disk and I/O to exactly this: each metric row
+    wrapped to two lines, the panel was already at its height, and the last
+    metrics simply disappeared. Panels are measured against their cells here
+    so that class of bug cannot come back quietly.
+    """
+    from dashboard import (
+        render_alerts_panel,
+        render_metrics_panel,
+        render_monitor_pressure,
+        render_monitor_processes,
+        render_monitor_storage,
+        render_monitor_trends,
+        render_player_pulse,
+        render_service_panel,
+        strip_markup,
+    )
+
+    grid_panes = {
+        "overview": (
+            "#service-pane",
+            "#metrics-pane",
+            "#player-pulse-pane",
+            "#alerts-pane",
+        ),
+        "monitor": (
+            "#monitor-pressure-pane",
+            "#monitor-process-pane",
+            "#monitor-trends-pane",
+            "#monitor-storage-pane",
+        ),
+    }
+    # The shipped documentation fixture: a fully populated host, which is the
+    # case that produces the most lines and therefore the one that clips.
+    demo_snapshot = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "docs",
+        "assets",
+        "dashboard-demo-snapshot.json",
+    )
+
+    for view, panes in grid_panes.items():
+        app = create_app(
+            manager_bin=write_recorder_stub(tmp_path)[0],
+            config_path="/dev/null",
+            refresh=30,
+            theme="dark",
+            initial_view=view,
+            screenshot_path=None,
+            snapshot_file=demo_snapshot,
+        )
+
+        async def scenario(app=app, view=view, panes=panes):
+            async with app.run_test(size=(140, 52)) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                snapshot, history = app.snapshot, app.metric_history
+                producers = {
+                    "#service-pane": lambda: render_service_panel(snapshot, view),
+                    "#metrics-pane": lambda: render_metrics_panel(snapshot, history, 30),
+                    "#player-pulse-pane": lambda: render_player_pulse(snapshot, history, 30),
+                    "#alerts-pane": lambda: render_alerts_panel(snapshot),
+                    "#monitor-pressure-pane": lambda: render_monitor_pressure(snapshot, history, 30),
+                    "#monitor-process-pane": lambda: render_monitor_processes(snapshot),
+                    "#monitor-trends-pane": lambda: render_monitor_trends(snapshot, history, 30),
+                    "#monitor-storage-pane": lambda: render_monitor_storage(snapshot),
+                }
+                for selector in panes:
+                    widget = app.query_one(selector)
+                    inner_width = widget.size.width
+                    needed = sum(
+                        len(textwrap.wrap(line, inner_width)) or 1
+                        for line in strip_markup(producers[selector]()).splitlines()
+                    )
+                    assert needed <= widget.size.height, (
+                        f"{view} {selector} needs {needed} lines, shows {widget.size.height}"
+                    )
+
+        asyncio.run(scenario())
 
 
 def test_sidebar_names_the_release_it_drives(tmp_path):

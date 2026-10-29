@@ -1756,7 +1756,7 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
 
     lines = [
         f"[bold {ACCENT_GOLD}]Realm Services[/]",
-        f"[{ACCENT_MUTED}]Auth and world services plus the database connectivity check.[/]",
+        f"[{ACCENT_MUTED}]Auth and world services, plus the DB check.[/]",
         "",
         f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
         f"[{ACCENT_MUTED}]       cpu[/] {auth.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {auth.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {auth_restarts}",
@@ -1768,18 +1768,14 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str) -> str:
     ]
 
     # Name the realm this console is pointed at: a screen full of green means
-    # nothing if it is the wrong host.
+    # nothing if it is the wrong host. One line, because this panel's row is
+    # fixed and a wrapped line is a silently dropped line.
     install_root = str(summary.get("install_root", "") or "")
     if install_root:
         services = ", ".join(part for part in (summary.get("auth_service", ""), summary.get("world_service", "")) if part)
-        db_names = ", ".join(part for part in (summary.get("auth_db", ""), summary.get("characters_db", ""), summary.get("world_db", ""), summary.get("logs_db", "")) if part)
-        lines.extend(
-            [
-                "",
-                f"[bold {ACCENT_SKY}]Target[/]  {escape_markup(install_root)}",
-                f"[{ACCENT_MUTED}]        units[/] {escape_markup(services or 'n/a')}",
-                f"[{ACCENT_MUTED}]        dbs[/]   {escape_markup(db_names or 'n/a')}",
-            ]
+        lines.append(
+            f"[bold {ACCENT_SKY}]Target[/]  {escape_markup(install_root)}"
+            + (f"  [{ACCENT_MUTED}]units[/] {escape_markup(services)}" if services else "")
         )
 
     return "\n".join(lines)
@@ -2053,9 +2049,10 @@ def render_monitor_trends(
 ) -> str:
     server = snapshot["server"]
     metric_history = metric_history or []
+    # The window rides on the title line: this panel has exactly enough rows
+    # for five metrics, and a spent row is a metric nobody sees.
     lines = [
-        f"[bold {ACCENT_GOLD}]Trends[/]",
-        f"[{ACCENT_MUTED}]Window[/] {history_window_label(metric_history, refresh_interval)}",
+        f"[bold {ACCENT_GOLD}]Trends[/]  [{ACCENT_MUTED}]{history_window_label(metric_history, refresh_interval)}[/]",
         "",
     ]
 
@@ -2076,7 +2073,9 @@ def render_monitor_trends(
 
     for label, current_value, values, suffix in rows:
         available = [value for value in values if value is not None]
-        peak_text = f"{max(available):.1f}{suffix}" if available else "n/a"
+        # The reading on screen is part of the window, so the peak can never
+        # print below it — "now 42.3  peak 41.0" reads as a broken gauge.
+        peak_text = f"{max(available + [current_value]):.1f}{suffix}" if available or current_value is not None else "n/a"
         trend = describe_trend(values, label.lower())
         lines.append(
             f"[bold {ACCENT_SKY}]{label:<6}[/] [{ACCENT_MUTED}]now[/] {current_value:.1f}{suffix}  [{ACCENT_MUTED}]peak[/] {peak_text}"
@@ -2088,10 +2087,11 @@ def render_monitor_trends(
     io_history = history_values(metric_history, "io")
     if storage_io.get("available"):
         available_io = [value for value in io_history if value is not None]
-        peak_io = f"{max(available_io):.1f}%" if available_io else "n/a"
+        io_now = clamp_float(storage_io.get("util_percent"))
+        peak_io = f"{max(available_io + [io_now]):.1f}%"
         io_trend = describe_trend(io_history, "io")
         lines.append(
-            f"[bold {ACCENT_SKY}]I/O   [/] [{ACCENT_MUTED}]now[/] {clamp_float(storage_io.get('util_percent')):.1f}%  [{ACCENT_MUTED}]peak[/] {peak_io}"
+            f"[bold {ACCENT_SKY}]I/O   [/] [{ACCENT_MUTED}]now[/] {io_now:.1f}%  [{ACCENT_MUTED}]peak[/] {peak_io}"
         )
         lines.append(
             f"         {render_sparkline(io_history, color=trend_color(io_history, 'io'), suffix='%', trend=io_trend)}"
@@ -2104,9 +2104,10 @@ def render_monitor_trends(
 
 def render_monitor_storage(snapshot: dict[str, Any]) -> str:
     server = snapshot["server"]
+    # This pane sits in the narrow right column, so its rows are kept inside
+    # roughly 40 columns: a wrapped row here is a row the operator never sees.
     lines = [
         f"[bold {ACCENT_GOLD}]Storage[/]",
-        f"[{ACCENT_MUTED}]Filesystem space plus device rates and disk wait.[/]",
         "",
     ]
 
@@ -2119,9 +2120,10 @@ def render_monitor_storage(snapshot: dict[str, Any]) -> str:
     storage_io = data.get("storage_io", {})
     lines.extend(
         [
-            f"[{ACCENT_MUTED}]Path[/]        {escape_markup(disk.get('path', 'n/a'))}",
-            f"[{ACCENT_MUTED}]FS[/]          {escape_markup(disk.get('filesystem', 'n/a'))}  [{ACCENT_MUTED}]used[/] {disk.get('used_percent', 0)}%  [{ACCENT_MUTED}]free[/] {format_gb_from_kb(disk.get('available_kb', 0))}",
-            f"[{ACCENT_MUTED}]Status[/]      {format_state(disk.get('status', 'unavailable'))}",
+            f"[{ACCENT_MUTED}]Path[/]    {escape_markup(disk.get('path', 'n/a'))}",
+            f"[{ACCENT_MUTED}]FS[/]      {escape_markup(disk.get('filesystem', 'n/a'))}",
+            f"[{ACCENT_MUTED}]Space[/]   {disk.get('used_percent', 0)}% used  {format_gb_from_kb(disk.get('available_kb', 0))} free",
+            f"[{ACCENT_MUTED}]Status[/]  {format_state(disk.get('status', 'unavailable'))}",
             "",
         ]
     )
@@ -2129,19 +2131,19 @@ def render_monitor_storage(snapshot: dict[str, Any]) -> str:
     if storage_io.get("available"):
         lines.extend(
             [
-                f"[{ACCENT_MUTED}]Device[/]      {escape_markup(storage_io.get('device', 'n/a'))}  [{ACCENT_MUTED}]source[/] {escape_markup(storage_io.get('source', 'n/a'))}",
-                f"[{ACCENT_MUTED}]Ops/s[/]       read {storage_io.get('read_ops_per_sec', 0)}  write {storage_io.get('write_ops_per_sec', 0)}",
-                f"[{ACCENT_MUTED}]KB/s[/]        read {storage_io.get('read_kbps', 0)}  write {storage_io.get('write_kbps', 0)}",
-                f"[{ACCENT_MUTED}]Await[/]       {storage_io.get('await_ms', 0)} ms  [{ACCENT_MUTED}]util[/] {storage_io.get('util_percent', 0)}%",
-                f"[{ACCENT_MUTED}]I/O[/]         {format_state(storage_io.get('status', 'unavailable'))}",
+                f"[{ACCENT_MUTED}]Device[/]  {escape_markup(storage_io.get('device', 'n/a'))} [{ACCENT_MUTED}]from[/] {escape_markup(storage_io.get('source', 'n/a'))}",
+                f"[{ACCENT_MUTED}]Ops/s[/]   read {storage_io.get('read_ops_per_sec', 0)}  write {storage_io.get('write_ops_per_sec', 0)}",
+                f"[{ACCENT_MUTED}]KB/s[/]    read {storage_io.get('read_kbps', 0)}  write {storage_io.get('write_kbps', 0)}",
+                f"[{ACCENT_MUTED}]Await[/]   {storage_io.get('await_ms', 0)} ms  [{ACCENT_MUTED}]util[/] {storage_io.get('util_percent', 0)}%",
+                f"[{ACCENT_MUTED}]I/O[/]     {format_state(storage_io.get('status', 'unavailable'))}",
             ]
         )
     else:
         lines.extend(
             [
-                f"[{ACCENT_MUTED}]Device[/]      n/a",
-                f"[{ACCENT_MUTED}]I/O[/]         {format_state(storage_io.get('status', 'unavailable'))}",
-                f"[{ACCENT_MUTED}]Note[/]        install [bold {ACCENT_GOLD}]sysstat/iostat[/] to expose live read/write rates and disk wait.",
+                f"[{ACCENT_MUTED}]Device[/]  n/a",
+                f"[{ACCENT_MUTED}]I/O[/]     {format_state(storage_io.get('status', 'unavailable'))}",
+                f"[{ACCENT_MUTED}]Note[/]    install [bold {ACCENT_GOLD}]sysstat/iostat[/] for live disk rates.",
             ]
         )
 
