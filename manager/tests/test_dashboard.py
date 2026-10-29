@@ -12,6 +12,8 @@ import asyncio
 import json
 import os
 import pathlib
+import sys
+import tempfile
 import textwrap
 from datetime import datetime, timedelta, timezone
 
@@ -673,14 +675,10 @@ def test_dashboard_panels_fit_their_grid_cells(tmp_path):
             "#monitor-storage-pane",
         ),
     }
-    # The shipped documentation fixture: a fully populated host, which is the
-    # case that produces the most lines and therefore the one that clips.
-    demo_snapshot = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "docs",
-        "assets",
-        "dashboard-demo-snapshot.json",
-    )
+    # The documentation fixture: a fully populated host, which is the case that
+    # produces the most lines and therefore the one that clips. Generated, because
+    # the file under docs/assets is a driver byproduct and absent on a fresh checkout.
+    demo_snapshot = demo_snapshot_path()
 
     for view, panes in grid_panes.items():
         app = create_app(
@@ -1036,18 +1034,36 @@ def test_a_narrow_window_drops_the_card_prose_and_keeps_the_card(tmp_path):
     asyncio.run(wide())
 
 
-def demo_snapshot_path():
-    """The shipped documentation fixture: a fully populated realm host.
+_DEMO_SNAPSHOT: list[str] = []
 
-    It is the case that produces the most lines per card, and therefore the case
-    in which a card runs out of rows first.
+
+def demo_snapshot_path():
+    """The documentation fixture: a fully populated realm host, generated here.
+
+    It is the case that produces the most lines per card, and therefore the case in
+    which a card runs out of rows first. It is **generated** because
+    `docs/assets/dashboard-demo-snapshot.json` is gitignored — the docs driver writes
+    it — and a test that opens that path on a fresh checkout gets nothing. The
+    panel-geometry test did exactly that on CI, where every card of an empty snapshot
+    fits its cell trivially: it passed while measuring no card at all. Building the
+    fixture from the same module the driver uses keeps one source of truth, and the
+    assertions below make a thin fixture a failure instead of a vacuous pass.
     """
-    return os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "docs",
-        "assets",
-        "dashboard-demo-snapshot.json",
-    )
+    if not _DEMO_SNAPSHOT:
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        sys.path.insert(0, os.path.join(root, "docs", "assets"))
+        import generate_dashboard_demo
+
+        snapshot = generate_dashboard_demo.build_snapshot()
+        assert snapshot["server"]["ok"], "the demo fixture must describe a reachable host, or an empty card proves nothing"
+        assert snapshot["players"], "the demo fixture must carry players, or an empty card proves nothing"
+        assert snapshot["server"]["data"]["services"], "the demo fixture must carry services, or an empty card proves nothing"
+        directory = tempfile.mkdtemp(prefix="vm-dashboard-demo-")
+        path = os.path.join(directory, "dashboard-demo-snapshot.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(snapshot, handle, indent=2)
+        _DEMO_SNAPSHOT.append(path)
+    return _DEMO_SNAPSHOT[0]
 
 
 def demo_snapshot():
