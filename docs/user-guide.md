@@ -131,6 +131,8 @@ sudo /opt/mangos/manager/bin/vmangos-manager dashboard --refresh 2
 
 The number keys are the fast path, but not the only one: you can click a module row in the left sidebar, or press `ctrl+p` to open the command palette and search for a view or action by name. Action outcomes (successes and failures) also surface as toast notifications in the corner, and the auto-refresh pauses whenever a dialog is open so tables don't shift under you.
 
+Below the module list the sidebar carries the live **Realm Pulse** — last refresh, players online, stored backups, and the two service states — and the **Console Target** block: the install root, the config file with its validation state, the systemd units, and the git state of the Manager clone. Every action in this console runs against whatever that config names, so the console says which one that is instead of making you open Config first. In a window shorter than 46 rows, Overview and Monitor switch to a scrolling layout; the panels keep their natural height rather than being squeezed into a frame too small to show anything.
+
 ---
 
 ## 📸 Dashboard Tour
