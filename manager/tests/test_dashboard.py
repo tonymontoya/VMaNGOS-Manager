@@ -32,6 +32,7 @@ from dashboard import (
     empty_snapshot,
     format_flag,
     palette_color,
+    iso_to_clock,
     render_action_banner,
     strip_markup,
     render_meter,
@@ -455,8 +456,12 @@ def test_refresh_failure_notifies_once_per_outage(tmp_path):
 
     async def scenario():
         async with app.run_test(notifications=True) as pilot:
+            # The banner always carries the snapshot's captured clock, but only
+            # when there is room does it also carry the date: an 80-column
+            # headless run is a narrow window, so the readiness gate is the clock.
+            captured_clock = iso_to_clock("2026-08-31T00:00:00+00:00")
             await wait_for(
-                lambda: "2026-08-31" in str(app.query_one("#action-banner").renderable),
+                lambda: captured_clock in str(app.query_one("#action-banner").renderable),
                 message="fixture snapshot to load",
             )
             os.remove(fixture)
