@@ -569,6 +569,49 @@ def test_refresh_pauses_while_modal_open(tmp_path):
     asyncio.run(scenario())
 
 
+def test_an_action_result_posted_under_a_dialog_reaches_the_banner_when_it_closes(tmp_path):
+    """Who restates the chrome when a dialog closes, and what breaks if nobody does.
+
+    `refresh_chrome` returns early while a dialog covers the base screen, so an
+    action result that lands under the dialog is recorded on the app and not drawn.
+    What is pinned here is the observable behaviour, not the mechanism: a result
+    reported while a dialog was up is on the banner once the dialog is gone. The
+    mechanism turned out not to be the one assumed — deleting the `refresh_chrome()`
+    that ends `repaint()` left this test **green**, so the restatement comes from a
+    later pass (the dismissal's own `set_action_result` ends in `refresh_chrome()`,
+    `lib/dashboard.py:5944`). A fix added on the assumption that the panes' deferral
+    had to restate the chrome was therefore redundant and reverted; what is left is
+    the staleness window the test describes, and a test that fails if that window
+    ever becomes permanent.
+    """
+    app, log_path = build_app(tmp_path, initial_view=MONITOR_KEYS_VIEW)
+
+    async def scenario():
+        # Wide on purpose: in a narrow window the banner reports the last action by its
+        # tone label only, and the prose this test watches is not rendered at all.
+        async with app.run_test(size=(140, 52)) as pilot:
+            await wait_for(lambda: app.snapshot_loaded, message="first snapshot to load")
+            assert not app.narrow_viewport, "the wide banner is the one that carries the message"
+            await pilot.press("x")  # stop realm -> confirm dialog
+            await pilot.pause()
+            assert app.screen.__class__.__name__ == "ConfirmScreen", "a dialog must cover the base screen"
+
+            base = app.screen_stack[0]
+            banner = base.query_one("#action-banner", Static)
+            app.set_action_result("backup queued for the change window", tone="success")
+            assert "backup queued" not in str(banner.renderable), "a covered banner is not painted"
+
+            await pilot.press("escape")
+            await wait_for(lambda: not app.modal_open(), message="dialog to close")
+            await asyncio.sleep(0.5)  # the deferred restatement is on a timer
+            await pilot.pause()
+            assert "backup queued" in str(banner.renderable), (
+                "the restated banner must carry the action the worker reported"
+            )
+
+    asyncio.run(scenario())
+
+
 def test_a_refresh_that_lands_under_a_modal_is_repainted_when_it_closes(tmp_path):
     """A snapshot arriving while a dialog is open must not query the dialog.
 
