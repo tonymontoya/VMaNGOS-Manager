@@ -1,1 +1,17 @@
-textual>=0.58,<1.0
+# The TUI framework the dashboard runs on, pinned to the exact version everything here has
+# actually been tested against.
+#
+# This file is what `vmangos-manager dashboard --bootstrap`, the first-run wizard, and CI feed to
+# `pip install -r` on a production host, which makes it a production dependency rather than a
+# development one. The previous range `>=0.58,<1.0` resolved to 0.89.1 everywhere it was installed
+# — GitHub's ubuntu-22.04/24.04/26.04 matrices and this workstation all received 0.89.1 — so the
+# pin changes nothing about what runs today. It closes a hazard instead: upstream Textual is at
+# 8.2.8, so the next 0.9x release would arrive on `bds`, unannounced and at whatever moment someone
+# bootstraps a host, carrying changes that have never been through the 82 pilot tests.
+#
+# 0.89.1 (2024-12-05) is the newest release below 1.0 and is what `manager/tests/test_dashboard.py`
+# passes against, locally and on Ubuntu 26.04 / Python 3.14.4. Raising it is a deliberate change:
+# run the pilot suite first, and expect the DataTable internals this dashboard depends on
+# (`column.width` versus `content_width`, `virtual_size` staleness, silent cell clipping) to be the
+# things that move.
+textual==0.89.1
