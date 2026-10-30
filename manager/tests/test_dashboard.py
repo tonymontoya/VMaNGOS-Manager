@@ -724,6 +724,62 @@ def test_dashboard_panels_fit_their_grid_cells(tmp_path):
         asyncio.run(scenario())
 
 
+def test_no_view_cuts_the_end_of_a_reading_pane_at_any_size(tmp_path):
+    """A card that ends mid-sentence is a card the operator reads wrong.
+
+    The Overview was guarded; the reading views were not, and at 140x52 -- a
+    comfortable window, not a cramped one -- the Backups card wanted 37 display rows
+    inside a 30-row box. What disappeared was the end: which databases the archive
+    covers, who made it, and the one line that says live restore is CLI-only. The Ops
+    cards wanted 14 and 22 rows in boxes of 9, so "DB impact and the planned steps"
+    was a subtitle over a card that showed neither.
+
+    So prose panes take their natural height and the view scrolls. A table is allowed
+    to be taller than the window because it scrolls itself; a wall of text is not,
+    because nothing scrolls it for the operator.
+    """
+    from dashboard import strip_markup
+
+    reading_views = ("accounts", "backups", "config", "logs", "operations")
+    demo = demo_snapshot_path()
+
+    for view in reading_views:
+        for cols, lines in ((140, 52), (100, 36), (100, 24), (80, 24)):
+            app = create_app(
+                manager_bin=write_recorder_stub(tmp_path)[0],
+                config_path="/dev/null",
+                refresh=30,
+                theme="dark",
+                initial_view=view,
+                screenshot_path=None,
+                snapshot_file=demo,
+            )
+
+            async def scenario(app=app, view=view, cols=cols, lines=lines):
+                async with app.run_test(size=(cols, lines)) as pilot:
+                    await pilot.pause()
+                    await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                    body = app.query_one(f"#{view}-view")
+                    assert body.styles.overflow_y == "auto", (
+                        f"{view} at {cols}x{lines} cannot scroll, so anything taller than the "
+                        "window is not cut -- it is gone"
+                    )
+                    for widget in app.query(f"#{view}-view Static"):
+                        text = strip_markup(widget.renderable)
+                        needed = sum(
+                            len(textwrap.wrap(line, widget.size.width)) or 1
+                            for line in text.splitlines()
+                        )
+                        assert needed <= widget.size.height, (
+                            f"{view} at {cols}x{lines} draws {needed} rows of text in "
+                            f"{widget.id or type(widget).__name__}, which is {widget.size.height} "
+                            f"rows tall; the last {needed - widget.size.height} are invisible:\n"
+                            + "\n".join(text.splitlines())
+                        )
+
+            asyncio.run(scenario())
+
+
 def test_sidebar_names_the_release_it_drives(tmp_path):
     """A console that cannot name its build cannot be trusted to audit one."""
     stub, _log_path = write_version_stub(tmp_path)

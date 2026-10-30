@@ -5612,7 +5612,8 @@ DASHBOARD_CSS = """
 
         .table-detail-body {
             layout: horizontal;
-            height: 1fr;
+            height: auto;
+            min-height: 10;
             margin-top: 1;
         }
 
@@ -5663,7 +5664,7 @@ DASHBOARD_CSS = """
 
         #accounts-layout,
         #backups-layout {
-            height: 1fr;
+            height: auto;
         }
 
         #accounts-layout {
@@ -5672,30 +5673,33 @@ DASHBOARD_CSS = """
 
         #accounts-table-layout {
             width: 1fr;
-            height: 1fr;
+            height: auto;
+            min-height: 12;
             margin-right: 1;
         }
 
         #account-details {
             width: 40;
             min-width: 36;
-            height: 1fr;
+            height: auto;
+            min-height: 9;
         }
 
         #operations-layout {
-            height: 1fr;
+            height: auto;
             layout: vertical;
         }
 
         #operations-summary {
-            height: 13;
+            height: auto;
             margin-bottom: 1;
         }
 
         #logs-pane,
         #update-pane {
             width: 1fr;
-            height: 1fr;
+            height: auto;
+            min-height: 9;
         }
 
         #logs-pane {
@@ -5704,18 +5708,26 @@ DASHBOARD_CSS = """
 
         #schedules-table {
             height: 1fr;
+            min-height: 8;
+        }
+
+        #schedule-details {
+            height: auto;
+            min-height: 9;
         }
 
         #backup-summary {
             width: 48;
             min-width: 46;
-            height: 1fr;
+            height: auto;
+            min-height: 12;
             margin-right: 1;
         }
 
         #backups-table-layout {
             width: 1fr;
-            height: 1fr;
+            height: auto;
+            min-height: 12;
         }
 
         DataTable {
@@ -5768,16 +5780,18 @@ DASHBOARD_CSS = """
         }
 
         #config-pane {
-            height: 1fr;
+            height: auto;
+            min-height: 12;
         }
 
         #realm-logs-layout {
-            height: 1fr;
+            height: auto;
             layout: vertical;
         }
 
         #realm-logs-summary {
-            height: 12;
+            height: auto;
+            min-height: 9;
             margin-bottom: 1;
         }
 
@@ -5787,7 +5801,8 @@ DASHBOARD_CSS = """
 
         #realm-logs-table-layout {
             width: 1fr;
-            height: 1fr;
+            height: auto;
+            min-height: 12;
             margin-right: 1;
         }
 
@@ -5799,7 +5814,25 @@ DASHBOARD_CSS = """
         #realm-log-details {
             width: 42;
             min-width: 36;
-            height: 1fr;
+            height: auto;
+            min-height: 9;
+        }
+
+        /* Reading panes are prose the operator has to be able to finish, so they
+           take their natural height at every width and the view scrolls instead of
+           cutting them. This is not a small-window rule: measured at 140x52, which is
+           a comfortable window, the Backups card wanted 37 display rows in a 30-row
+           box, and what fell off the end was the databases the archive covers, who
+           made it, and the one line telling you live restore is CLI-only. The Ops
+           cards wanted 14 and 22 rows in boxes of 9. Tables are the exception — a
+           table that is taller than the window can scroll itself — so they keep a
+           floor rather than a natural height. */
+        #accounts-view,
+        #backups-view,
+        #logs-view,
+        #config-view,
+        #operations-view {
+            overflow-y: auto;
         }
 
         CommandFormScreen {
