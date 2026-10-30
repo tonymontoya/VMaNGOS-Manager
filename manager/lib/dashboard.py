@@ -1035,8 +1035,36 @@ COLUMN_CELL_PADDING = 1
 # How many layout passes a roster will wait for a frame to be measurable. An unmeasured
 # frame costs a comparison, not a redraw, so waiting is cheap; the bound only stops a view
 # that is genuinely hidden from asking forever.
-MAX_WIDTH_PASSES = 24
-# How long to wait before asking again when the frame could not be measured at all.
+MAX_WIDTH_PASSES = 40
+# Raised from 24 to 40 on 2026-10-30 for the same reason `MAX_VIEW_SETTLE_PASSES` exists:
+# ubuntu-22.04 (run 41079089969, and again at `56584ef`) left the Operations roster at
+# `table=57x4 rows=2 drawn=59 max_scroll_x=2` and a pilot polled thirty seconds for a
+# scrollbar that the 24-pass budget had already given up correcting. 24 passes at 0.2 s
+# is 4.8 seconds on a loaded runner; a hidden view giving up eight seconds after the
+# switch is a worse outcome than one giving up after five, and the cost of the extra
+# patience is one timer per pass.
+#
+# An attempt to fix this by planning against Textual's reported overflow (`max_scroll_x`
+# as a learned gutter correction) was written, run, and reverted the same evening: with
+# the correction in place the guard `content_size.width - cost != available` can never
+# fire, retries stop, and a local run turned `logs` from green to
+# `table=56x7 rows=6 drawn=75 max_scroll_x=21`. Reverted rather than shipped; the real
+# shape of the defect is a card that measures one width on the pass the plan is made and
+# another after the layout settles, which the retry chain is meant to catch.
+#
+# Raised from 24 to 40 on 2026-10-30 for the same reason `MAX_VIEW_SETTLE_PASSES` exists:
+# ubuntu-22.04 (run 41079089969, and again at `56584ef`) left the Operations roster at
+# `table=57x4 rows=2 drawn=59 max_scroll_x=2` and a pilot polled thirty seconds for a
+# scrollbar that the 24-pass budget had already given up correcting. 24 passes at 0.2 s
+# is 4.8 seconds on a loaded runner; the extra patience costs one timer per pass.
+#
+# An attempt to fix this by planning against Textual's reported overflow (`max_scroll_x`
+# as a learned gutter correction) was written, run, and reverted the same evening: with
+# the correction in place the moved-frame guard can never fire, retries stop, and a local
+# run turned `logs` from green to `table=56x7 rows=6 drawn=75 max_scroll_x=21`. Reverted
+# rather than shipped. The real shape of the defect is a card that measures one width on
+# the pass the plan is made and another after the layout settles, which the retry chain
+# exists to catch — on a loaded runner it ran out of passes first.
 # Shared by the two places that wait on a layout that has not happened yet: the column
 # budget, and a view opening in front of the operator.
 LAYOUT_RETRY_DELAY = 0.2
