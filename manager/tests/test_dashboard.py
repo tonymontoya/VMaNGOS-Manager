@@ -9,6 +9,7 @@ Seams (agreed):
 """
 
 import asyncio
+import inspect
 import json
 import os
 import pathlib
@@ -2679,6 +2680,23 @@ def test_the_scheduled_tasks_card_holds_what_it_drew_a_border_around(tmp_path):
                 panel = app.query_one("#schedules-layout")
                 title = panel.query(".table-detail-title").first()
                 details = app.query_one("#schedule-details")
+                if same_bottom_edge:
+                    # The agreement between the two children of this card is what is being
+                    # measured, and a details pane that has just been written has not been laid
+                    # out yet when the roster's frame is first taken — the pane's `content_size`
+                    # still describes the previous selection, so the roster is sized against the
+                    # old text and the two bottom edges only agree on the layout pass after it.
+                    # Every other geometry test here waits for the state it measures; this one
+                    # asserted whatever a single pause happened to catch, which is how it was
+                    # green on a workstation and red on ubuntu-22.04 (run 41079089969). The
+                    # assertion below is unchanged: 140 columns, one card, one bottom edge.
+                    await wait_for(
+                        lambda: table.content_size.height >= details.content_size.height,
+                        message=(
+                            "the roster and the pane beside it to agree on one bottom edge "
+                            f"({table.content_size.height} vs {details.content_size.height})"
+                        ),
+                    )
                 assert panel.content_size.height > 0, (
                     f"{cols}x{lines}: the card has no height to draw"
                 )
@@ -3036,7 +3054,17 @@ def test_a_roster_waits_for_a_frame_instead_of_guessing_twice(tmp_path):
             assert [column.width for column in table.columns.values()] != widths, (
                 "the budget never re-planned once the frame was measurable"
             )
-            assert table.max_scroll_x == 0, "the roster scrolls sideways after re-planning"
+            # The re-plan above was measured against the frame the table reported the moment
+            # it came back on screen, and a table that has just been shown has not been
+            # laid out yet: the frame it settles on is a few columns narrower, which is what
+            # `max_scroll_x` measures. Waiting for the chain rather than asserting after one
+            # pass is the point of the change this test guards — the re-ask now happens on a
+            # timer, so it arrives whether or not anything refreshes. What is not weakened is
+            # the headline above: the chain reached four passes with no refresh in sight.
+            await wait_for(
+                lambda: table.max_scroll_x == 0,
+                message="the re-plan to fit the frame that arrived after it",
+            )
 
     asyncio.run(scenario())
 
@@ -3244,3 +3272,27 @@ def test_a_roster_keeps_its_rows_when_the_window_is_narrower_than_they_are(tmp_p
                 )
 
     asyncio.run(scenario())
+
+
+def test_a_layout_retry_is_always_armed_on_a_timer():
+    """Two CI runs went red on the same arm mechanism, so the rule is now a test.
+
+    `call_after_refresh` runs on the next `RefreshComplete`, and a layout that has already
+    settled sends no refresh. Run 41040450893 (ubuntu-26.04) lost a Backups roster that way:
+    the queued callback sat there and the roster kept the natural widths its cells asked for.
+    Run 41079089969 (ubuntu-22.04) lost an Operations roster the same way — `table=57x4
+    rows=2 drawn=59 max_scroll_x=2`, polled for 30 s by a test waiting for a scrollbar to
+    vanish — because the *moved-frame* re-plan was still armed that way. Both tests run with
+    the refresh interval turned off, which is exactly what a settled dashboard looks like:
+    the thing being waited for is the thing that never arrives.
+
+    Every retry in this class is a `set_timer` with a generation budget and one callback per
+    pass (rule 38). This reads the class source because the failure is not in the geometry,
+    it is in which of two near-identical lines an author reaches for, and it happens on a
+    machine nobody is watching.
+    """
+    source = inspect.getsource(SelectionTable)
+    armed = [line.strip() for line in source.splitlines() if ".call_after_refresh(" in line]
+    assert not armed, (
+        "a layout retry is waiting for a refresh that a settled layout does not send: " + "; ".join(armed)
+    )

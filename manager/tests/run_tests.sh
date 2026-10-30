@@ -2441,6 +2441,11 @@ class FakeTable:
         self.clears = 0
         self.rows = []
         self.cursor_moves = 0
+        # A real DataTable always answers `cursor_row`, and a redraw reads it to decide
+        # whether it is allowed to move the operator's cursor; a stub that does not answer
+        # it makes the seam look optional. `move_cursor` updates it here for the same
+        # reason: the real widget remembers where it put the cursor.
+        self.cursor_row = 0
         # A DataTable that has never been mounted reports no parent, and the
         # controller sizes its frame from the panel it sits in: the stub has to
         # carry that fact or the seam is measured against something no real
@@ -2456,6 +2461,8 @@ class FakeTable:
 
     def move_cursor(self, **kwargs):
         self.cursor_moves += 1
+        if "row" in kwargs:
+            self.cursor_row = kwargs["row"]
 
 
 entries = [

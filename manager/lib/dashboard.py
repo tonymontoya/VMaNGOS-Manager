@@ -1172,6 +1172,9 @@ class SelectionTable:
         # the roster beside it stays taller, so an unbounded retry is a callback every
         # `LAYOUT_RETRY_DELAY` for the life of the session rather than a wait.
         self._height_passes = 0
+        # Generations of "the frame moved after I measured it". `_width_passes` cannot
+        # count them: every successful plan zeroes that counter.
+        self._moved_passes = 0
 
     def set_filter(self, text: str) -> None:
         normalized = text.strip().lower()
@@ -1239,7 +1242,10 @@ class SelectionTable:
                 (
                     sibling.content_size.height
                     for sibling in panel.children
-                    if sibling is not self.table and sibling.display != "none"
+                    # `display` is a bool in Textual, not a style string: `!= "none"` is
+                    # true for every hidden widget, and a details pane that was not on
+                    # screen was being measured as the tallest thing beside the roster.
+                    if sibling is not self.table and sibling.display
                 ),
                 default=0,
             )
@@ -1256,9 +1262,19 @@ class SelectionTable:
             # eight-row roster got the long-roster posture: zero rows is always
             # fewer than the rows it needs, so the table filled a window that was
             # not on screen. Ask again once there is a frame to measure.
-            if not self._height_retry_pending:
+            if self._height_passes < MAX_WIDTH_PASSES and not self._height_retry_pending:
                 self._height_retry_pending = True
-                self.table.call_after_refresh(lambda: self.retry_frame_height(row_count))
+                self._height_passes += 1
+                # A timer, not an after-refresh callback: `call_after_refresh` waits for a
+                # `RefreshComplete` that a layout which has already settled does not send.
+                # Run 41040450893 went red on ubuntu-26.04 that way, run 41079089969 on
+                # ubuntu-22.04 the same way, and this was the last layout retry in the class
+                # still armed so. Bounded, because a hidden view never produces a frame to
+                # measure and an unbounded retry is a callback every `LAYOUT_RETRY_DELAY`
+                # for the life of the session.
+                self.table.set_timer(
+                    LAYOUT_RETRY_DELAY, lambda: self.retry_frame_height(row_count)
+                )
             return
         # A frame is never taller than its rows, and when its rows do not fit the
         # window it is never taller than the window. A fraction used to be the
@@ -1396,13 +1412,22 @@ class SelectionTable:
             if room < naturals[index]:
                 self._capped[index] = room
         self.apply_sort_indicator()
-        if self.table.content_size.width != available and self._width_passes < 3:
+        if self.table.content_size.width != available:
             # The frame the plan was measured against is gone: the density classes, the
             # chrome, or a scrollbar appearing beside the roster moves it after this
-            # method has run. Spend the budget again against the frame that is actually
-            # there, three passes at most so a widget that refuses to settle cannot spin.
-            self._width_passes += 1
-            self.table.call_after_refresh(self.retry_column_budget, cells)
+            # method has run, and the table is left holding a plan wider than the frame
+            # around it. On ubuntu-22.04 (run 41079089969) that left a pilot test polling
+            # for thirty seconds against `table=57x4 rows=2 drawn=59 max_scroll_x=2`. The
+            # ask is a timer for the same reason as the height wait above, and the budget
+            # counts generations in `_moved_passes` rather than the `_width_passes` a few
+            # lines up: that counter is zeroed by every successful plan, so a bound written
+            # against it (`< 3`) bound nothing at all.
+            if self._moved_passes < MAX_WIDTH_PASSES and not self._width_retry_pending:
+                self._moved_passes += 1
+                self._width_retry_pending = True
+                self.table.set_timer(
+                    LAYOUT_RETRY_DELAY, lambda: self.retry_column_budget(cells)
+                )
 
     def _owned_by_a_modal(self) -> bool:
         """Is a dialog on top of the screen these tables live on?
@@ -1444,12 +1469,22 @@ class SelectionTable:
         """Redraw the cached rows against the current column set, cursor where it was."""
         if not self._rows_cache:
             return
+        held_cursor = self.table.cursor_row
         selected_index = 0
         self.table.clear(columns=False)
         for index, (key_value, row_values) in enumerate(self._rows_cache):
             if self._current_key and key_value == self._current_key:
                 selected_index = index
             self.table.add_row(*self.project_row(row_values), key=key_value)
+        if held_cursor is not None and 0 <= held_cursor < len(self._rows_cache):
+            # "Cursor where it was", as this method has always promised, and did not do:
+            # it moved the cursor to `_current_key`, the row the app last heard about. The
+            # arrow key moves the widget cursor immediately and the selection that follows
+            # it is posted as an event, so on a busy machine `_current_key` is one row
+            # behind and a redraw here ate a keypress. Two pilot tests went red the moment
+            # the re-plan behind this call was given a mechanism that actually fires.
+            selected_index = held_cursor
+            self._current_key = self._rows_cache[held_cursor][0]
         if self._rows_cache and self.table.cursor_type == "row":
             self.table.move_cursor(row=selected_index)
         self._rendered = self._rows_cache
@@ -1522,6 +1557,10 @@ class SelectionTable:
                 )
             )
         rendered = tuple((key, cells) for key, cells, _entry in rows)
+        # What the table was showing before this redraw, so a redraw that changed only the
+        # column plan can be told apart from one that changed the rows: the first holds the
+        # cursor, the second re-centres on the selection.
+        previous = self._rendered
         self._rows_cache = rendered
         self._current_key = current_key
         self.apply_frame_height(len(rendered))
@@ -1535,6 +1574,10 @@ class SelectionTable:
             selected = next((entry for _key, _cells, entry in rows if _key == current_key), None)
             return (current_key if selected is not None else "", selected)
 
+        same_rows = previous is not None and [
+            key for key, _cells in previous
+        ] == [key for key, _cells in rendered]
+        held_cursor = self.table.cursor_row
         self._rendered = rendered
         self.table.clear(columns=False)
 
@@ -1552,6 +1595,11 @@ class SelectionTable:
         if selected is None:
             selected_key = rendered[selected_index][0]
             selected = next((entry for _key, _cells, entry in rows if _key == selected_key), None)
+        if same_rows and held_cursor is not None and 0 <= held_cursor < len(rendered):
+            # A redraw costs a layout pass, not the operator's place in the list.
+            selected_index = held_cursor
+            held_key = rendered[held_cursor][0]
+            selected = next((entry for _key, _cells, entry in rows if _key == held_key), selected)
         self.table.move_cursor(row=selected_index, column=0, animate=False)
         return (key_fn(selected) if selected is not None else "", selected)
 
@@ -4767,6 +4815,36 @@ def create_app(
                     width=self.command_rail_width(),
                 )
             )
+            self.retarget_roster_frames()
+
+        def retarget_roster_frames(self) -> None:
+            """Measure the frame of every visible roster once this refresh is drawn.
+
+            A roster frame is the taller of its rows and the details pane beside it, and a
+            pane that has just been written has not been laid out yet: its `content_size`
+            still describes the previous selection. The decision taken inside a rebuild
+            therefore measures the old pane, which at 140x52 left a two-job Operations
+            roster 9 rows tall beside a 17-row pane — one card, two bottom edges. It cannot
+            be fixed by a retry inside `SelectionTable`, because the app does not promise a
+            refresh and a retry there would wait on a signal that may never arrive (rule
+            40); this is not a retry, it is one deferred measurement per refresh, and
+            `apply_frame_height` answers it by doing nothing once the height is agreed.
+            """
+            for controller in getattr(self, "selection_tables", {}).values():
+                # Two guards, both learned the hard way. The tables are not mounted until the
+                # first view is composed, and `refresh_chrome` runs before that: a query here
+                # raised AttributeError inside the refresh and the snapshot never loaded. And
+                # `table.display` is true for a roster on a view that is itself hidden — the
+                # hiding is done by the view — so the whole ancestry has to be checked, or
+                # every background roster reports a frame of zero rows and `apply_frame_height`
+                # spends its wait budget on a screen nobody is looking at.
+                if not controller._rendered:
+                    continue
+                if not all(node.display for node in controller.table.ancestors_with_self):
+                    continue
+                    self.call_after_refresh(
+                        controller.apply_frame_height, len(controller._rendered)
+                    )
 
         def command_rail_width(self) -> int:
             """How wide the rail paints, so its rows can be wrapped by the pair.
@@ -5166,6 +5244,7 @@ def create_app(
                 self.refresh_logs(self.snapshot.get("log_events", []))
             elif selection_key == "schedules":
                 self.refresh_schedules(self.snapshot.get("schedules", []))
+            self.retarget_roster_frames()
 
         def dispatch_dashboard_action(self, action_name: str, form_values: dict[str, Any] | None = None) -> None:
             request = build_dashboard_action_request(
