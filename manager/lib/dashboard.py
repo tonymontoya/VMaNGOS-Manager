@@ -2976,7 +2976,7 @@ def render_alerts_panel(snapshot: dict[str, Any], narrow: bool = False) -> str:
     lines = [
         f"[bold {ACCENT_GOLD}]Alerts and Events[/]",
         *([] if narrow else [f"[{ACCENT_MUTED}]Anything currently wrong, plus recent service events.[/]"]),
-        "",
+        *([] if narrow else [""]),
     ]
 
     if not server["ok"]:
@@ -2993,9 +2993,16 @@ def render_alerts_panel(snapshot: dict[str, Any], narrow: bool = False) -> str:
     recent_events = alerts.get("recent_events", [])
 
     lines.append(f"[{ACCENT_MUTED}]Overall[/]      {format_state(alerts.get('status', 'healthy'))}  [{ACCENT_MUTED}]active[/] {len(active_alerts)}")
-    lines.append(f"[bold {ACCENT_SKY}]Active Alerts[/]")
 
+    # Rows are what this card is made of, and two of them used to be spent on
+    # nothing: a heading with only its own negation under it ("Active Alerts" over
+    # "No active alerts" — three lines to say the state line already said), and a
+    # blank row between blocks the coloured headings already separate. A heading is
+    # printed when it has content under it, and the only blank left is the air under
+    # the header in a window wide enough to afford it. What the card now spends its
+    # rows on is the state line, the alerts, and the events.
     if active_alerts:
+        lines.append(f"[bold {ACCENT_SKY}]Active Alerts[/]")
         for alert in active_alerts[:3]:
             lines.append(
                 f"{format_state(alert.get('severity', 'warning'))} {escape_markup(alert.get('source', 'unknown'))}: {escape_markup(truncate_text(alert.get('message', ''), 64))}"
@@ -3003,13 +3010,14 @@ def render_alerts_panel(snapshot: dict[str, Any], narrow: bool = False) -> str:
     else:
         lines.append(f"[bold {palette_color(STATUS_COLORS['healthy'])}]No active alerts[/]")
 
-    lines.append("")
-    lines.append(f"[bold {ACCENT_SKY}]Recent Events[/]")
     if recent_events:
+        if active_alerts and not narrow:
+            lines.append("")
+        lines.append(f"[bold {ACCENT_SKY}]Recent Events[/]")
         for event in recent_events[:4]:
             lines.append(f"{escape_markup(truncate_text(event.get('timestamp', ''), 19))} {escape_markup(event.get('service', 'unknown'))}: {escape_markup(truncate_text(event.get('message', ''), 48))}")
     else:
-        lines.append("No recent events in the last 30 minutes.")
+        lines.append(f"[{ACCENT_MUTED}]No recent events in the last 30 minutes.[/]")
 
     return "\n".join(lines)
 

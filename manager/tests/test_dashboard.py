@@ -1254,6 +1254,47 @@ def test_a_trend_sentence_says_how_far_the_metric_moved():
     )
 
 
+def test_the_alerts_card_says_none_without_a_heading_for_it():
+    """A heading over its own negation is two rows saying what one already said.
+
+    Measured on the demo snapshot -- nothing wrong, two events -- the card used 14
+    rows at 140x52 and 11 at 100x36, and three of them were a blank row, an
+    `Active Alerts` heading, and `No active alerts` sitting under it, while the state
+    line two rows up had already printed `healthy  active 0`. Headings now appear
+    only when something is under them, and a blank row is spent only between two
+    populated blocks in a window wide enough to afford air.
+    """
+    import copy
+
+    from dashboard import render_alerts_panel, strip_markup
+
+    snapshot = demo_snapshot()
+    quiet = strip_markup(render_alerts_panel(snapshot, narrow=True)).splitlines()
+    assert "Active Alerts" not in quiet, f"an empty section still has a heading:\n{quiet}"
+    assert "No active alerts" in quiet, "the empty state has to stay stated"
+    assert "" not in quiet, f"a narrow card is still spending rows on air:\n{quiet}"
+
+    empty = copy.deepcopy(snapshot)
+    empty["server"]["data"]["alerts"]["recent_events"] = []
+    nothing = strip_markup(render_alerts_panel(empty, narrow=True)).splitlines()
+    assert "Recent Events" not in nothing, f"an empty section still has a heading:\n{nothing}"
+    assert any("No recent events" in line for line in nothing), "the empty state has to stay stated"
+
+    loud = copy.deepcopy(snapshot)
+    loud["server"]["data"]["alerts"]["status"] = "critical"
+    loud["server"]["data"]["alerts"]["active"] = [
+        {"severity": "warning", "source": "world", "message": "High latency detected"},
+    ]
+    wide = strip_markup(render_alerts_panel(loud)).splitlines()
+    assert "Active Alerts" in wide and "Recent Events" in wide, (
+        f"a populated section has to keep its heading:\n{wide}"
+    )
+    assert wide.count("") == 2, (
+        "wide air belongs under the header and between two populated blocks, nowhere else:\n"
+        + "\n".join(wide)
+    )
+
+
 def test_a_short_terminal_keeps_the_console_target_inside_the_sidebar(tmp_path):
     """The rail beside the buttons has to end inside the window, not past it.
 
