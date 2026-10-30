@@ -3294,7 +3294,21 @@ def test_a_view_opens_on_the_card_it_is_about(tmp_path):
             lambda: app.query_one(f"#{view_name}-view .table-panel").region.height > 0,
             message=f"the {view_name} card to be laid out",
         )
-        await pilot.pause(0.5)
+        # The aim is a later layout pass than the geometry, on the settle chain's own
+        # 0.2 s timer. This used to be `pilot.pause(0.5)`, which is a bet that the chain
+        # has had at most a couple of passes; on a loaded ubuntu-22.04 runner the bet lost
+        # (`dc6f135`: the card was drawn at y=42 in a screen ending at 28 — an aimed-at
+        # nothing view). Wait for the settled state, and if it never arrives, say which
+        # pass of the chain the app died on, because "late" and "never" need different
+        # fixes (standing rules 55 and 53).
+        await wait_for(
+            lambda: app.query_one(f"#{view_name}-view .table-panel").region.y
+            < app.query_one(f"#{view_name}-view").region.bottom,
+            message=(
+                f"the {view_name} view to aim at its roster card "
+                f"(settling reached pass {app._view_settle_attempts})"
+            ),
+        )
 
     async def check_opened(app, pilot, view_name, opened_by):
         view_region = app.query_one(f"#{view_name}-view").region

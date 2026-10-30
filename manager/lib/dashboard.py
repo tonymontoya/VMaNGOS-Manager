@@ -1048,6 +1048,16 @@ LAYOUT_RETRY_DELAY = 0.2
 # same delay is eight seconds; past that a card can be stale at most until the next
 # refresh, which re-arms this path in any case.
 DEFERRED_REPAINT_DELAY = LAYOUT_RETRY_DELAY
+#: Passes a view will wait for its own layout before it stops trying to open on its
+#: roster card. `MAX_WIDTH_PASSES` (24) is the budget for a *column* decision, where an
+#: extra pass is a redraw; a view opening mid-screen is worse than a slow one, and the
+#: cost of waiting is one timer. 40 passes at 0.2 s is eight seconds — the same bound the
+#: deferred repaint already pays, for the same reason: a hidden view's first frame is not
+#: measurable, and on a loaded CI runner it arrived later than the 24 passes allowed
+#: (`test_a_view_opens_on_the_card_it_is_about` red on ubuntu-22.04 at `dc6f135`, green
+#: on 24.04 and 26.04, and green in a clean 22.04 container at Python 3.10 — a loaded
+#: runner, not an OS).
+MAX_VIEW_SETTLE_PASSES = 40
 # How many times the service card will ask for the layout before it accepts that the
 # pane has no width to measure. Bounded for the reason `retry_column_budget` states: an
 # unbounded retry is a callback every `LAYOUT_RETRY_DELAY` for the life of the session.
@@ -4505,6 +4515,7 @@ def create_app(
             self.refresh_pending = False
             self.repaint_pending = False
             self.service_remeasure_passes = 0
+            self._view_settle_attempts = 0
             self.refresh_force_full = False
             self.last_refresh_failed = False
             self.snapshot_loaded = False
@@ -4804,6 +4815,10 @@ def create_app(
                 return None
 
         def arm_view_settle(self, attempt: int) -> None:
+            # The attempt count is kept on the app so a pilot that fails can say which
+            # pass it died on instead of describing the geometry and leaving the reader
+            # to guess whether the aim was late or never came.
+            self._view_settle_attempts = attempt + 1
             # One callback per pass, on a timer. Nothing obliges a refresh at the moment
             # a layout is needed — that is what the v0.7.17 CI red taught — so the timer
             # is the mechanism; an after-refresh callback armed beside it doubles the
@@ -4825,7 +4840,10 @@ def create_app(
                 # The operator moved on while the layout was settling.
                 return
             self._view_settling = False
-            if attempt >= MAX_WIDTH_PASSES:
+            if attempt >= MAX_VIEW_SETTLE_PASSES:
+                # The budget ran out before the frame was measurable. This is the one
+                # silent exit in this path, so it is the one that carries a counter a
+                # test can read: `self._view_settle_attempts` sits at the bound.
                 return
             if self.modal_open():
                 # A dialog covers the base screen, and a covered screen does not answer
