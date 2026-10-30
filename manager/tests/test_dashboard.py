@@ -1776,6 +1776,55 @@ def test_a_short_narrow_window_shows_three_of_the_four_cards(tmp_path):
         asyncio.run(scenario())
 
 
+def test_the_target_row_fits_the_card_even_when_the_install_root_is_long(tmp_path):
+    """A long `install_root` used to draw a line past the edge of its own card.
+
+    Measured against the pure renderer with the demo fixture's services (`auth, world`)
+    and a 59-character install root — a real shape on this host, where deploys are
+    named per realm and date — the Target row is 86 columns: `Target` (6) + two spaces +
+    the root + two spaces + `units auth, world` (17). The Overview hands this card 79
+    columns at a 122-column window and 54 at 158, so at both sizes the row ran off the
+    card and Textual clipped the end of it. The clipped end is where the service names
+    live, and the surviving part is the `/opt/` prefix every deploy shares, which is
+    precisely backwards: the line kept the useless half.
+
+    The row is now cut to the columns it was given, and cut from the middle: the last
+    path component is what tells an operator which deploy this is, so it survives and
+    the shared prefix is what shortens.
+    """
+    long_root = "/opt/mangos-sulfuras-classic-2026-10-30-services-world-auth"
+    snapshot = demo_snapshot()
+    snapshot["config_summary"]["install_root"] = long_root
+    assert len(long_root) == 59
+
+    for columns in (54, 79, 100):
+        panel = render_service_panel(snapshot, "overview", columns=columns)
+        target_lines = [line for line in panel.splitlines() if "Target" in strip_markup(line)]
+        assert target_lines, f"at {columns} columns the Target row vanished"
+        for line in target_lines:
+            assert len(strip_markup(line)) <= columns, (
+                f"at {columns} columns the Target row is {len(strip_markup(line))} wide: "
+                f"{strip_markup(line)!r}"
+            )
+        # What has to survive is the end: at 54 columns the row has 46 cells for the
+        # path and the last component of this root is 50 characters, so the shared head
+        # is what shortens and the tail — realm, date, unit — is what stays.
+        kept = strip_markup(target_lines[0])
+        shown = kept[len("Target  ") :].split("  units ")[0]
+        tail = long_root.rsplit("/", 1)[1]
+        assert shown.endswith(tail[-12:]), (
+            f"at {columns} columns the Target row lost the end of the path: {kept!r}"
+        )
+        if shown != long_root:
+            assert shown.startswith("…"), (
+                f"at {columns} columns the path was cut somewhere other than its head: {kept!r}"
+            )
+
+    # And the short root this fixture normally carries is untouched by the rule.
+    plain = render_service_panel(demo_snapshot(), "overview", columns=79)
+    assert "/opt/mangos  units auth, world" in strip_markup(plain)
+
+
 def test_the_service_card_shares_a_row_only_when_the_pane_can_pay_for_one(tmp_path):
     """Pairing is a property of the pane, not of the word "wide".
 

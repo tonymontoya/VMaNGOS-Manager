@@ -2856,6 +2856,25 @@ def pair_columns(blocks: tuple[tuple[str, ...], ...], budget: int) -> list[str] 
     return rows
 
 
+def clip_middle(text: str, budget: int) -> str:
+    """Shorten a path from the middle so the part that identifies it survives.
+
+    Trailing ellipsis is the wrong cut for a path: `/opt/mangos-sulfuras-classic-2026-…`
+    keeps the prefix every deploy on this host shares and throws away the realm and date
+    that distinguish it. The last component is what an operator is reading for, so the
+    head shortens and the tail stays. An ellipsis is one cell wide.
+    """
+    if budget <= 1 or len(text) <= budget:
+        return text
+    tail = text.rsplit("/", 1)[-1]
+    if len(tail) + 1 > budget:
+        # Not even `…tail` fits: keep the end of the tail, which is the part that
+        # differs between two deploys of the same realm.
+        return "…" + tail[-max(budget - 1, 1) :]
+    head_room = budget - len(tail) - 1
+    return text[:head_room] + "…" + tail
+
+
 def render_service_panel(
     snapshot: dict[str, Any],
     active_view: str,
@@ -2988,10 +3007,24 @@ def render_service_panel(
     install_root = str(summary.get("install_root", "") or "")
     if install_root:
         services = ", ".join(part for part in (summary.get("auth_service", ""), summary.get("world_service", "")) if part)
-        target_row = (
-            f"[bold {ACCENT_SKY}]Target[/]  {escape_markup(install_root)}"
-            + (f"  [{ACCENT_MUTED}]units[/] {escape_markup(services)}" if services else "")
+        prefix = f"[bold {ACCENT_SKY}]Target[/]  "
+        target_row = prefix + escape_markup(install_root) + (
+            f"  [{ACCENT_MUTED}]units[/] {escape_markup(services)}" if services else ""
         )
+        if columns and len(strip_markup(target_row)) > columns:
+            # A 59-character install root makes this row 86 columns, and this card owns
+            # 79 at a 122-column window and 54 at a 158 one, so the row ran off the card
+            # and Textual clipped its end — the end, where the service names live, while
+            # the surviving head was the `/opt/` prefix every deploy shares.
+            #
+            # Two reductions, cheapest first. The service names are on the process card
+            # and in the sidebar already; the path is nowhere else, so it goes last, and
+            # when it is shortened it loses its middle rather than its tail.
+            target_row = prefix + escape_markup(install_root)
+        if columns and len(strip_markup(target_row)) > columns:
+            room = columns - len(strip_markup(prefix))
+            if room > 0:
+                target_row = prefix + escape_markup(clip_middle(install_root, room))
         if not narrow and columns and lines and lines[-1].startswith("[bold "):
             joined = lines[-1] + "  " + target_row
             if len(strip_markup(joined)) <= columns:
