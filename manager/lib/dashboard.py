@@ -1032,6 +1032,12 @@ COLUMN_POLICY: dict[str, dict[str, Any]] = {
     "schedules": {"elastic": "Schedule", "droppable": ["Type"], "min_elastic": 15},
 }
 COLUMN_CELL_PADDING = 1
+# How many layout passes a roster will wait for a frame to be measurable. An unmeasured
+# frame costs a comparison, not a redraw, so waiting is cheap; the bound only stops a view
+# that is genuinely hidden from asking forever.
+MAX_WIDTH_PASSES = 24
+# How long to wait before asking again when the frame could not be measured at all.
+WIDTH_RETRY_DELAY = 0.2
 MIN_ELASTIC_COLUMNS = 12
 
 
@@ -1267,16 +1273,34 @@ class SelectionTable:
         if not self.column_policy or not self.titles:
             return
         available = self.table.content_size.width
-        if available <= 0 and self._width_passes >= 4:
-            # A view that is hidden has no frame to measure, and asking again is only
-            # polite up to a point: the plan is re-taken when the view is shown again.
-            return
         if available <= 0:
             # The same trap the height rule fell into: an unmeasured view is not a
             # zero-column window, and planning against zero would hide every column.
+            # Asking once is not enough. The first layout of a freshly mounted app lands
+            # after the message queue has been pumped a few times, and how many times
+            # depends on how loaded the machine is: the GitHub runner for ubuntu-26.04
+            # (run 41040450893) settled later than the second pass and left the Backups
+            # roster at its natural widths, which is to say scrolling sideways, while a
+            # workstation two rows up in the same suite never noticed. So the chain
+            # re-arms until a frame can be measured, bounded by `MAX_WIDTH_PASSES` only so
+            # a genuinely hidden view cannot spin.
+            if self._width_passes >= MAX_WIDTH_PASSES:
+                return
+            self._width_passes += 1
             if not self._width_retry_pending:
                 self._width_retry_pending = True
+                # Waiting for the layout cannot be made conditional on a refresh, because
+                # nothing in this app is obliged to ask for one at the moment a roster
+                # first needs it. `call_after_refresh` runs on the next `RefreshComplete`,
+                # and on the ubuntu-26.04 runner (run 41040450893) the layout settled with
+                # no refresh following it — the queued callback simply sat there, the
+                # Backups roster kept the natural widths its cells asked for, it scrolled
+                # sideways, and the pilot test timed out waiting for a scrollbar to
+                # disappear. Workstations refresh often enough that this has never been
+                # visible locally. A timer is driven by the event loop rather than by the
+                # thing being waited for, so the ask goes out on a timer too.
                 self.table.call_after_refresh(self.retry_column_budget, cells)
+                self.table.set_timer(WIDTH_RETRY_DELAY, lambda: self.retry_column_budget(cells))
             return
         self._width_passes = 0
         visible, widths, naturals = column_plan(

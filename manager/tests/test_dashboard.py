@@ -26,6 +26,8 @@ import re
 from dashboard import (
     ACTION_STYLES,
     COLUMN_POLICY,
+    MAX_WIDTH_PASSES,
+    WIDTH_RETRY_DELAY,
     column_plan,
     fit_text,
     CHROME_ROLES,
@@ -202,12 +204,29 @@ def build_app(tmp_path, *, initial_view, accounts=None, snapshot_file="default",
     return app, log_path
 
 
-async def wait_for(predicate, timeout=10.0, message="condition"):
-    for _ in range(int(timeout / 0.05)):
+async def wait_for(predicate, timeout=10.0, message="condition", details=None):
+    """Wait for a layout fact, and say what was on screen when the wait ran out.
+
+    The timeout is wall clock, and a CI runner is a shared machine: the ubuntu-26.04
+    runner of run 41040450893 spent ten seconds on a roster that settles in well under
+    one here, and the failure said only "timed out". A number-less failure of a layout
+    rule is not actionable, so the state of the widget goes into the message.
+    """
+    deadline = timeout / 0.05
+    for attempt in range(int(deadline)):
         if predicate():
             return
         await asyncio.sleep(0.05)
-    raise AssertionError(f"timed out waiting for {message}")
+    report = ""
+    if details is not None:
+        try:
+            report = f"; at the deadline: {details()}"
+        except Exception as error:  # the report must never replace the failure
+            report = f"; the report itself failed: {error!r}"
+    raise AssertionError(
+        f"timed out waiting for {message} after {timeout:.0f}s of wall clock "
+        f"({attempt} polls){report}"
+    )
 
 
 def test_destructive_keys_do_not_fire_outside_their_views(tmp_path):
@@ -2745,7 +2764,15 @@ def test_no_roster_asks_for_more_columns_than_the_frame_holds(tmp_path):
                     await pilot.press("r")
                     await wait_for(
                         lambda: table.max_scroll_x == 0,
+                        timeout=30.0,
                         message=f"the {view} roster to fit {cols} columns",
+                        details=lambda: (
+                            f"frame={table.content_size.width} "
+                            f"drawn={sum(column.get_render_width(table) for column in table.columns.values())} "
+                            f"virtual={table.virtual_size.width} max_scroll_x={table.max_scroll_x} "
+                            f"rows={table.row_count} "
+                            f"passes={app.selection_tables[view]._width_passes}"
+                        ),
                     )
                     asked = sum(
                         column.get_render_width(table) for column in table.columns.values()
@@ -2937,5 +2964,77 @@ def test_the_sort_key_never_lands_on_a_column_the_frame_could_not_show(tmp_path)
             for mark in marks[:-1]:
                 assert mark, "a sort pass left no arrow on any column"
                 assert mark[0].replace(" ▲", "") in titles, f"an arrow on a column off screen: {mark}"
+
+    asyncio.run(scenario())
+
+
+def test_a_roster_waits_for_a_frame_instead_of_guessing_twice(tmp_path):
+    """One retry is not enough to meet a layout that has not happened yet.
+
+    A DataTable that has not been laid out reports a frame of zero columns, and zero is
+    not a narrow window: planning against it hides every column. The budget therefore
+    asks again after each refresh. It used to ask exactly once — `retry_column_budget`
+    cleared the pending flag and the unmeasured branch never re-armed it — and that is
+    what went red on the ubuntu-26.04 runner (run 41040450893, `test_no_roster_asks_for_more_columns_than_the_frame_holds`):
+    that machine settled its first layout later than the second pass, so the Backups
+    roster kept the natural widths its cells asked for and scrolled sideways, while a
+    workstation running the same test twice never saw the difference. A loaded runner is
+    not a special case of this dashboard; it is the case the dashboard ships into.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="backups", snapshot_file=demo)
+        async with app.run_test(size=(140, 52)) as pilot:
+            table = app.query_one("#backups-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="the backups roster to load")
+            controller = app.selection_tables["backups"]
+            cells = [cells for _key, cells in controller._rows_cache]
+            widths = [column.width for column in table.columns.values()]
+
+            # A view that is not on screen is where an unmeasured frame really comes
+            # from: the widget is mounted, so it can be asked again, but layout has
+            # nothing to measure.
+            table.display = False
+            await pilot.pause()
+            assert table.content_size.width == 0, "this stub is not measuring nothing"
+
+            controller._column_signature = None
+            controller._width_passes = 0
+            controller._width_retry_pending = False
+            controller.apply_column_budget(cells)
+            # Nothing calls `retry_column_budget` here but the app itself. A refresh has
+            # already happened and none is due — build_app runs at 30 seconds — so this is
+            # the ubuntu-26.04 condition: whatever re-asks must not depend on a refresh.
+            # `asyncio.sleep`, not `pilot.pause`: the pilot's pause asks the screen to
+            # refresh, and that is a favour the live app never promises. This loop is the
+            # runner's condition — a settled screen, nothing scheduled to refresh the
+            # table, and a scrollbar that has to go away anyway.
+            for _pass_number in range(20):
+                await asyncio.sleep(WIDTH_RETRY_DELAY / 2)
+                assert [column.width for column in table.columns.values()] == widths, (
+                    f"pass {controller._width_passes} wrote widths against a frame of zero columns"
+                )
+                if controller._width_passes >= 4:
+                    break
+            assert controller._width_passes >= 4, (
+                f"the chain reached {controller._width_passes} passes without anyone asking; "
+                "a retry that waits for a refresh waits for something this app never sends"
+            )
+            assert controller._width_passes < MAX_WIDTH_PASSES, (
+                f"the chain spent all {controller._width_passes} passes on a frame that was "
+                "never measured, which is the case a hidden view is allowed to stop at"
+            )
+
+            # And when a frame does exist, the same chain spends it.
+            table.display = True
+            await pilot.pause()
+            assert table.content_size.width > 0, "the roster never got a frame back"
+            controller._width_retry_pending = False
+            controller.retry_column_budget(cells)
+            assert [column.width for column in table.columns.values()] != widths, (
+                "the budget never re-planned once the frame was measurable"
+            )
+            assert table.max_scroll_x == 0, "the roster scrolls sideways after re-planning"
 
     asyncio.run(scenario())
