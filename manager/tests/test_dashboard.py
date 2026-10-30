@@ -25,6 +25,9 @@ import re
 
 from dashboard import (
     ACTION_STYLES,
+    COLUMN_POLICY,
+    column_plan,
+    fit_text,
     CHROME_ROLES,
     DASHBOARD_CSS,
     DARK_PALETTE,
@@ -2707,5 +2710,232 @@ def test_the_schedules_roster_fits_the_frame_it_was_given(tmp_path):
                     f"{cols}x{lines}: the roster wants {table.virtual_size.width} columns in a "
                     f"{table.content_size.width}-column frame and scrolls sideways"
                 )
+
+    asyncio.run(scenario())
+
+
+def test_no_roster_asks_for_more_columns_than_the_frame_holds(tmp_path):
+    """Four rosters, three windows, no horizontal scrollbar anywhere.
+
+    A DataTable sizes every column to its widest cell, and Textual answers an
+    over-subscribed frame by scrolling the table sideways. Measured with
+    `ops/tools/dashboard_probe_column_budget.py` before this rule existed: the backups
+    roster was handed 48 columns at 140x52 and asked for 82; the logs roster was handed
+    56 and asked for 104; even the three-column schedules roster asked for 50 in the 37
+    columns left to it at 80x30. A scrollbar along the bottom of a roster is a column
+    nobody finishes reading, and in a screenshot it is a field that does not exist.
+    """
+    demo = demo_snapshot_path()
+    rosters = {
+        "accounts": "#accounts-table",
+        "backups": "#backups-table",
+        "logs": "#realm-logs-table",
+        "operations": "#schedules-table",
+    }
+
+    async def scenario():
+        for cols, lines in ((140, 52), (100, 36), (80, 30)):
+            for view, selector in rosters.items():
+                app, _log_path = build_app(tmp_path, initial_view=view, snapshot_file=demo)
+                async with app.run_test(size=(cols, lines)) as pilot:
+                    table = app.query_one(selector, DataTable)
+                    await wait_for(
+                        lambda: table.row_count > 0, message=f"the {view} roster to load"
+                    )
+                    await pilot.press("r")
+                    await wait_for(
+                        lambda: table.max_scroll_x == 0,
+                        message=f"the {view} roster to fit {cols} columns",
+                    )
+                    asked = sum(
+                        column.get_render_width(table) for column in table.columns.values()
+                    )
+                    assert asked <= table.content_size.width, (
+                        f"{cols}x{lines}: the {view} roster drew {asked} columns into a "
+                        f"{table.content_size.width}-column frame"
+                    )
+
+    asyncio.run(scenario())
+
+
+def test_the_column_budget_spends_the_frame_it_is_handed(tmp_path):
+    """The rule is arithmetic, so it is tested as arithmetic.
+
+    Short, whole facts — a timestamp, a size, a severity — keep the width their widest
+    cell needs. One column per view carries a sentence, and takes what is left. When
+    that is not enough, columns come off in the declared order, and only columns the
+    details pane beside the roster prints in full are allowed on that list.
+    """
+    titles = ["Timestamp", "Size", "File", "Created By"]
+    cells = [
+        (
+            "2026-10-30 06:12:44",
+            "4.2 MB",
+            "vmangos-backup-2026-10-30-061244-world.tar.gz",
+            "cron",
+        )
+    ]
+
+    roomy, widths, naturals = column_plan(titles, cells, 90, **COLUMN_POLICY["backups"])
+    assert roomy == [0, 1, 2, 3], "a wide window owes nobody a dropped column"
+    assert sum(widths.values()) <= 90
+    assert widths[2] > naturals[2], "the spare room goes to the sentence column"
+    assert widths[0] == naturals[0] and widths[1] == naturals[1]
+
+    # The floor, not the frame, is what costs columns here: 17 columns of archive name
+    # repeats the same prefix on every row, so Created By and then Size come off — both
+    # printed by `render_backups_summary` beside the roster — until the name has room.
+    tight, widths, _naturals = column_plan(titles, cells, 48, **COLUMN_POLICY["backups"])
+    assert tight == [0, 2], f"Created By and Size come off before the name is cut: {tight}"
+    assert sum(widths.values()) <= 48
+    assert widths[2] >= COLUMN_POLICY["backups"]["min_elastic"]
+
+    # Even the last trade does not meet the floor. What the elastic column keeps in this
+    # view is the end of a value — the extension, the date, the news — so a short tail is
+    # still a fact, marked as one, and the roster does not go behind a scrollbar.
+    cramped, widths, _naturals = column_plan(titles, cells, 20, **COLUMN_POLICY["backups"])
+    assert cramped == [2], "every duplicate came off, and the name is what is left"
+    assert widths == {2: 20}, "the tail is drawn short and marked rather than scrolled"
+
+    # A prose column is the other case: no trade is left and 10 columns of a sentence
+    # says nothing, so the budget hands every column its natural width and lets Textual
+    # scroll the roster instead of inventing a fragment.
+    log_titles = ["Time", "Source", "Severity", "Message"]
+    log_cells = [("2026-10-30 06:12:44", "world", "error", "World crashed while loading map 530")]
+    prose, prose_widths, _naturals = column_plan(log_titles, log_cells, 20, **COLUMN_POLICY["logs"])
+    assert prose == [2, 3], f"the duplicates came off before prose was shredded: {prose}"
+    assert prose_widths == {}, "no width is invented for a sentence the frame cannot hold"
+
+    marked_head = fit_text("World crashed while loading map 530", 20)
+    assert marked_head.endswith("…") and marked_head.startswith("World"), "prose keeps its head"
+    marked_tail = fit_text("vmangos-backup-20260414-051000.tar.gz", 20, elide="tail")
+    assert marked_tail.startswith("…") and marked_tail.endswith(".tar.gz"), (
+        f"an archive name loses its shared prefix, not its extension: {marked_tail}"
+    )
+    assert fit_text("700.0 MB", 20) == "700.0 MB", "a value the frame can hold is printed as stored"
+
+
+def test_a_cell_cut_short_by_the_frame_says_so(tmp_path):
+    """Textual clips an oversized cell silently; the roster does not.
+
+    A file name cut mid-word looks like a shorter file name. Where the frame caps a
+    column, the printed value has to be a marked prefix of a value the realm actually
+    reported — and the pane beside the roster still carries the whole thing.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="backups", snapshot_file=demo)
+        async with app.run_test(size=(140, 52)) as pilot:
+            table = app.query_one("#backups-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="the backups roster to load")
+            labels = [str(column.label) for column in table.columns.values()]
+            assert "File" in labels, f"the file column has vanished: {labels}"
+            position = labels.index("File")
+            files = [
+                str(entry.get("file", ""))
+                for entry in app.snapshot.get("backups", {}).get("entries", [])
+            ]
+            marked = 0
+            for row in range(table.row_count):
+                cell = str(table.get_row_at(row)[position])
+                if cell.endswith("…"):
+                    marked += 1
+                    stem = cell[:-1]
+                    assert any(name.startswith(stem) and len(name) > len(stem) for name in files), (
+                        f"{cell!r} is a mark on nothing: no backup the realm reported starts {stem!r}"
+                    )
+                elif cell.startswith("…"):
+                    marked += 1
+                    tail = cell[1:]
+                    assert any(name.endswith(tail) and len(name) > len(tail) for name in files), (
+                        f"{cell!r} is a mark on nothing: no backup the realm reported ends {tail!r}"
+                    )
+                else:
+                    assert cell in files, f"{cell!r} is neither a reported file nor marked"
+            longest = max((len(name) for name in files), default=0)
+            room = table.content_size.width - sum(
+                column.get_render_width(table)
+                for label, column in zip(labels, table.columns.values())
+                if label != "File"
+            )
+            if longest + 2 > room:
+                assert marked, (
+                    f"the file column has room for {room - 2} of a {longest}-character name "
+                    "and printed no mark"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_a_narrow_log_roster_keeps_the_line_and_the_pane_keeps_the_time(tmp_path):
+    """A screenshot at 140 columns said the trade was backwards.
+
+    The roster was spending 21 columns on a timestamp whose date half was identical on
+    every row and leaving 15 columns for the line that is the reason the view exists —
+    six rows of "World crashed …", "Auth rejected …", each one a sentence cut where it
+    stops being the same sentence. The line keeps the room instead, and the timestamp
+    goes to the pane beside the roster: `render_log_event_details` prints Time, Source,
+    Severity, Service, Unit and Identifier for whatever row the cursor is on. At 80
+    columns the source follows it into the pane, which the Realm Logs card above the
+    roster has counted anyway.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        for cols, lines, must_hold, must_drop in (
+            (140, 52, {"Source", "Severity", "Message"}, {"Time"}),
+            (80, 30, {"Severity", "Message"}, {"Time", "Source"}),
+        ):
+            app, _log_path = build_app(tmp_path, initial_view="logs", snapshot_file=demo)
+            async with app.run_test(size=(cols, lines)) as pilot:
+                table = app.query_one("#realm-logs-table", DataTable)
+                await wait_for(lambda: table.row_count > 0, message="the log roster to load")
+                labels = {str(column.label) for column in table.columns.values()}
+                assert must_hold <= labels, f"{cols} columns lost the line: {sorted(labels)}"
+                assert not (must_drop & labels), (
+                    f"{cols} columns still carry {sorted(must_drop & labels)} while the log "
+                    f"line is printed in {table.content_size.width} columns"
+                )
+                if must_drop:
+                    details = str(app.query_one("#realm-log-details", Static).renderable)
+                    assert re.search(r"Time", details), "the pane no longer says when"
+                    assert re.search(r"\d{2}:\d{2}:\d{2}", details), "the pane lost the time itself"
+
+    asyncio.run(scenario())
+
+
+def test_the_sort_key_never_lands_on_a_column_the_frame_could_not_show(tmp_path):
+    """Sorting by an invisible column moves a roster nobody can explain.
+
+    The sort key cycles the columns of the roster under the cursor. At 80 columns the
+    log roster has traded its Time and Source columns to the pane beside it, so the
+    cycle goes Severity, Message, then back to the realm's own order.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="logs", snapshot_file=demo)
+        async with app.run_test(size=(80, 30)) as pilot:
+            table = app.query_one("#realm-logs-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="the log roster to load")
+            controller = app.selection_tables["logs"]
+            titles = [str(column.label).replace(" ▲", "") for column in table.columns.values()]
+            assert "Time" not in titles, "this window was supposed to have traded the time away"
+            marks = []
+            for _ in range(len(titles) + 1):
+                await pilot.press("S")
+                await pilot.pause()
+                marks.append(
+                    [
+                        str(column.label)
+                        for column in table.columns.values()
+                        if str(column.label).endswith("▲")
+                    ]
+                )
+            assert marks[-1] == [], "the cycle did not come back to the realm's own order"
+            for mark in marks[:-1]:
+                assert mark, "a sort pass left no arrow on any column"
+                assert mark[0].replace(" ▲", "") in titles, f"an arrow on a column off screen: {mark}"
 
     asyncio.run(scenario())

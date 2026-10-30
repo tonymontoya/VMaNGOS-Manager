@@ -985,6 +985,142 @@ def natural_sort_key(text: str) -> list[tuple[int, object]]:
     ]
 
 
+# A roster is handed a frame, not a wish. Textual sizes every DataTable column to its
+# widest cell and answers an over-subscribed frame with a horizontal scrollbar. Measured
+# with `ops/tools/dashboard_probe_column_budget.py`: the backups roster is given 48
+# columns at 140x52 and asks for 82; the logs roster is given 56 and asks for 104; and
+# even the three-column schedules roster asks for 50 in the 37 columns left to it at
+# 80x30. A scrollbar along the bottom of a roster means a column nobody finishes
+# reading, and in a screenshot it means a column that is simply not there.
+#
+# The budget spends the frame from the facts of the data. A column carrying a short,
+# whole fact — an id, a size, a severity, a timestamp — keeps the width its widest cell
+# needs. One column per view carries a *sentence* (a file name, a log line) and takes
+# whatever room is left, because the details pane beside the roster prints it in full.
+# When even that does not fit, the listed columns come off in order, and a column may
+# only be listed there if the pane beside it prints that same field: a narrow window
+# should lose a duplicate, not a fact. `render_backups_summary` prints File, When, Size,
+# DBs and Created By for the selected row; `render_log_event_details` prints Source,
+# Severity, Service, Unit, Identifier and the whole message; `render_schedule_details`
+# prints Type and Schedule.
+COLUMN_POLICY: dict[str, dict[str, Any]] = {
+    "accounts": {"elastic": "Username", "droppable": []},
+    # A screenshot at 140 columns showed why a floor is needed: with no floor the
+    # elastic column absorbs whatever is left, and 17 columns of `vmangos-backup-…`
+    # repeats itself on every row. Archive names in this realm share their whole
+    # prefix, so the head of the name is the part with no news in it and the tail is
+    # what tells two rows apart — hence `elide: "tail"`, a mark at the front that says
+    # "the beginning is not shown" instead of a mark at the end that would lie.
+    "backups": {
+        "elastic": "File",
+        # Created By and Size are the first to go because the summary beside the roster
+        # prints both. Timestamp is the last resort, and it is still a duplicate rather
+        # than a loss: the archive name this realm writes carries that same instant, and
+        # `render_backups_summary` prints When.
+        "droppable": ["Created By", "Size", "Timestamp"],
+        "min_elastic": 24,
+        "elide": "tail",
+    },
+    # The log line is the point of the roster, so at a width that cannot hold a
+    # timestamp and a sentence, the timestamp goes: `render_log_event_details` prints
+    # Time, Source, Severity, Service, Unit and Identifier for the selected line. Time
+    # is listed before Source because a 140-column screenshot said so — every row in the
+    # roster shared a date, and the half that varied was costing 21 columns while the
+    # message was left with 15. The Realm Logs card above the roster already prints the
+    # latest instant.
+    "logs": {"elastic": "Message", "droppable": ["Time", "Source"], "min_elastic": 24},
+    "schedules": {"elastic": "Schedule", "droppable": ["Type"], "min_elastic": 15},
+}
+COLUMN_CELL_PADDING = 1
+MIN_ELASTIC_COLUMNS = 12
+
+
+def column_natural_widths(
+    titles: list[str], cells: list[tuple[str, ...]], cell_padding: int = COLUMN_CELL_PADDING
+) -> dict[int, int]:
+    """What each column would take if it were handed everything it asks for.
+
+    The same arithmetic Textual uses: the widest cell or the label, plus the padding
+    drawn on both sides of every cell.
+    """
+    widths: dict[int, int] = {}
+    for index, title in enumerate(titles):
+        widest = max((len(str(row[index])) for row in cells if index < len(row)), default=0)
+        widths[index] = max(len(str(title)), widest) + 2 * cell_padding
+    return widths
+
+
+def column_plan(
+    titles: list[str],
+    cells: list[tuple[str, ...]],
+    available: int,
+    *,
+    elastic: str,
+    droppable: list[str],
+    cell_padding: int = COLUMN_CELL_PADDING,
+    min_elastic: int = MIN_ELASTIC_COLUMNS,
+    elide: str = "head",
+) -> tuple[list[int], dict[int, int], dict[int, int]]:
+    """Decide which columns fit `available`, and how wide each of them may be drawn.
+
+    Returns the visible column indexes in order, the width to give each of them, and the
+    width each one asked for — the last of those is what tells the caller which cells
+    have to be marked as truncated.
+    """
+    visible = list(range(len(titles)))
+    naturals = column_natural_widths(titles, cells, cell_padding)
+    elastic_index = titles.index(elastic) if elastic in titles else -1
+    queue = [titles.index(name) for name in droppable if name in titles]
+    while True:
+        fixed = sum(naturals[index] for index in visible if index != elastic_index)
+        room = available - fixed
+        if elastic_index in visible and room >= min_elastic:
+            widths = {
+                index: (room if index == elastic_index else naturals[index]) for index in visible
+            }
+            return visible, widths, naturals
+        if not queue:
+            if elide == "tail" and room >= MIN_TAIL_COLUMNS:
+                # The trade list is empty and the sentence floor cannot be met, but what
+                # the elastic column keeps in this view is the *end* of a value: the
+                # extension, the number, the part that tells two rows apart. A short tail
+                # is still a fact, so it is drawn short and marked, rather than the whole
+                # roster being pushed behind a scrollbar.
+                widths = {
+                    index: (room if index == elastic_index else naturals[index]) for index in visible
+                }
+                return visible, widths, naturals
+            # Nothing left to trade away, and what is left of the elastic column would be
+            # a fragment of prose. Hand every column what it asked for and let Textual
+            # scroll the table: a scrollbar the operator can drive beats a column that
+            # lies about being complete.
+            return visible, {}, naturals
+        visible.remove(queue.pop(0))
+
+
+# The keys `column_plan` takes. A view's policy may carry more than arithmetic.
+COLUMN_PLAN_KEYS = ("elastic", "droppable", "min_elastic", "cell_padding", "elide")
+MIN_TAIL_COLUMNS = 14
+
+
+def fit_text(value: str, room: int, cell_padding: int = COLUMN_CELL_PADDING, elide: str = "head") -> str:
+    """Print a value inside a fixed column without pretending it is complete.
+
+    Textual clips an oversized cell silently, which cuts a file name mid-word and leaves
+    no sign that anything is missing. The pane beside the roster prints the whole value,
+    so the roster says what it is showing: `elide="head"` keeps a prefix and marks it as
+    one, which is right for prose; `elide="tail"` keeps the end and marks the front, which
+    is right for names whose beginning is shared by every row and tells nobody anything.
+    """
+    limit = max(room - 2 * cell_padding, 1)
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    if elide == "tail":
+        return "…" + text[max(len(text) - (limit - 1), 0) :]
+    return text[: max(limit - 1, 1)] + "…"
+
+
 class SelectionTable:
     """Single implementation of the select-a-row DataTable pattern.
 
@@ -996,9 +1132,29 @@ class SelectionTable:
     filter (set_filter).
     """
 
-    def __init__(self, table: Any, titles: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        table: Any,
+        titles: list[str] | None = None,
+        column_policy: dict[str, Any] | None = None,
+    ) -> None:
         self.table = table
         self.titles = list(titles or [])
+        self.column_policy = dict(column_policy or {})
+        # The policy carries one word that is not part of the arithmetic — `elide`,
+        # which end of a long value the roster keeps — so the arithmetic is handed only
+        # the keys it takes and the projection keeps the rest.
+        self._plan_kwargs = {key: value for key, value in self.column_policy.items() if key in COLUMN_PLAN_KEYS}
+        self._elide = str(self.column_policy.get("elide", "head"))
+        self._visible_columns: list[int] = list(range(len(self.titles)))
+        self._capped: dict[int, int] = {}
+        self._column_signature: tuple[Any, ...] | None = None
+        self._width_retry_pending = False
+        self._width_passes = 0
+        # The rows as the last rebuild drew them, so a column plan that changes
+        # without a rebuild — a resize, a retry pass — can redraw them itself.
+        self._rows_cache: tuple[tuple[str, tuple[str, ...]], ...] = ()
+        self._current_key = ""
         self._rendered: tuple[tuple[str, tuple[str, ...]], ...] | None = None
         self.filter_text = ""
         self.sort_column: int | None = None
@@ -1099,12 +1255,176 @@ class SelectionTable:
         self._height_retry_pending = False
         self.apply_frame_height(row_count)
 
+    def apply_column_budget(self, cells: list[tuple[str, ...]]) -> None:
+        """Spend the columns this frame owns on the columns this data needs.
+
+        The rows rule has a sibling (see `COLUMN_POLICY`): a roster that asks for more
+        columns than the card gave it is answered by Textual with a horizontal
+        scrollbar. This runs from `rebuild()`, where the rows are already in hand, and
+        again after a resize, when the frame each roster owns has moved with the details
+        pane beside it.
+        """
+        if not self.column_policy or not self.titles:
+            return
+        available = self.table.content_size.width
+        if available <= 0 and self._width_passes >= 4:
+            # A view that is hidden has no frame to measure, and asking again is only
+            # polite up to a point: the plan is re-taken when the view is shown again.
+            return
+        if available <= 0:
+            # The same trap the height rule fell into: an unmeasured view is not a
+            # zero-column window, and planning against zero would hide every column.
+            if not self._width_retry_pending:
+                self._width_retry_pending = True
+                self.table.call_after_refresh(self.retry_column_budget, cells)
+            return
+        self._width_passes = 0
+        visible, widths, naturals = column_plan(
+            self.titles, cells, available, **self._plan_kwargs
+        )
+        signature = (
+            available,
+            tuple(visible),
+            tuple(sorted(widths.items())),
+            tuple(sorted(naturals.items())),
+        )
+        if signature == self._column_signature:
+            # The plan is unchanged and the frame it was made against is still the
+            # frame on screen. The second half of that test matters: the layout settles
+            # in stages (the density classes, the banner, a scrollbar appearing beside
+            # a roster), and a plan measured against a frame that has since moved by
+            # four columns leaves a table that still scrolls.
+            if self.table.content_size.width == available:
+                return
+        self._column_signature = signature
+        self._width_retry_pending = False
+        # A width is only a layout fact once cells have been drawn against it: Textual
+        # works out the table's scrollable width as rows are added, so a plan that
+        # changes the widths and leaves the rows alone leaves the old width — and the
+        # scrollbar — on screen. Invalidate the drawn-rows cache for any change to the
+        # plan, not only a change to which columns are on screen.
+        self._rendered = None
+        columns = list(self.table.columns.keys())
+        if visible != self._visible_columns or len(columns) != len(visible):
+            # The frame took a column away, or handed one back. Re-declare the column
+            # set in its original order rather than appending a returning column at the
+            # far right, where it reads as a different field.
+            for key in columns:
+                self.table.remove_column(key)
+            self.table.add_columns(*[self.titles[index] for index in visible])
+        self._visible_columns = visible
+        live = list(self.table.columns.values())
+        self._capped = {}
+        for position, index in enumerate(visible):
+            if position >= len(live):
+                continue
+            room = widths.get(index, naturals[index])
+            column = live[position]
+            # `auto_width` is what lets Textual re-widen a column the next time a cell
+            # grows; once a frame has been measured, the width is this rule's to hold.
+            column.auto_width = False
+            column.width = max(room - 2 * COLUMN_CELL_PADDING, 1)
+            if room < naturals[index]:
+                self._capped[index] = room
+        self.apply_sort_indicator()
+        if self.table.content_size.width != available and self._width_passes < 3:
+            # The frame the plan was measured against is gone: the density classes, the
+            # chrome, or a scrollbar appearing beside the roster moves it after this
+            # method has run. Spend the budget again against the frame that is actually
+            # there, three passes at most so a widget that refuses to settle cannot spin.
+            self._width_passes += 1
+            self.table.call_after_refresh(self.retry_column_budget, cells)
+
+    def _owned_by_a_modal(self) -> bool:
+        """Is a dialog on top of the screen these tables live on?
+
+        Redrawing a roster under a dialog moves its cursor, which posts a row-highlight
+        event whose handler reaches for detail panes on a screen that is not showing —
+        and the refresh that resumes when the dialog closes re-takes the plan anyway.
+        """
+        checker = getattr(getattr(self.table, "app", None), "modal_open", None)
+        return bool(checker()) if callable(checker) else False
+
+    def retry_column_budget(self, cells: list[tuple[str, ...]]) -> None:
+        """Decide again, now that the layout has been drawn at least once."""
+        self._width_retry_pending = False
+        if self._owned_by_a_modal():
+            return
+        self.apply_column_budget(cells)
+        # A width is only a layout fact once the cells have been drawn against it:
+        # Textual recomputes the table's scrollable width as rows are added, so a
+        # re-plan that leaves the rows alone leaves the old width on screen. The
+        # normal rebuild re-adds them; this path has no rebuild to lean on.
+        self.relay_rows()
+
+    def replan_columns(self) -> None:
+        """Spend a new window's columns on the rows already drawn.
+
+        This is the resize path. It deliberately does not go through the view's
+        refresh: that path redraws the detail panes with `query_one`, and during a
+        modal the panes are on a screen that is not the one being shown — the roster
+        widgets themselves are held here, so the plan can be retaken without asking
+        the screen for anything.
+        """
+        if not self.column_policy or not self.titles or self._owned_by_a_modal():
+            return
+        self.apply_column_budget([cells for _key, cells in self._rows_cache])
+        self.relay_rows()
+
+    def relay_rows(self) -> None:
+        """Redraw the cached rows against the current column set, cursor where it was."""
+        if not self._rows_cache:
+            return
+        selected_index = 0
+        self.table.clear(columns=False)
+        for index, (key_value, row_values) in enumerate(self._rows_cache):
+            if self._current_key and key_value == self._current_key:
+                selected_index = index
+            self.table.add_row(*self.project_row(row_values), key=key_value)
+        if self._rows_cache and self.table.cursor_type == "row":
+            self.table.move_cursor(row=selected_index)
+        self._rendered = self._rows_cache
+
+    def visible_cells(self, cells: tuple[str, ...]) -> tuple[str, ...]:
+        """The cells for the columns this frame shows, untruncated.
+
+        A search box that matched only the printed prefix would hide a row whose full
+        file name matches what the operator typed.
+        """
+        if len(self._visible_columns) == len(self.titles):
+            return tuple(str(cell) for cell in cells)
+        return tuple(str(cells[index]) for index in self._visible_columns if index < len(cells))
+
+    def project_row(self, cells: tuple[str, ...]) -> tuple[str, ...]:
+        """The cells as the roster prints them: only visible columns, and an ellipsis
+        wherever the frame capped one below the width its widest cell wanted."""
+        return tuple(
+            fit_text(cells[index], self._capped[index], elide=self._elide)
+            if index in self._capped
+            else str(cells[index])
+            for index in self._visible_columns
+            if index < len(cells)
+        )
+
+    def sortable_columns(self) -> list[int]:
+        """The columns the sort key may cycle through — only the ones on screen.
+
+        Sorting by a column this frame could not show puts an arrow on nothing and
+        reorders a roster the operator cannot explain.
+        """
+        if self._visible_columns:
+            return list(self._visible_columns)
+        return list(range(len(self.titles)))
+
     def apply_sort_indicator(self) -> None:
         if not self.titles:
             return
-        for index, column in enumerate(self.table.columns.values()):
-            title = self.titles[index] if index < len(self.titles) else str(column.label)
-            column.label = f"{title} ▲" if index == self.sort_column else title
+        columns = list(self.table.columns.values())
+        for position, index in enumerate(self._visible_columns):
+            if position >= len(columns):
+                continue
+            title = self.titles[index]
+            columns[position].label = f"{title} ▲" if index == self.sort_column else title
 
     def rebuild(
         self,
@@ -1119,7 +1439,9 @@ class SelectionTable:
             for entry in entries
         ]
         if self.filter_text:
-            rows = [row for row in rows if self.filter_text in " ".join(row[1]).lower()]
+            rows = [
+                row for row in rows if self.filter_text in " ".join(self.visible_cells(row[1])).lower()
+            ]
         if self.sort_column is not None and rows and self.sort_column < len(rows[0][1]):
             column = self.sort_column
             # Ties break on the first column (ID/timestamp) so equal keys
@@ -1131,8 +1453,13 @@ class SelectionTable:
                 )
             )
         rendered = tuple((key, cells) for key, cells, _entry in rows)
+        self._rows_cache = rendered
+        self._current_key = current_key
         self.apply_frame_height(len(rendered))
+        self.apply_column_budget([cells for _key, cells, _entry in rows])
 
+        # A plan that changed its columns sets `_rendered` to None above, so the
+        # redraw that the new widths need is not skipped by the cache below.
         if self._rendered is not None and rendered == self._rendered:
             # Data unchanged: leave the table (and the user's cursor) alone.
             # Detail panes still refresh from the returned entry.
@@ -1148,7 +1475,7 @@ class SelectionTable:
             if current_key and key_value == current_key:
                 selected_index = index
                 selected = next((entry for _key, _cells, entry in rows if _key == key_value), None)
-            self.table.add_row(*row_values, key=key_value)
+            self.table.add_row(*self.project_row(row_values), key=key_value)
 
         if not rendered:
             return "", None
@@ -4051,10 +4378,26 @@ def create_app(
 
             # Long-lived controllers so unchanged data can skip table churn.
             self.selection_tables = {
-                "accounts": SelectionTable(accounts_table, titles=["ID", "Username", "GM", "Online", "Banned"]),
-                "backups": SelectionTable(backups_table, titles=["Timestamp", "Size", "File", "Created By"]),
-                "logs": SelectionTable(realm_logs_table, titles=["Time", "Source", "Severity", "Message"]),
-                "schedules": SelectionTable(schedules_table, titles=["Type", "Schedule", "Next Run"]),
+                "accounts": SelectionTable(
+                    accounts_table,
+                    titles=["ID", "Username", "GM", "Online", "Banned"],
+                    column_policy=COLUMN_POLICY["accounts"],
+                ),
+                "backups": SelectionTable(
+                    backups_table,
+                    titles=["Timestamp", "Size", "File", "Created By"],
+                    column_policy=COLUMN_POLICY["backups"],
+                ),
+                "logs": SelectionTable(
+                    realm_logs_table,
+                    titles=["Time", "Source", "Severity", "Message"],
+                    column_policy=COLUMN_POLICY["logs"],
+                ),
+                "schedules": SelectionTable(
+                    schedules_table,
+                    titles=["Type", "Schedule", "Next Run"],
+                    column_policy=COLUMN_POLICY["schedules"],
+                ),
             }
 
             # Identity before data: the console states which Manager build it
@@ -4139,7 +4482,23 @@ def create_app(
             # extents are only known once the new layout has been worked out, so
             # the restatement waits for the layout pass instead of measuring the
             # window that is already gone.
-            self.call_after_refresh(self.refresh_chrome)
+            # A different window is a different column budget. Each roster's frame
+            # moves with the details pane beside it, so a plan made for the old window
+            # keeps either a scrollbar or room it no longer needs. The tables go back
+            # through their normal refresh path — the cursor, the filter and the detail
+            # pane all follow the new columns — and it waits for the layout pass,
+            # because until the new frame exists there is nothing to measure.
+            self.call_after_refresh(self.remeasure_tables_and_chrome)
+
+        def remeasure_tables_and_chrome(self) -> None:
+            # The same courtesy the snapshot refresh already pays a dialog: no work is
+            # done against panes the modal has covered.
+            if self.modal_open():
+                self.refresh_pending = True
+            else:
+                for controller in self.selection_tables.values():
+                    controller.replan_columns()
+            self.refresh_chrome()
 
         def apply_view_state(self) -> None:
             for view_name in ("overview", "monitor", "accounts", "backups", "config", "logs", "operations"):
@@ -4447,33 +4806,59 @@ def create_app(
                 render_schedule_details(selected_schedule, len(schedules))
             )
 
+        def pane_on_showing_screen(self, selector: str) -> Static | None:
+            """The detail pane named by `selector`, if the screen being shown has one.
+
+            A highlight can be posted by a redraw at a moment the pane cannot be
+            reached: a dialog has covered the base screen, the roster belongs to a view
+            that is hidden, or a pilot teardown is unmounting the subtree at its own
+            pace. `query_one` raises inside a message handler when the pane is gone, and
+            Textual brings the message pump down with the exception — a crash report for
+            a repaint that had nothing to repaint. The selection is recorded before this
+            is asked, and the refresh that follows the pane's return paints it.
+            """
+            from textual.dom import NoMatches
+
+            try:
+                return self.query_one(selector, Static)
+            except NoMatches:
+                return None
+
         def update_selected_account(self, row_key: Any) -> None:
             account = find_selected_account(self.snapshot, player_key_value(row_key))
             self.selected_account_id = str(account.get("id", "")) if account else ""
-            self.query_one("#account-details", Static).update(
-                render_account_details(account, len(self.snapshot.get("all_accounts", [])))
-            )
+            pane = self.pane_on_showing_screen("#account-details")
+            if pane is not None:
+                pane.update(
+                    render_account_details(account, len(self.snapshot.get("all_accounts", [])))
+                )
 
         def update_selected_backup(self, row_key: Any) -> None:
             entry = find_selected_backup(self.snapshot, player_key_value(row_key))
             self.selected_backup_file = str(entry.get("file", "")) if entry else ""
-            self.query_one("#backup-summary", Static).update(
-                render_backups_summary(snapshot=self.snapshot, selected_backup=entry)
-            )
+            pane = self.pane_on_showing_screen("#backup-summary")
+            if pane is not None:
+                pane.update(
+                    render_backups_summary(snapshot=self.snapshot, selected_backup=entry)
+                )
 
         def update_selected_log(self, row_key: Any) -> None:
             entry = find_selected_log_entry(self.snapshot, player_key_value(row_key))
             self.selected_log_key = log_entry_key(entry) if entry else ""
-            self.query_one("#realm-log-details", Static).update(
-                render_log_event_details(entry, len(self.snapshot.get("log_events", [])))
-            )
+            pane = self.pane_on_showing_screen("#realm-log-details")
+            if pane is not None:
+                pane.update(
+                    render_log_event_details(entry, len(self.snapshot.get("log_events", [])))
+                )
 
         def update_selected_schedule(self, row_key: Any) -> None:
             schedule = find_selected_schedule(self.snapshot, player_key_value(row_key))
             self.selected_schedule_id = str(schedule.get("id", "")) if schedule else ""
-            self.query_one("#schedule-details", Static).update(
-                render_schedule_details(schedule, len(self.snapshot.get("schedules", [])))
-            )
+            pane = self.pane_on_showing_screen("#schedule-details")
+            if pane is not None:
+                pane.update(
+                    render_schedule_details(schedule, len(self.snapshot.get("schedules", [])))
+                )
 
         def table_row_handlers(self) -> dict[str, Any]:
             return {
@@ -4550,11 +4935,15 @@ def create_app(
             if selection_key is None:
                 return
             controller = self.selection_tables[selection_key]
-            column_count = len(controller.titles)
-            if not column_count:
+            options = controller.sortable_columns()
+            if not options:
                 return
             current = controller.sort_column
-            nxt = None if current is not None and current + 1 >= column_count else 0 if current is None else current + 1
+            if current is None or current not in options:
+                nxt = options[0]
+            else:
+                position = options.index(current)
+                nxt = None if position + 1 >= len(options) else options[position + 1]
             controller.set_sort(nxt)
             self.rebuild_selection_table(selection_key)
             if nxt is None:
@@ -4612,6 +5001,20 @@ def create_app(
             )
 
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+            # A highlight is a request to repaint the panes beside a roster, so it is
+            # only worth honouring when those panes are on show. Two ways they are not:
+            # a dialog has covered the screen they live on (the query raises, and the
+            # message pump goes with it), or the roster belongs to a view that is
+            # hidden — a redraw of a table nobody is looking at has nothing to paint,
+            # and the view repaints from the same selection when it is shown again.
+            if self.modal_open() or not event.data_table.visible:
+                # A roster redrawn while a dialog is on screen posts this for a cursor
+                # nobody is looking at, and the handler reaches for detail panes on the
+                # base screen — which is not the screen being shown, so the query
+                # raises and takes the message pump with it. The selection itself did
+                # not move; the refresh that resumes when the dialog closes repaints
+                # the panes from it.
+                return
             handler = self.table_row_handlers().get(str(event.data_table.id))
             if handler:
                 handler(event.row_key)
