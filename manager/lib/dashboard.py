@@ -751,6 +751,21 @@ def describe_trend(values: list[float | None], metric_key: str) -> str:
     return "rising" if delta > 0 else "easing"
 
 
+def describe_trend_with_delta(values: list[float | None], metric_key: str) -> str:
+    """The direction, and how far it actually went.
+
+    Measured on the demo snapshot, all five host metrics printed the word
+    `rising` — cpu had climbed 18.3 points and disk 1.0. Direction without
+    distance makes five rows indistinguishable, which is the reason the trend
+    column reads as texture instead of information.
+    """
+    available = [value for value in values if value is not None]
+    if len(available) < 2:
+        return "warming"
+    delta = available[-1] - available[0]
+    return f"{describe_trend(values, metric_key)} {delta:+.1f}"
+
+
 def history_window_label(history: list[dict[str, Any]], refresh_interval: int) -> str:
     if len(history) < 2:
         return "warming up"
@@ -2601,6 +2616,20 @@ TREND_COLORS = {
 }
 
 
+def spark_domain(metric_key: str, host: dict[str, Any]) -> float:
+    """The range over which this metric's own thresholds live.
+
+    A percentage tops out at 100. A load average has no percentage: its warning
+    is 1x cores and its critical is 2x cores, the same arithmetic
+    `normalize_load_percent` uses, so the ceiling is 2x the core count. That is
+    also why the same load 1.7 must be drawn differently on a 2-core and an
+    8-core box: it means something different on each.
+    """
+    if metric_key == "load":
+        return max(1.0, clamp_float(host.get("cpu", {}).get("cores", 1), 1.0) * 2.0)
+    return 100.0
+
+
 def render_sparkline(
     values: list[float | None],
     *,
@@ -2609,11 +2638,21 @@ def render_sparkline(
     suffix: str = "",
     trend: str = "",
     show_scale: bool = True,
+    domain_high: float | None = None,
 ) -> str:
     """The shape of the window, not just its endpoints.
 
     `now` and `peak` say what happened; the eye wants the path that got
     there, and the refresh loop already keeps that history.
+
+    `domain_high` decides what the block height *means*. With it, height is the
+    value's position in the metric's real range (0-100% for a percentage, 0-2x
+    cores for a load average). Without it the window's own min and max set the
+    scale, and every window fills the row: measured on the demo snapshot, a disk
+    usage that moved 23.0 -> 24.0 was drawn `▁▁▁▁▁▁██████`, the same full-height
+    climb as a cpu that moved 24.0 -> 42.3. Both rows were true about direction
+    and false about size, and five of them stacked became one uniform staircase
+    in which nothing stands out because everything shouts.
     """
     samples = values[-width:]
     available = [value for value in samples if value is not None]
@@ -2623,14 +2662,26 @@ def render_sparkline(
     low, high = min(available), max(available)
     span = high - low
     cells: list[str] = []
-    for value in samples:
-        if value is None:
-            cells.append("·")
-        elif span <= 0:
-            cells.append(SPARK_BLOCKS[len(SPARK_BLOCKS) // 2])
-        else:
-            index = int(round(((value - low) / span) * (len(SPARK_BLOCKS) - 1)))
-            cells.append(SPARK_BLOCKS[max(0, min(len(SPARK_BLOCKS) - 1, index))])
+    last_block = len(SPARK_BLOCKS) - 1
+    if domain_high is not None and domain_high > 0:
+        for value in samples:
+            if value is None:
+                cells.append("·")
+                continue
+            index = int(round((max(0.0, value) / domain_high) * last_block))
+            cells.append(SPARK_BLOCKS[max(0, min(last_block, index))])
+    else:
+        # No domain: fall back to the window's own extremes, which is the right
+        # answer for a count with no ceiling (players online) and the wrong one
+        # for a percentage. Callers that know their range pass it.
+        for value in samples:
+            if value is None:
+                cells.append("·")
+            elif span <= 0:
+                cells.append(SPARK_BLOCKS[len(SPARK_BLOCKS) // 2])
+            else:
+                index = int(round(((value - low) / span) * (len(SPARK_BLOCKS) - 1)))
+                cells.append(SPARK_BLOCKS[max(0, min(len(SPARK_BLOCKS) - 1, index))])
 
     if not show_scale:
         return f"[{color}]{''.join(cells)}[/]"
@@ -2674,25 +2725,25 @@ def render_monitor_trends(
     ]
 
     for label, current_value, values, suffix in rows:
+        domain = spark_domain(label.lower(), host)
         available = [value for value in values if value is not None]
         # The reading on screen is part of the window, so the peak can never
         # print below it — "now 42.3  peak 41.0" reads as a broken gauge.
         peak_text = f"{max(available + [current_value]):.1f}{suffix}" if available or current_value is not None else "n/a"
-        trend = describe_trend(values, label.lower())
         if narrow:
             # One row per metric: value, peak, and a short sparkline. The scale
             # sentence ("range 20.0–31.0") repeats what the shape already says,
             # and it is the part that costs the second row.
             lines.append(
                 f"[bold {ACCENT_SKY}]{label:<6}[/] {current_value:.1f}{suffix}  [{ACCENT_MUTED}]peak[/] {peak_text}  "
-                f"{render_sparkline(values, width=10, color=trend_color(values, label.lower()), show_scale=False)}"
+                f"{render_sparkline(values, width=10, color=trend_color(values, label.lower()), show_scale=False, domain_high=domain)}"
             )
             continue
         lines.append(
             f"[bold {ACCENT_SKY}]{label:<6}[/] [{ACCENT_MUTED}]now[/] {current_value:.1f}{suffix}  [{ACCENT_MUTED}]peak[/] {peak_text}"
         )
         lines.append(
-            f"         {render_sparkline(values, color=trend_color(values, label.lower()), suffix=suffix, trend=trend)}"
+            f"         {render_sparkline(values, color=trend_color(values, label.lower()), suffix=suffix, trend=describe_trend_with_delta(values, label.lower()), domain_high=domain)}"
         )
 
     io_history = history_values(metric_history, "io")
@@ -2700,18 +2751,17 @@ def render_monitor_trends(
         available_io = [value for value in io_history if value is not None]
         io_now = clamp_float(storage_io.get("util_percent"))
         peak_io = f"{max(available_io + [io_now]):.1f}%"
-        io_trend = describe_trend(io_history, "io")
         if narrow:
             lines.append(
                 f"[bold {ACCENT_SKY}]I/O   [/] {io_now:.1f}%  [{ACCENT_MUTED}]peak[/] {peak_io}  "
-                f"{render_sparkline(io_history, width=10, color=trend_color(io_history, 'io'), show_scale=False)}"
+                f"{render_sparkline(io_history, width=10, color=trend_color(io_history, 'io'), show_scale=False, domain_high=spark_domain('io', host))}"
             )
         else:
             lines.append(
                 f"[bold {ACCENT_SKY}]I/O   [/] [{ACCENT_MUTED}]now[/] {io_now:.1f}%  [{ACCENT_MUTED}]peak[/] {peak_io}"
             )
             lines.append(
-                f"         {render_sparkline(io_history, color=trend_color(io_history, 'io'), suffix='%', trend=io_trend)}"
+                f"         {render_sparkline(io_history, color=trend_color(io_history, 'io'), suffix='%', trend=describe_trend_with_delta(io_history, 'io'), domain_high=spark_domain('io', host))}"
             )
     else:
         lines.append(f"[bold {ACCENT_SKY}]I/O   [/] [{ACCENT_MUTED}]now[/] unavailable  [{ACCENT_MUTED}]peak[/] n/a  [{ACCENT_MUTED}]trend[/] warming")

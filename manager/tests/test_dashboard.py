@@ -1160,6 +1160,100 @@ def test_a_narrow_metric_card_gives_each_metric_one_row():
     )
 
 
+def test_a_sparkline_is_measured_against_the_metric_range_not_its_own_window():
+    """Block height should answer "how busy", not "how wiggly".
+
+    Measured on the shipped dashboard before this change: a disk usage that moved
+    23.0 -> 24.0 was drawn `▁▂▄▂▅▇█▇█▇██` and a cpu that moved 24.0 -> 42.3 was
+    drawn a similar full-height climb, because every sparkline normalised to its
+    own min and max. Five rows that always run bottom-to-top stacked into one
+    staircase in which a one-point drift and an eighteen-point climb were the
+    same size, and the numbers next to them contradicted the shape.
+    """
+    from dashboard import SPARK_BLOCKS, render_monitor_trends, render_sparkline, strip_markup
+
+    loud = [24.0 + step * 1.66 for step in range(12)]
+    quiet = [23.0, 23.1, 23.4, 23.2, 23.6, 23.9, 24.0, 23.8, 24.0, 23.9, 24.0, 24.0]
+
+    def heights(markup):
+        row = strip_markup(markup).split()[0]
+        return [SPARK_BLOCKS.index(char) for char in row if char in SPARK_BLOCKS]
+
+    loud_row = render_sparkline(loud, domain_high=100.0)
+    quiet_row = render_sparkline(quiet, domain_high=100.0)
+    assert max(heights(quiet_row)) <= 2, f"a metric parked at 23-24% of a 0-100 range drew {quiet_row!r}"
+    assert max(heights(loud_row)) > max(heights(quiet_row)), (
+        f"cpu at 42% and disk at 24% drew the same height: {loud_row!r} / {quiet_row!r}"
+    )
+
+    # The window-relative fallback stays for a quantity with no ceiling, which is
+    # what the Players sparkline needs; it must keep filling its own window.
+    relative = heights(render_sparkline(quiet))
+    assert min(relative) == 0 and max(relative) == len(SPARK_BLOCKS) - 1, (
+        f"the no-domain fallback stopped filling its own window: {relative}"
+    )
+
+    # The helper is not the feature; the card has to pass the domain.
+    trends = strip_markup(render_monitor_trends(demo_snapshot(), demo_history(), 30))
+    drawn = [line.split()[0] for line in trends.splitlines() if any(char in SPARK_BLOCKS for char in line)]
+    assert len(drawn) >= 4, f"the Trends card drew {len(drawn)} sparklines, expected one per metric"
+    assert len(set(drawn)) == len(drawn), f"the Trends card is drawing one shape for every metric again: {drawn}"
+    assert max(max(heights(row)) for row in drawn) < len(SPARK_BLOCKS) - 1, (
+        f"a metric on a mostly idle host still reaches the ceiling: {drawn}"
+    )
+
+
+def test_a_load_sparkline_is_measured_against_the_machine_not_the_number():
+    """Load average has no percentage, so its scale has to come from the box.
+
+    The backend warns at 1x cores and goes critical at 2x -- the same arithmetic
+    `normalize_load_percent` uses -- so a load of 1.7 is a quarter of the way to
+    trouble on a 2-core box and a rounding error on an 8-core one. A sparkline
+    that ignored the core count would draw them identically.
+    """
+    from dashboard import SPARK_BLOCKS, render_sparkline, spark_domain, strip_markup
+
+    assert spark_domain("load", {"cpu": {"cores": 8}}) == 16.0
+    assert spark_domain("load", {"cpu": {"cores": 2}}) == 4.0
+    assert spark_domain("cpu", {"cpu": {"cores": 8}}) == 100.0
+
+    series = [0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.65, 1.7, 1.7]
+
+    def heights(markup):
+        return [SPARK_BLOCKS.index(char) for char in strip_markup(markup) if char in SPARK_BLOCKS]
+
+    big_box = heights(render_sparkline(series, domain_high=spark_domain("load", {"cpu": {"cores": 8}})))
+    small_box = heights(render_sparkline(series, domain_high=spark_domain("load", {"cpu": {"cores": 2}})))
+    assert max(small_box) > max(big_box), (
+        f"the same load 1.7 should look busier on 2 cores than on 8: {big_box} vs {small_box}"
+    )
+
+
+def test_a_trend_sentence_says_how_far_the_metric_moved():
+    """Direction without distance is texture.
+
+    On the demo snapshot every host metric printed the word `rising`: cpu had
+    climbed 18.3 points, disk 1.0. Nothing in that column could rank what was
+    happening, which is why five rows of it read as a pattern rather than as
+    five measurements.
+    """
+    import re
+
+    from dashboard import describe_trend_with_delta, render_monitor_trends, strip_markup
+
+    loud = [24.0 + step * 1.66 for step in range(12)]
+    quiet = [23.0] * 11 + [24.0]
+    assert describe_trend_with_delta(loud, "cpu") == f"rising {loud[-1] - loud[0]:+.1f}"
+    assert describe_trend_with_delta(quiet, "disk") == "rising +1.0"
+    assert describe_trend_with_delta([7.0, 7.0], "cpu") == "steady +0.0"
+    assert describe_trend_with_delta([], "cpu") == "warming"
+
+    trends = strip_markup(render_monitor_trends(demo_snapshot(), demo_history(), 30))
+    assert re.search(r"(rising|easing|steady) [-+]\d+\.\d", trends), (
+        f"the Trends card still gives direction without distance:\n{trends}"
+    )
+
+
 def test_a_short_terminal_keeps_the_console_target_inside_the_sidebar(tmp_path):
     """The rail beside the buttons has to end inside the window, not past it.
 
