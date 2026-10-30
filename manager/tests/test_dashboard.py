@@ -650,6 +650,17 @@ def test_a_refresh_that_lands_under_a_modal_is_repainted_when_it_closes(tmp_path
             base = app.screen_stack[0]
             pane = base.query_one("#service-pane", Static)
 
+            # The file and the injection have to agree. The dashboard refreshes when a
+            # dialog goes away (`apply_view_state` -> `request_snapshot_refresh`,
+            # `lib/dashboard.py:4652`) and a refresh re-reads this fixture, so an injected
+            # value the file disputes is a race with that reload: run f5f1beb saw it on
+            # ubuntu-22.04 and ubuntu-26.04 (the card still read 482 MB) and passed here.
+            with open(fixture, "r", encoding="utf-8") as handle:
+                on_disk = json.load(handle)
+            on_disk["server"]["data"]["services"]["world"]["memory_mb"] = 4321.5
+            with open(fixture, "w", encoding="utf-8") as handle:
+                json.dump(on_disk, handle)
+
             covered = copy.deepcopy(app.snapshot)
             covered["server"]["data"]["services"]["world"]["memory_mb"] = 4321.5
             app.apply_snapshot(covered)  # the worker landing on a covered screen
