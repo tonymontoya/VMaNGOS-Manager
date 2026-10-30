@@ -1040,6 +1040,15 @@ MAX_WIDTH_PASSES = 24
 # Shared by the two places that wait on a layout that has not happened yet: the column
 # budget, and a view opening in front of the operator.
 LAYOUT_RETRY_DELAY = 0.2
+# A snapshot that lands underneath a dialog cannot be painted, and Textual 0.89.1
+# gives the App no notice that the base screen is being shown again: ScreenResume is
+# posted to the screen itself with bubble=False (events.py:737, posted at app.py:2313
+# and app.py:2627), so the handler on the app never runs. The frame therefore waits on
+# a timer, exactly the way a measurement that is not ready yet does. 40 passes at the
+# same delay is eight seconds; past that a card can be stale at most until the next
+# refresh, which re-arms this path in any case.
+DEFERRED_REPAINT_DELAY = LAYOUT_RETRY_DELAY
+MAX_DEFERRED_REPAINT_PASSES = 40
 MIN_ELASTIC_COLUMNS = 12
 
 
@@ -4390,6 +4399,7 @@ def create_app(
             self.update_plan_data: dict[str, Any] | None = None
             self.refresh_inflight = False
             self.refresh_pending = False
+            self.repaint_pending = False
             self.refresh_force_full = False
             self.last_refresh_failed = False
             self.snapshot_loaded = False
@@ -4895,6 +4905,23 @@ def create_app(
             # counts; the base screen is the only entry when none is open.
             return len(self.screen_stack) > 1
 
+        def arm_deferred_repaint(self, attempt: int = 0) -> None:
+            """Paint the frame a covered screen could not take, once it is shown again.
+
+            Nothing tells the app that a dialog closed (see DEFERRED_REPAINT_DELAY), so
+            this waits the wait out: one timer per pass, bounded, and it paints on the
+            first pass where the base screen is the active one again.
+            """
+            if not self.repaint_pending:
+                return
+            if not self.modal_open():
+                self.repaint_pending = False
+                self.repaint()
+                return
+            if attempt >= MAX_DEFERRED_REPAINT_PASSES:
+                return
+            self.set_timer(DEFERRED_REPAINT_DELAY, lambda: self.arm_deferred_repaint(attempt + 1))
+
         def request_snapshot_refresh(self, *, full: bool = False) -> None:
             # Coalesce instead of dropping: if a refresh is already running,
             # remember that another one is wanted and run it when the
@@ -4975,6 +5002,20 @@ def create_app(
             same sample to the monitor history again, so the repaint is its own
             step: same data, new colours.
             """
+            if self.modal_open():
+                # The one way a pane refresh reaches a covered screen: a refresh
+                # started before the dialog is posted back with call_from_thread
+                # and lands whenever the manager binary gets round to it, and
+                # `App.query_one` can only see the active screen — so asking for
+                # #service-pane with a form on top raises NoMatches inside a
+                # posted callback, which is how this dashboard has lost its
+                # message pump more than once. The data is not lost (self.snapshot
+                # is already the new frame); only the painting waits, and
+                # on_screen_resume does it when the dialog closes.
+                self.repaint_pending = True
+                self.arm_deferred_repaint()
+                return
+            self.repaint_pending = False
             snapshot = self.snapshot
             self.query_one("#service-pane", Static).update(render_service_panel(snapshot, self.active_view, narrow=self.narrow_viewport))
             self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot, self.metric_history, self.refresh_interval, narrow=self.narrow_viewport))
@@ -5902,7 +5943,13 @@ def create_app(
             self.last_action_view = view_context or self.active_view
             self.action_tone = tone
             self.refresh_chrome()
-            self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view, narrow=self.narrow_viewport))
+            if self.modal_open():
+                # Same hazard as repaint(): an action dismissed into a still-open
+                # dialog would ask the dialog for a pane of the base screen.
+                self.repaint_pending = True
+                self.arm_deferred_repaint()
+            else:
+                self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view, narrow=self.narrow_viewport))
             if self.active_view == "operations":
                 self.query_one("#schedule-details", Static).update(
                     render_schedule_details(self.selected_schedule(), len(self.snapshot.get("schedules", [])))

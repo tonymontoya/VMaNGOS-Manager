@@ -569,6 +569,67 @@ def test_refresh_pauses_while_modal_open(tmp_path):
     asyncio.run(scenario())
 
 
+def test_a_refresh_that_lands_under_a_modal_is_repainted_when_it_closes(tmp_path):
+    """A snapshot arriving while a dialog is open must not query the dialog.
+
+    `request_snapshot_refresh` refuses to *start* work under a modal, which is only
+    half the story: a refresh begun a moment earlier finishes whenever the manager
+    binary gets round to it, and `apply_snapshot` is posted back to the UI thread
+    with `call_from_thread`. Its `repaint()` asks for `#service-pane` — and
+    `App.query_one` searches the *active* screen, which at that instant is the
+    ConfirmScreen. `NoMatches` inside a posted callback is the failure mode this
+    dashboard has died of repeatedly, and the covered-screen guards elsewhere stop
+    the handler from starting; nothing stopped one already in flight. The callback
+    is invoked directly here: same code path, no thread to race.
+    """
+    import copy
+
+    from dashboard import render_service_panel
+
+    # Overview cards need a host with services in it; the plain fixture describes an
+    # unreachable one, which renders the failure half of the card and no memory row.
+    fixture = write_snapshot_fixture(tmp_path, make_accounts(8))
+    add_services_to_fixture(fixture)
+    app, log_path = build_app(tmp_path, initial_view=MONITOR_KEYS_VIEW, snapshot_file=fixture)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await wait_for(lambda: app.snapshot_loaded, message="first snapshot to load")
+            assert app.snapshot["server"]["ok"], "the fixture must produce a readable host"
+            assert "482" in str(app.screen_stack[0].query_one("#service-pane", Static).renderable), \
+                "the fixture must put a memory figure in the card this test watches"
+            await pilot.press("x")  # stop realm -> confirm dialog
+            await pilot.pause()
+            assert app.screen.__class__.__name__ == "ConfirmScreen", "a dialog must cover the base screen"
+
+            # The base screen outlives the dialog; ask it directly, because the app
+            # would now be answering the dialog.
+            base = app.screen_stack[0]
+            pane = base.query_one("#service-pane", Static)
+
+            covered = copy.deepcopy(app.snapshot)
+            covered["server"]["data"]["services"]["world"]["memory_mb"] = 4321.5
+            app.apply_snapshot(covered)  # the worker landing on a covered screen
+
+            assert app.repaint_pending, "a repaint that cannot be seen is deferred, not attempted"
+            assert "4321" not in str(pane.renderable), "a covered screen is not painted"
+
+            await pilot.press("escape")  # cancel the destructive action
+            await wait_for(lambda: not app.modal_open(), message="dialog to close")
+            # The flush is a timer, not a screen event: give it its delay.
+            await asyncio.sleep(0.5)
+            await pilot.pause()
+            assert not app.repaint_pending, "the deferred frame is due once nothing covers the screen"
+
+            expected = str(
+                render_service_panel(app.snapshot, app.active_view, narrow=app.narrow_viewport)
+            )
+            assert "4321" in str(pane.renderable), "the deferred repaint must land when the dialog closes"
+            assert str(pane.renderable) == expected, "and it must be the current data, not a stale frame"
+
+    asyncio.run(scenario())
+
+
 def test_sidebar_click_switches_view(tmp_path):
     app, _log_path = build_app(tmp_path, initial_view=ACCOUNTS_KEYS_VIEW)
 
