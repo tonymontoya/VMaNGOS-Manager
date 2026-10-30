@@ -2828,10 +2828,13 @@ def render_service_panel(
 
     `columns` is the content area of the pane this is about to be drawn into, measured
     by the caller (`Static.content_size.width`). It decides whether the two services
-    may share a row: the Overview view puts this card beside another one, which leaves
-    it 54 columns at a 158-column window, while the Monitor view gives it 79 at 122
-    columns — so pairing cannot be a property of "wide", it has to be a property of the
-    pane actually drawing it. Left as `None`, the card stays stacked.
+    may share a row, and the two numbers that prove it are both from the Overview: the
+    card owns 79 columns at a 122-column window, where the view stacks its cards, and
+    only 54 at 158, where the view draws it beside another one. The wider terminal gives
+    the card less room, so pairing cannot be a property of "wide"; it has to be a
+    property of the pane drawing it. The Monitor view has no `#service-pane` of its own
+    — it draws its own process card — so the card hidden behind that view reports zero
+    columns and is left stacked, which is what `None` means here.
     """
     server = snapshot["server"]
     if not server["ok"]:
@@ -5147,7 +5150,11 @@ def create_app(
             service_pane.update(
                 render_service_panel(snapshot, self.active_view, narrow=self.narrow_viewport, columns=pane_columns)
             )
-            if pane_columns == 0 and self.service_remeasure_passes < MAX_SERVICE_REMEASURE_PASSES:
+            if (
+                pane_columns == 0
+                and self.active_view == "overview"
+                and self.service_remeasure_passes < MAX_SERVICE_REMEASURE_PASSES
+            ):
                 # The card was drawn before the layout had handed the pane any columns, so
                 # the pairing decision had nothing to measure and drew stacked. One bounded
                 # retry, the same shape `retry_column_budget` uses for the tables: the pass
