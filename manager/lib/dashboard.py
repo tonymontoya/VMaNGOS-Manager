@@ -5397,6 +5397,24 @@ DASHBOARD_CSS = """
             min-height: 7;
         }
 
+        /* The rows left to take in a window this short are not inside the cards,
+           they are the air around them. Measured at 100x24: the grid began at row 8
+           and the view could show eight of its own rows. Above it sat one row of
+           header, one row of #content's top padding, five rows of banner (heavy
+           border, a padding row, two lines, another border), and one row of the
+           banner's bottom margin; six more rows below went to the command rail.
+           Three of those rows are decoration a border already supplies, and a
+           24-row terminal cannot afford decoration. The cards keep their gutters —
+           what goes away is the padding above the first card and inside the banner. */
+        .short #content {
+            padding: 0 2 0 1;
+        }
+
+        .short #action-banner {
+            padding-top: 0;
+            margin-bottom: 0;
+        }
+
         /* Equal columns. The split used to be 7fr 5fr, which handed the narrower
            column to the card with the longest row: the process card needs 53
            columns and got 37 at a 140-column window, while the pressure card needed

@@ -1277,6 +1277,45 @@ def test_the_narrow_window_asks_the_cards_for_their_narrow_form(tmp_path):
         asyncio.run(scenario())
 
 
+def test_a_short_window_does_not_pay_for_the_air_around_its_cards(tmp_path):
+    """In a 24-row terminal the chrome is the layout problem, not the cards.
+
+    After the card work, a 100x24 Overview still showed eight rows of content: the
+    grid started at row 8 because the header, a row of ``#content`` padding, a five
+    row banner (heavy border, a padding row, two lines, another border) and the
+    banner's bottom margin together eat a third of the window, with six more rows
+    going to the command rail below. ``short`` now drops the padding the borders
+    already supply: the grid begins at row 5 and the view shows twelve rows — 12 at
+    100 columns, 11 at 80 — and rows below the fold fall from 34 to 30 and 41 to 37.
+    A window at or above SHORT_VIEWPORT_HEIGHT is untouched: 100x36 shows 20 rows and
+    140x52 shows 34, with the banner keeping its padded form.
+    """
+    for size, expect_view_rows in (((100, 24), 12), ((80, 24), 11), ((100, 36), 20), ((140, 52), 34)):
+        app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+        async def scenario(app=app, size=size, expect_view_rows=expect_view_rows):
+            async with app.run_test(size=size) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                view = app.query_one("#overview-view")
+                grid = app.query_one("#overview-grid")
+                assert view.region.height >= expect_view_rows, (
+                    f"at {size[0]}x{size[1]} the cards get {view.region.height} rows, "
+                    f"expected at least {expect_view_rows}; chrome above the grid starts at row {grid.region.y}"
+                )
+                if size[1] < 30:
+                    assert grid.region.y <= 5, (
+                        f"a {size[1]}-row window put the grid at row {grid.region.y}, "
+                        "so the header and banner are spending short-window rows again"
+                    )
+                else:
+                    assert app.query_one("#content").styles.padding.top == 1, (
+                        f"a {size[1]}-row window lost the padding a tall window needs"
+                    )
+
+        asyncio.run(scenario())
+
+
 def test_a_card_in_a_short_window_occupies_no_rows_it_does_not_use(tmp_path):
     """A card's height must be its content plus its border, with nothing left over.
 
