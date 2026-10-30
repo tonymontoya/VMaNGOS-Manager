@@ -69,3 +69,60 @@ jobs:
       - name: Run dashboard pilot tests
         working-directory: ./manager
         run: ../.venv-pilot/bin/python -m pytest tests/test_dashboard.py tests/test_wizard.py -q
+             --junitxml=../pilot-results.xml
+
+      - name: Name the pilot failures where an unauthenticated reader can see them
+        if: always()
+        run: |
+          # Two CI reds in a row (runs 169 and 170) named nothing. GitHub's only
+          # annotation for a pytest failure is `Process completed with exit code 1`
+          # against `.github` line 245, and the job log needs an authenticated API
+          # call — which is how a real failure and a shared-runner flake become
+          # indistinguishable from outside. pytest already knows which test failed;
+          # the junit XML puts that where the checks API exposes it.
+          python3 - <<'PYEOF'
+          import os
+          import xml.etree.ElementTree as ET
+
+          path = "pilot-results.xml"
+          if not os.path.exists(path):
+              print("::warning::no pilot-results.xml — the pilot step died before pytest wrote one")
+              raise SystemExit(0)
+
+          root = ET.parse(path).getroot()
+          failures = 0
+          for case in root.iter("testcase"):
+              for kind in ("failure", "error"):
+                  node = case.find(kind)
+                  if node is None:
+                      continue
+                  failures += 1
+                  classname = case.get("classname") or ""
+                  # tests.test_dashboard -> tests/test_dashboard.py; parametrised ids
+                  # keep their brackets so the name is the one pytest printed.
+                  file_part = classname.split(".")[0] if classname else "tests"
+                  file_path = "/".join(classname.split(".")) + ".py" if classname else file_part
+                  detail = " ".join(((node.get("message") or "") or (node.text or "")).split())
+                  detail = detail[:900] or "no message"
+                  print(
+                      "::error file=%s,line=1::FAILED %s — %s"
+                      % (file_path, case.get("name") or "<unnamed>", detail)
+                  )
+                  break
+          suite = root.find("testsuite")
+          if suite is None:  # an <element> is falsy when it has no children, so `or` lies
+              suite = root
+          print(
+              "pilot failures annotated: %s of %s tests (failures=%s errors=%s)"
+              % (failures, suite.get("tests") or "?", suite.get("failures") or "?", suite.get("errors") or "?")
+          )
+          PYEOF
+
+      - name: Keep the raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilot-results-${{ matrix.os }}
+          path: pilot-results.xml
+          if-no-files-found: warn
+          retention-days: 14
