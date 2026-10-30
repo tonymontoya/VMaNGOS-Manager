@@ -2315,3 +2315,57 @@ def test_one_key_one_action_per_view_even_when_the_letter_is_reused(tmp_path):
 
     asyncio.run(accounts())
     asyncio.run(backups())
+
+
+def test_a_rail_row_never_parts_a_key_from_the_word_that_explains_it(tmp_path):
+    """The rail wraps between key/label pairs, never inside one.
+
+    The rail is a Static, so a row wider than the rail is word-wrapped by the
+    renderer, and the renderer breaks between a key and the word that explains it.
+    Measured at 100x36 before this test existed: the Overview rail drew "... b backup
+    v" and then opened the next line with "verify k validate" -- a key glyph pointing
+    at nothing, followed by a word that reads like a key. Nothing in the suite noticed
+    because the rail assertions read its markup, and the markup was one correct line;
+    the damage was done afterwards, in the renderer.
+
+    So this reads the width the rail actually painted into and the markup the running
+    app set, and requires that no line needs re-wrapping and no pair is split. The
+    "would have overflowed" guard keeps the case honest: at a width where nothing had
+    to wrap, the test would be describing a window that proves nothing.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        for cols, lines, expect_overflow in ((100, 36, True), (80, 24, True), (140, 52, False)):
+            app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo)
+            async with app.run_test(size=(cols, lines)) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message="the demo snapshot to load")
+                width = app.command_rail_width()
+                assert width > 0, f"{cols}x{lines}: the rail reported no content width, so it wrapped by luck"
+                rows = strip_markup(str(app.query_one("#command-rail", Static).renderable)).splitlines()
+                unwrapped = strip_markup(
+                    render_command_rail(
+                        "overview",
+                        narrow=app.narrow_viewport,
+                        rows_below=app.view_scroll_extent()[1],
+                    )
+                ).splitlines()
+                if expect_overflow:
+                    assert max(len(row) for row in unwrapped) > width, (
+                        f"{cols}x{lines}: no rail row was wider than the rail, so this window cannot show a split"
+                    )
+                for row in rows:
+                    assert len(row) <= width, (
+                        f"{cols}x{lines}: the rail emitted a {len(row)}-cell line into a {width}-cell box; "
+                        f"the renderer gets the last word again: {row!r}"
+                    )
+                    assert not re.search(r"\s[a-zA-Z]$", row), (
+                        f"{cols}x{lines}: {row!r} ends with a bare key glyph; its label is on the next line"
+                    )
+                for key, label in view_command_tokens("overview", narrow=app.narrow_viewport):
+                    assert any(f"{key} {label}" in row for row in rows), (
+                        f"{cols}x{lines}: {key!r} was parted from {label!r}"
+                    )
+
+    asyncio.run(scenario())

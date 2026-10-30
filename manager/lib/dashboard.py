@@ -1063,8 +1063,88 @@ class SelectionTable:
         return (key_fn(selected) if selected is not None else "", selected)
 
 
-def format_command_tokens(tokens: list[tuple[str, str]]) -> str:
-    return "  ".join(f"[bold {ACCENT_GOLD}]{key}[/] {label}" for key, label in tokens)
+def fit_rail_row(
+    prefix: tuple[str, str],
+    items: list[tuple[str, str]],
+    width: int,
+    separator: str = "  ",
+) -> str:
+    """Pack whole markup/plain pairs into lines no wider than ``width`` cells.
+
+    The rail is a Static, so a row longer than its content area is word-wrapped by
+    the renderer, and the renderer breaks between a key and the word that explains
+    it. Measured, not assumed: at 100x36 the Overview rail drew "This View o roster
+    ... b backup v" and then "verify k validate" on the next line. A lone key glyph
+    at the end of a line points at nothing, and the label that opens the next line
+    reads like a key. A non-breaking space does not help -- probed against the wrap
+    actually in use, the splitter treats U+00A0 as whitespace like any other space,
+    so it moved the break but did not remove it.
+
+    Given the width, the wrapping is done here instead, and a pair is the smallest
+    thing that may move to the next line. Continuation lines are indented to the
+    first pair so the legend still reads as one row. Without a width (the first
+    paint, before any layout) the row is left as one line and the renderer decides,
+    which is what happened for every release before this one.
+    """
+    if not items:
+        return prefix[0]
+    if width <= 0:
+        return prefix[0] + separator.join(markup for markup, _ in items)
+
+    indent = " " * len(prefix[1])
+    lines: list[str] = []
+    current = prefix[0]
+    used = len(prefix[1])
+    sep_width = len(separator)
+    for markup, plain in items:
+        # The label is padded to the shared column already, so the first pair on the
+        # first line hangs from it with no extra gap; only later pairs pay it.
+        gap = 0 if (used == len(prefix[1]) and not lines) else sep_width
+        if used + gap + len(plain) <= width:
+            current += separator[:gap] + markup
+            used += gap + len(plain)
+            continue
+        lines.append(current.rstrip())
+        current = (indent if len(indent) else "") + markup
+        used = len(indent) + len(plain)
+    lines.append(current.rstrip())
+    return "\n".join(lines)
+
+
+RAIL_LABEL_COLUMN = 10
+
+
+def rail_label(text: str) -> tuple[str, str]:
+    """The sky-coloured name that opens a rail row, padded to the shared column.
+
+    Returned as (markup, plain) because the packer needs both: the markup to emit
+    and the plain cell count to spend against the width.
+    """
+    plain = text.ljust(RAIL_LABEL_COLUMN)
+    return f"[bold {ACCENT_SKY}]{text}[/]" + " " * (RAIL_LABEL_COLUMN - len(text)), plain
+
+
+def format_command_tokens(
+    tokens: list[tuple[str, str]],
+    *,
+    width: int = 0,
+    prefix: tuple[str, str] = ("", ""),
+) -> str:
+    """Key/label pairs for one rail row, wrapped between pairs when a width is known."""
+    items = [
+        (f"[bold {ACCENT_GOLD}]{key}[/] {label}", f"{key} {label}")
+        for key, label in tokens
+    ]
+    if not items:
+        return prefix[0]
+    if width <= 0:
+        return prefix[0] + "  ".join(markup for markup, _ in items)
+    # Two spaces between pairs is the readable form; a single space is tried only
+    # when the roomy form would cost the rail a row of its own, because a row the
+    # rail grows by is a row the cards below the fold lose.
+    roomy = fit_rail_row(prefix, items, width, separator="  ")
+    tight = fit_rail_row(prefix, items, width, separator=" ")
+    return tight if len(tight.splitlines()) < len(roomy.splitlines()) else roomy
 
 
 # Single source of truth for which command keys are active in which view.
@@ -1211,6 +1291,7 @@ def scroll_rail_row(
     rows_above: int,
     rows_below: int,
     tokens: tuple[str, ...] | None = None,
+    width: int = 0,
 ) -> str:
     """The rail row that says this view has more in it, and how to reach it.
 
@@ -1231,14 +1312,20 @@ def scroll_rail_row(
         return ""
     if tokens is None:
         tokens = SCROLL_RAIL_TOKENS
-    if tokens:
-        keys = "  ".join(f"[bold {ACCENT_GOLD}]{token}[/]" for token in tokens)
-    else:
-        keys = f"[{ACCENT_MUTED}]the table keeps the arrow keys[/]"
-    return (
-        f"[bold {ACCENT_SKY}]Scroll[/]    {keys}  "
-        f"[{ACCENT_MUTED}]{' · '.join(parts)}[/]"
-    )
+    # None means "name every scroll key"; an empty tuple means a focused widget is
+    # keeping them, which is a different answer and must not collapse into the first
+    # one -- an early version of this packing used ``tokens or SCROLL_RAIL_TOKENS``,
+    # and the suite caught a focused table being offered arrows it would never see.
+    chosen = SCROLL_RAIL_TOKENS if tokens is None else tuple(tokens)
+    items: list[tuple[str, str]] = [
+        (f"[bold {ACCENT_GOLD}]{token}[/]", token) for token in chosen
+    ]
+    if not items:
+        items = [(f"[{ACCENT_MUTED}]the table keeps the arrow keys[/]", "the table keeps the arrow keys")]
+    # The count travels as one item: "21 rows below" split across a line break would
+    # leave the number orphaned from what it counts.
+    items.append((f"[{ACCENT_MUTED}]{' · '.join(parts)}[/]", " · ".join(parts)))
+    return fit_rail_row(rail_label("Scroll"), items, width)
 
 
 def view_command_tokens(active_view: str, narrow: bool = False) -> list[tuple[str, str]]:
@@ -1296,6 +1383,7 @@ def render_command_rail(
     rows_above: int = 0,
     rows_below: int = 0,
     scroll_tokens: tuple[str, ...] | None = None,
+    width: int = 0,
 ) -> str:
     """The key legend under every view.
 
@@ -1312,21 +1400,24 @@ def render_command_rail(
     and the legend quotes the keys this window will honour, not the ones some other
     widget has already taken.
     """
-    global_actions = format_command_tokens([("r", "refresh"), ("t", "theme"), ("q", "quit")])
-    context_actions = format_command_tokens(view_command_tokens(active_view, narrow=narrow))
+    global_label = rail_label("Global")
+    view_label = rail_label("This View")
+    global_actions = format_command_tokens(
+        [("r", "refresh"), ("t", "theme"), ("q", "quit")], width=width, prefix=global_label
+    )
+    context_actions = format_command_tokens(
+        view_command_tokens(active_view, narrow=narrow), width=width, prefix=view_label
+    )
     if narrow:
-        rows = [
-            f"[bold {ACCENT_SKY}]Global[/]    {global_actions}",
-            f"[bold {ACCENT_SKY}]This View[/] {context_actions}",
-        ]
+        rows = [global_actions, context_actions]
     else:
-        navigation = format_command_tokens([(key, label.lower()) for _view, key, label in SIDEBAR_MODULES])
-        rows = [
-            f"[bold {ACCENT_SKY}]Navigate[/]  {navigation}",
-            f"[bold {ACCENT_SKY}]Global[/]    {global_actions}",
-            f"[bold {ACCENT_SKY}]This View[/] {context_actions}",
-        ]
-    scroll_row = scroll_rail_row(rows_above, rows_below, scroll_tokens)
+        navigation = format_command_tokens(
+            [(key, label.lower()) for _view, key, label in SIDEBAR_MODULES],
+            width=width,
+            prefix=rail_label("Navigate"),
+        )
+        rows = [navigation, global_actions, context_actions]
+    scroll_row = scroll_rail_row(rows_above, rows_below, scroll_tokens, width=width)
     if scroll_row:
         rows.append(scroll_row)
     return "\n".join(rows)
@@ -3973,8 +4064,25 @@ def create_app(
                     rows_above=rows_above,
                     rows_below=rows_below,
                     scroll_tokens=scroll_rail_tokens(self.focused),
+                    width=self.command_rail_width(),
                 )
             )
+
+        def command_rail_width(self) -> int:
+            """How wide the rail paints, so its rows can be wrapped by the pair.
+
+            Read off the widget rather than computed from the viewport: the heavy
+            border and the two-column padding both take cells, and a number guessed
+            here is a row that wraps in the renderer anyway. Before the first layout
+            pass there is no width to read, and 0 means "leave the row as one line"
+            -- which is what every release up to this one did, permanently.
+            """
+            from textual.dom import NoMatches
+
+            try:
+                return self.query_one("#command-rail", Static).content_size.width
+            except NoMatches:
+                return 0
 
         async def on_key(self, event: object) -> None:
             """Restate the legend after any key, because a key is how focus moves.
