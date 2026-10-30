@@ -603,7 +603,7 @@ def test_an_action_result_posted_under_a_dialog_reaches_the_banner_when_it_close
 
             await pilot.press("escape")
             await wait_for(lambda: not app.modal_open(), message="dialog to close")
-            await asyncio.sleep(0.5)  # the deferred restatement is on a timer
+            await wait_for(lambda: not app.repaint_pending, message="deferred restatement to run")
             await pilot.pause()
             assert "backup queued" in str(banner.renderable), (
                 "the restated banner must carry the action the worker reported"
@@ -659,10 +659,11 @@ def test_a_refresh_that_lands_under_a_modal_is_repainted_when_it_closes(tmp_path
 
             await pilot.press("escape")  # cancel the destructive action
             await wait_for(lambda: not app.modal_open(), message="dialog to close")
-            # The flush is a timer, not a screen event: give it its delay.
-            await asyncio.sleep(0.5)
+            # The flush is a timer, not a screen event. Waiting on the flag rather than
+            # on a fixed sleep matters on a shared runner: ubuntu-24.04 is where this
+            # dashboard has already gone red over wall-clock assumptions.
+            await wait_for(lambda: not app.repaint_pending, message="deferred repaint to run")
             await pilot.pause()
-            assert not app.repaint_pending, "the deferred frame is due once nothing covers the screen"
 
             expected = str(
                 render_service_panel(app.snapshot, app.active_view, narrow=app.narrow_viewport)
