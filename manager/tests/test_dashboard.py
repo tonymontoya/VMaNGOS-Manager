@@ -3205,3 +3205,42 @@ def test_a_view_that_is_still_settling_does_not_ask_a_covered_screen_for_its_wid
             assert panel.region.height > 0, "the roster card never laid itself out after the dialog"
 
     asyncio.run(scenario())
+
+
+def test_a_roster_keeps_its_rows_when_the_window_is_narrower_than_they_are(tmp_path):
+    """Six archives were given a 49-row frame by the first refresh at 80x30.
+
+    `apply_frame_height` bounds a roster's frame against the view. In the side-by-side
+    arrangement the bound was a fraction — `1fr` — resolved against the view's fixed
+    rows, and it worked. Below 122 columns the cards stack and the panel is auto-height,
+    where that fraction is bounded by nothing: the roster mounted correctly (7 rows for
+    six archives, `styles.height: 7`) and the **first refresh** replaced the number with
+    `1fr` and the table with 49 rows of bordered nothing; the same script on the previous
+    release reads `table=49 styles=1fr panel=52` at every one-second sample. A dashboard in
+    production refreshes every two seconds, so an operator in a narrow window lives in that
+    state.
+
+    The Accounts half is the other direction of the same clamp. The Accounts view's own
+    viewport at 80x30 is 7 rows and the roster wants 9, and a bound that reaches below
+    the roster hides a row inside a widget only the arrow keys can move — rule 35 again.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        for view_name, selector, rows in (("backups", "#backups-table", 6), ("accounts", "#accounts-table", 8)):
+            app, _log_path = build_app(tmp_path, initial_view=view_name, snapshot_file=demo, refresh=9999)
+            async with app.run_test(size=(80, 30)) as pilot:
+                await wait_for(lambda: getattr(app, "snapshot_loaded", False), message=f"the {view_name} data to load")
+                table = app.query_one(selector, DataTable)
+                await wait_for(lambda: table.row_count == rows, message=f"the {view_name} roster to fill")
+                for _refresh in range(2):
+                    await pilot.press("r")
+                    await pilot.pause(0.5)
+                wanted = table.row_count + 1  # the header row is content too
+                slack = table.region.height - wanted
+                assert 0 <= slack <= SelectionTable.ROSTER_FRAME_TOLERANCE, (
+                    f"{view_name} at 80x30 after a refresh put {table.row_count} rows in a frame "
+                    f"{table.region.height} rows tall: {slack} rows of frame the data does not fill"
+                )
+
+    asyncio.run(scenario())

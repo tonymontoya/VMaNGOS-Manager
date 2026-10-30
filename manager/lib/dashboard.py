@@ -1168,6 +1168,10 @@ class SelectionTable:
         self.sort_column: int | None = None
         self._frame_height: Any = None
         self._height_retry_pending = False
+        # The pane-height retry has a budget too. A details pane genuinely taller than
+        # the roster beside it stays taller, so an unbounded retry is a callback every
+        # `LAYOUT_RETRY_DELAY` for the life of the session rather than a wait.
+        self._height_passes = 0
 
     def set_filter(self, text: str) -> None:
         normalized = text.strip().lower()
@@ -1186,22 +1190,35 @@ class SelectionTable:
 
     # A table is the one widget on this dashboard allowed a height it did not
     # earn, because a roster longer than the window has to scroll itself: the view
-    # cannot follow a cursor that moves inside a widget. The other half of that
-    # rule was missing. `#accounts-table { height: 1fr }` hands a realm with eight
-    # accounts a 29-row table inside a 31-row frame at 140x52 — measured with
-    # `ops/tools/dashboard_probe_roster_frames.py`, 21 rows of bordered nothing,
-    # the same shape under a two-row schedule list and under six log events.
+    # cannot follow a cursor that moves inside a widget. The tolerance is how far
+    # past the window a roster may reach before that concession is made. It used
+    # to point the other way — it was the margin that *chose* the filling posture,
+    # which is how six archives ended up in a 49-row frame at 80x30 — and a roster
+    # within a few rows of fitting is now given its rows and lets the view scroll
+    # the remainder, which is rule 35 saying a pane does not cut its own content.
     ROSTER_FRAME_TOLERANCE = 3
 
     def apply_frame_height(self, row_count: int) -> None:
         """Give a roster as much frame as its rows need, and no more.
 
         Short roster: the table gets its rows plus a header, so the panel stops at
-        the last row instead of stretching to the window. Long roster: it keeps
-        filling and scrolls internally, which is what the arrow keys, the cursor,
-        and the search box depend on. Between those two, a table is never shorter
-        than the pane sitting beside it in the same row: two ragged edges inside
-        one border look like a bug even when each half is sized correctly.
+        the last row instead of stretching to the window. Long roster — longer than
+        the window by more than `ROSTER_FRAME_TOLERANCE`: it takes the window and
+        scrolls internally, which is what the arrow keys, the cursor, and the search
+        box depend on. In between, a table is never shorter than the pane sitting
+        beside it in the same row, as long as that also fits: two ragged edges
+        inside one border look like a bug even when each half is sized correctly.
+
+        Never shorter than its own rows, either. At 80x30 the Accounts view's own
+        viewport is 7 rows and the roster wants 9, and a bound that reaches under
+        the roster hides a row inside a widget that only the arrow keys can move.
+
+        The bound is a **number of rows**, never a fraction. `1fr` was the old long
+        roster answer and it is only a bound where something bounds it: the
+        side-by-side arrangement gives the view fixed rows, the stacked one gives
+        the panel `height: auto`, and a fraction in an auto-height box is bounded by
+        nothing — measured at 80x30 on the first refresh, `styles.height: 7` became
+        `1fr` and the table became 49 rows around six archives.
 
         The window this is measured against is the **view**, not the panel: the
         panel's own height is the thing this method changes, and a first attempt
@@ -1243,18 +1260,39 @@ class SelectionTable:
                 self._height_retry_pending = True
                 self.table.call_after_refresh(lambda: self.retry_frame_height(row_count))
             return
-        if wanted + self.ROSTER_FRAME_TOLERANCE >= available:
-            height: Any = "1fr"
+        # A frame is never taller than its rows, and when its rows do not fit the
+        # window it is never taller than the window. A fraction used to be the
+        # answer to the second half: `1fr` is bounded in the side-by-side
+        # arrangement, where the view's rows are fixed, and bounded by nothing in
+        # the stacked one, where the panel is auto-height. Measured at 80x30 after
+        # one refresh, six archives asked for 7 rows and the roster came back with
+        # a 49-row frame — 42 rows of bordered nothing — while the same view on the
+        # previous release measured `styles.height: 1fr, table 49, panel 52`.
+        if wanted > available + self.ROSTER_FRAME_TOLERANCE:
+            # The roster is longer than the window by more than a few rows: the frame
+            # takes the window and scrolls itself, because the view cannot follow a
+            # cursor that moves inside a widget. Within a few rows of fitting it is
+            # given its rows and the view scrolls the remainder instead — rule 35, the
+            # one that says a pane does not cut its own content.
+            height: Any = available
         else:
-            height = max(wanted, beside)
-            if beside > wanted and not self._height_retry_pending:
-                # The height came from a pane whose text is rendered after this
-                # table is: at the moment of the rebuild it still held the previous
-                # selection's lines. One more pass, once the pane has been written.
-                self._height_retry_pending = True
-                self.table.call_after_refresh(lambda: self.retry_frame_height(row_count))
+            # It fits, so it gets its rows — or the taller pane beside it, as long as
+            # that pane also fits. Never fewer rows than it has: at 80x30 the Accounts
+            # view's own viewport is 7 rows, and a clamp that reached below the roster
+            # hid its last row inside a table that only the arrow keys can move.
+            height = max(wanted, min(beside, available))
         if height == self._frame_height:
+            self._height_passes = 0
             return
+        if beside > wanted and not self._height_retry_pending and self._height_passes < MAX_WIDTH_PASSES:
+            # The height came from a pane whose text is rendered after this table is:
+            # at the moment of the rebuild it still held the previous selection's
+            # lines, so one more pass once the pane has been written is worth taking.
+            # On a timer, and one callback per pass — the two reasons for that are
+            # rule 36 and rule 38 in the ops README.
+            self._height_retry_pending = True
+            self._height_passes += 1
+            self.table.set_timer(LAYOUT_RETRY_DELAY, lambda: self.retry_frame_height(row_count))
         self._frame_height = height
         self.table.styles.height = height
 
