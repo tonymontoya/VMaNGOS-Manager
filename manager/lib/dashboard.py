@@ -1048,6 +1048,10 @@ LAYOUT_RETRY_DELAY = 0.2
 # same delay is eight seconds; past that a card can be stale at most until the next
 # refresh, which re-arms this path in any case.
 DEFERRED_REPAINT_DELAY = LAYOUT_RETRY_DELAY
+# How many times the service card will ask for the layout before it accepts that the
+# pane has no width to measure. Bounded for the reason `retry_column_budget` states: an
+# unbounded retry is a callback every `LAYOUT_RETRY_DELAY` for the life of the session.
+MAX_SERVICE_REMEASURE_PASSES = 10
 MAX_DEFERRED_REPAINT_PASSES = 40
 MIN_ELASTIC_COLUMNS = 12
 
@@ -2789,7 +2793,46 @@ def render_sidebar_target(snapshot: dict[str, Any], short: bool = False) -> str:
     return "\n".join(lines)
 
 
-def render_service_panel(snapshot: dict[str, Any], active_view: str, narrow: bool = False) -> str:
+def pair_columns(blocks: tuple[tuple[str, ...], ...], budget: int) -> list[str] | None:
+    """Join side-by-side column blocks, or refuse when the result would not fit.
+
+    Each block is a tuple of rendered lines for one column, all of the same height.
+    The left columns are padded to their own widest line so the next column starts on
+    a real edge rather than one that jitters with the data. Widths are measured on the
+    markup-stripped text, since the tags cost no terminal columns.
+    """
+    heights = {len(block) for block in blocks}
+    if len(heights) != 1 or not blocks:
+        return None
+    width = max(len(strip_markup(line)) for block in blocks[:-1] for line in block)
+    rows: list[str] = []
+    for index in range(len(blocks[0])):
+        line = blocks[0][index].ljust(width + len(strip_markup(blocks[0][index])) - len(blocks[0][index]))
+        for block in blocks[1:-1]:
+            raw = block[index]
+            line += "  " + raw.ljust(width + len(strip_markup(raw)) - len(raw))
+        line += "  " + blocks[-1][index]
+        if len(strip_markup(line)) > budget:
+            return None
+        rows.append(line)
+    return rows
+
+
+def render_service_panel(
+    snapshot: dict[str, Any],
+    active_view: str,
+    narrow: bool = False,
+    columns: int | None = None,
+) -> str:
+    """Draw the Realm Services card.
+
+    `columns` is the content area of the pane this is about to be drawn into, measured
+    by the caller (`Static.content_size.width`). It decides whether the two services
+    may share a row: the Overview view puts this card beside another one, which leaves
+    it 54 columns at a 158-column window, while the Monitor view gives it 79 at 122
+    columns — so pairing cannot be a property of "wide", it has to be a property of the
+    pane actually drawing it. Left as `None`, the card stays stacked.
+    """
     server = snapshot["server"]
     if not server["ok"]:
         lines = [
@@ -2835,18 +2878,68 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str, narrow: boo
             f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}  [{ACCENT_MUTED}]check[/] {escape_markup(db.get('message', 'n/a'))}",
         ]
     else:
-        lines = [
-            f"[bold {ACCENT_GOLD}]Realm Services[/]",
-            f"[{ACCENT_MUTED}]Auth and world services, plus the DB check.[/]",
-            "",
-            f"[bold {ACCENT_SKY}]Auth[/]   {format_state(auth.get('health', auth.get('state')))}  [{ACCENT_MUTED}]pid[/] {auth.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {auth.get('uptime_human', 'N/A')}",
-            f"[{ACCENT_MUTED}]       cpu[/] {auth.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {auth.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {auth_restarts}",
-            "",
-            f"[bold {ACCENT_SKY}]World[/]  {format_state(world.get('health', world.get('state')))}  [{ACCENT_MUTED}]pid[/] {world.get('pid', 0)}  [{ACCENT_MUTED}]up[/] {world.get('uptime_human', 'N/A')}",
-            f"[{ACCENT_MUTED}]       cpu[/] {world.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {world.get('memory_mb', 0)} MB  [{ACCENT_MUTED}]restarts/1h[/] {world_restarts}",
-            "",
-            f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}  [{ACCENT_MUTED}]check[/] {escape_markup(db.get('message', 'n/a'))}",
-        ]
+        # Auth and world are two halves of one fact, and at 140 columns the wide card
+        # spent the whole right half of itself on emptiness: six rows of content in a
+        # pane 100 columns across. Pairing them puts the second service where the eye
+        # has already learned to look on the Monitor view's process card, and buys back
+        # the rows the Overview needs — at 140x52 the Player Pulse card used to start
+        # below the fold.
+        #
+        # Uptime steps out of the pair. It is the one field long enough to break the
+        # columns (`up 365d 23h 59m` is fifteen characters on a row that has 79 to
+        # spend), it is the field nobody acts on from the Overview, and the Monitor
+        # view's process card already carries it at every window size.
+        def pair_column(
+            name: str, pad: str, service: dict[str, Any], restarts: int, include_uptime: bool = False
+        ) -> tuple[str, str]:
+            slot = (
+                f"[{ACCENT_MUTED}]restarts/1h[/] {restarts}"
+                if restarts
+                else f"[{ACCENT_MUTED}]pid[/] {service.get('pid', 0)}"
+            )
+            head = f"[bold {ACCENT_SKY}]{name}[/]{pad}{format_state(service.get('health', service.get('state')))}  {slot}"
+            if include_uptime:
+                # A stacked row has the whole width to itself, so the one field that is
+                # too long to pair — uptime — goes back into it. This is not the pairing
+                # budget's problem: `test_no_card_draws_a_row_wider_than_the_column_it_was_given`
+                # holds every drawn row to the pane that draws it, at every size.
+                head += f"  [{ACCENT_MUTED}]up[/] {service.get('uptime_human', 'N/A')}"
+            stats = f"[{ACCENT_MUTED}]cpu[/] {service.get('cpu_percent', 0)}%  [{ACCENT_MUTED}]mem[/] {service.get('memory_mb', 0)} MB"
+            return head, stats
+
+        auth_block = pair_column("Auth", "   ", auth, auth_restarts)
+        world_block = pair_column("World", "  ", world, world_restarts)
+        db_row = f"[bold {ACCENT_SKY}]DB[/]     {format_state('ok' if db.get('ok') else db.get('message', 'unreachable'))}  [{ACCENT_MUTED}]check[/] {escape_markup(db.get('message', 'n/a'))}"
+
+        paired = pair_columns((auth_block, world_block), columns) if columns else None
+        if paired is None:
+            # Something in the snapshot is wider than the columns the pairing was
+            # measured for — stacked rows are then the honest answer, because a row
+            # this panel draws past its content area is a row that is silently gone.
+            stacked_auth = pair_column("Auth", "   ", auth, auth_restarts, include_uptime=True)
+            stacked_world = pair_column("World", "  ", world, world_restarts, include_uptime=True)
+            lines = [
+                f"[bold {ACCENT_GOLD}]Realm Services[/]",
+                f"[{ACCENT_MUTED}]Auth and world services, plus the DB check.[/]",
+                "",
+                stacked_auth[0],
+                f"   {stacked_auth[1]}",
+                "",
+                stacked_world[0],
+                f"   {stacked_world[1]}",
+                "",
+                db_row,
+            ]
+        else:
+            lines = [
+                f"[bold {ACCENT_GOLD}]Realm Services[/]",
+                f"[{ACCENT_MUTED}]Auth and world services, plus the DB check.[/]",
+                "",
+                paired[0],
+                paired[1],
+                "",
+                db_row,
+            ]
 
     # Name the realm this console is pointed at: a screen full of green means
     # nothing if it is the wrong host. One line, because this panel's row is
@@ -2854,10 +2947,18 @@ def render_service_panel(snapshot: dict[str, Any], active_view: str, narrow: boo
     install_root = str(summary.get("install_root", "") or "")
     if install_root:
         services = ", ".join(part for part in (summary.get("auth_service", ""), summary.get("world_service", "")) if part)
-        lines.append(
+        target_row = (
             f"[bold {ACCENT_SKY}]Target[/]  {escape_markup(install_root)}"
             + (f"  [{ACCENT_MUTED}]units[/] {escape_markup(services)}" if services else "")
         )
+        if not narrow and columns and lines and lines[-1].startswith("[bold "):
+            joined = lines[-1] + "  " + target_row
+            if len(strip_markup(joined)) <= columns:
+                lines[-1] = joined
+            else:
+                lines.append(target_row)
+        else:
+            lines.append(target_row)
 
     return "\n".join(lines)
 
@@ -4400,6 +4501,7 @@ def create_app(
             self.refresh_inflight = False
             self.refresh_pending = False
             self.repaint_pending = False
+            self.service_remeasure_passes = 0
             self.refresh_force_full = False
             self.last_refresh_failed = False
             self.snapshot_loaded = False
@@ -4922,6 +5024,29 @@ def create_app(
                 return
             self.set_timer(DEFERRED_REPAINT_DELAY, lambda: self.arm_deferred_repaint(attempt + 1))
 
+        def repaint_service_pane(self) -> None:
+            """Redraw one card, once the layout has handed it a width to measure.
+
+            Split out of the layout retry so the retry cannot disturb anything else: a
+            full `repaint()` also re-runs the roster refreshers, and a scroll position
+            that jumps back to the top while the layout settles is a defect of its own.
+            """
+            from textual.dom import NoMatches
+
+            if self.modal_open():
+                self.repaint_pending = True
+                self.arm_deferred_repaint()
+                return
+            try:
+                pane = self.query_one("#service-pane", Static)
+            except NoMatches:
+                return
+            pane.update(
+                render_service_panel(
+                    self.snapshot, self.active_view, narrow=self.narrow_viewport, columns=pane.content_size.width
+                )
+            )
+
         def request_snapshot_refresh(self, *, full: bool = False) -> None:
             # Coalesce instead of dropping: if a refresh is already running,
             # remember that another one is wanted and run it when the
@@ -5017,7 +5142,21 @@ def create_app(
                 return
             self.repaint_pending = False
             snapshot = self.snapshot
-            self.query_one("#service-pane", Static).update(render_service_panel(snapshot, self.active_view, narrow=self.narrow_viewport))
+            service_pane = self.query_one("#service-pane", Static)
+            pane_columns = service_pane.content_size.width
+            service_pane.update(
+                render_service_panel(snapshot, self.active_view, narrow=self.narrow_viewport, columns=pane_columns)
+            )
+            if pane_columns == 0 and self.service_remeasure_passes < MAX_SERVICE_REMEASURE_PASSES:
+                # The card was drawn before the layout had handed the pane any columns, so
+                # the pairing decision had nothing to measure and drew stacked. One bounded
+                # retry, the same shape `retry_column_budget` uses for the tables: the pass
+                # that follows the layout settles draws the card with its real width.
+                self.service_remeasure_passes += 1
+                # Only the card is redrawn, not the whole view: a full repaint would also
+                # re-run the roster refreshers, and a scroll position that jumps back to
+                # the top while the layout settles is a defect of its own.
+                self.set_timer(LAYOUT_RETRY_DELAY, lambda: self.repaint_service_pane())
             self.query_one("#metrics-pane", Static).update(render_metrics_panel(snapshot, self.metric_history, self.refresh_interval, narrow=self.narrow_viewport))
             self.query_one("#player-pulse-pane", Static).update(render_player_pulse(snapshot, self.metric_history, self.refresh_interval, narrow=self.narrow_viewport))
             self.query_one("#alerts-pane", Static).update(render_alerts_panel(snapshot, narrow=self.narrow_viewport))
@@ -5949,7 +6088,15 @@ def create_app(
                 self.repaint_pending = True
                 self.arm_deferred_repaint()
             else:
-                self.query_one("#service-pane", Static).update(render_service_panel(self.snapshot, self.active_view, narrow=self.narrow_viewport))
+                service_pane = self.query_one("#service-pane", Static)
+                service_pane.update(
+                    render_service_panel(
+                        self.snapshot,
+                        self.active_view,
+                        narrow=self.narrow_viewport,
+                        columns=service_pane.content_size.width,
+                    )
+                )
             if self.active_view == "operations":
                 self.query_one("#schedule-details", Static).update(
                     render_schedule_details(self.selected_schedule(), len(self.snapshot.get("schedules", [])))

@@ -841,7 +841,12 @@ def test_dashboard_panels_fit_their_grid_cells(tmp_path):
                 await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
                 snapshot, history = app.snapshot, app.metric_history
                 producers = {
-                    "#service-pane": lambda: render_service_panel(snapshot, view),
+                    "#service-pane": (
+                        # The card pairs its services only into a pane wide enough to hold
+                        # the pair, so the expectation is computed with the width the pane
+                        # actually has — the same measurement the app passes it.
+                        lambda: render_service_panel(snapshot, view, columns=app.query_one("#service-pane").size.width)
+                    ),
                     "#metrics-pane": lambda: render_metrics_panel(snapshot, history, 30),
                     "#player-pulse-pane": lambda: render_player_pulse(snapshot, history, 30),
                     "#alerts-pane": lambda: render_alerts_panel(snapshot),
@@ -1769,6 +1774,80 @@ def test_a_short_narrow_window_shows_three_of_the_four_cards(tmp_path):
                     )
 
         asyncio.run(scenario())
+
+
+def test_the_service_card_shares_a_row_only_when_the_pane_can_pay_for_one(tmp_path):
+    """Pairing is a property of the pane, not of the word "wide".
+
+    The same card gets 79 columns at a 122-column window — the Overview stacks its
+    cards, so the service card owns the row — and only 54 at a 158-column window, where
+    the Overview draws two cards side by side and the service card is the left one. The
+    wider terminal gives the card fewer columns, which is exactly why pairing cannot be
+    decided from `narrow` and has to be measured against the pane that draws it
+    (standing rule 13). Both directions are asserted: refusing to pair when the sum
+    would be clipped, and pairing when the pane has the room, because the second is the
+    visual win and nothing else would notice if it quietly stopped happening.
+    """
+    # Two apps, not one app run twice: a Textual pilot is bound to a single run, and a
+    # second `run_test` on the same instance times out inside the pilot rather than
+    # telling you the app is already shut down.
+    app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+    app_narrow_card, _other_log = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+    async def scenario():
+        async with app.run_test(size=(122, 40)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+            pane = app.query_one("#service-pane")
+            await wait_for(lambda: pane.content_size.width > 0, message="layout to hand the card its columns")
+            width = pane.content_size.width
+            assert width >= 70, f"at 122 columns the card has only {width} columns to itself"
+            rows = [strip_markup(line) for line in str(pane.renderable).splitlines() if line.strip()]
+            paired = [line for line in rows if line.lstrip().startswith("Auth") and "World" in line]
+            assert len(paired) == 1, f"the card did not pair its services into {width} columns: {rows!r}"
+            for line in rows:
+                assert len(line) <= width, f"a paired row is {len(line)} columns in {width}: {line!r}"
+
+        # The refusal is checked on the pure renderer, where the data can be made wide
+        # on purpose: the demo snapshot's pids are short enough that its pair fits inside
+        # the 54 columns the Overview leaves it at a 158-column window, which is the
+        # right answer, not a bug.
+        async with app_narrow_card.run_test(size=(158, 52)) as pilot:
+            await pilot.pause()
+            await wait_for(lambda: app_narrow_card.snapshot_loaded, message="snapshot to load")
+            pane = app_narrow_card.query_one("#service-pane")
+            await wait_for(lambda: pane.content_size.width > 0, message="layout to hand the card its columns")
+            width = pane.content_size.width
+            assert width < 70, f"at 158 columns the card unexpectedly owns {width} columns"
+            rows = [strip_markup(line) for line in str(pane.renderable).splitlines() if line.strip()]
+            for line in rows:
+                assert len(line) <= width, f"a row is {len(line)} columns in {width}: {line!r}"
+
+        snapshot = json.loads(json.dumps(app.snapshot))
+        for name in ("auth", "world"):
+            service = dict(snapshot["server"]["data"]["services"][name])
+            service["pid"] = 231000001
+            service["memory_mb"] = 8192
+            service["restart_count_1h"] = 12
+            snapshot["server"]["data"]["services"][name] = service
+        stacked = [
+            strip_markup(line)
+            for line in render_service_panel(snapshot, "overview", narrow=False, columns=width).splitlines()
+            if line.strip()
+        ]
+        shared = [line for line in stacked if "Auth" in line and "World" in line]
+        assert not shared, f"services were paired into {width} columns of data that does not fit: {shared!r}"
+        for line in stacked:
+            assert len(line) <= width, f"a stacked row is {len(line)} columns in {width}: {line!r}"
+        roomy = [
+            strip_markup(line)
+            for line in render_service_panel(snapshot, "overview", narrow=False, columns=100).splitlines()
+            if line.strip()
+        ]
+        paired = [line for line in roomy if line.lstrip().startswith("Auth") and "World" in line]
+        assert len(paired) == 1, f"the same data did not pair when the pane owned 100 columns: {roomy!r}"
+
+    asyncio.run(scenario())
 
 
 def test_a_narrow_service_card_gives_each_service_one_row(tmp_path):
