@@ -568,7 +568,8 @@ BUILDEOF
     chmod +x "$CHECKPOINT_DIR/build.sh"
     
     # Start build in background with nohup
-    nohup "$CHECKPOINT_DIR/build.sh" "$INSTALL_LOG" "$(nproc)" "$INSTALLROOT" > /dev/null 2>&1 &
+    # "$CPU", not "$(nproc)": the caller has already sized this against memory.
+    nohup "$CHECKPOINT_DIR/build.sh" "$INSTALL_LOG" "$CPU" "$INSTALLROOT" > /dev/null 2>&1 &
     BUILD_PID=$!
     echo "$BUILD_PID" > "$CHECKPOINT_DIR/build.pid"
     
@@ -1119,6 +1120,13 @@ phase_build() {
         fail_marker build "Failed to count the available CPU cores" "Check that nproc is available, then re-run the installer"
         return 1
     }
+    local avail jobs
+    avail="$(mem_available_bytes)" || avail=0
+    jobs="$(build_parallel_jobs "$CPU" "$avail")"
+    if [ "$jobs" -ne "$CPU" ]; then
+        log_info "Memory, not cores, sets the build width: $CPU core(s) but $(( avail / 1048576 )) MiB available, so $jobs compiler job(s)."
+        CPU="$jobs"
+    fi
     
     log_info "====================================================================="
     log_info "COMPILING VMANGOS - THIS WILL TAKE 1-2 HOURS"
@@ -1159,10 +1167,18 @@ phase_build() {
     log_info ""
     log_info "Step 1/3: Configuring build with cmake..."
     set +e
+    # -DDEBUG is not an option of this project (cmake/options.cmake defines
+    # DEBUG_SYMBOLS, which defaults ON), so passing an undefined -D only earns a
+    # "manually-specified variables were not used by the project" warning. Leaving
+    # the build type unset is worse than it looks: options.cmake force-sets Release
+    # and showoptions.cmake then appends -g because DEBUG_SYMBOLS is ON, so the
+    # default build is -O3 -g — the most memory-hungry combination available on a
+    # box with 7 GiB and a resident mysqld.
     cmake ../source -DCMAKE_INSTALL_PREFIX="$INSTALLROOT/run" \
         -DCONF_DIR="$INSTALLROOT/run/etc" \
         -DBUILD_EXTRACTORS=1 \
-        -DDEBUG=0 2>&1 | tee -a "$INSTALL_LOG"
+        -DCMAKE_BUILD_TYPE=Release \
+        -DDEBUG_SYMBOLS=OFF 2>&1 | tee -a "$INSTALL_LOG"
     CMAKE_RC="${PIPESTATUS[0]}"
 
     if [ "$CMAKE_RC" -ne 0 ]; then
@@ -1270,6 +1286,39 @@ config_edit_required() {
             "The config file no longer matches the release default this installer assumes; compare $file against $(basename "$file").dist before trusting this phase"
         return 1
     fi
+}
+
+# mem_available_bytes: what the kernel thinks a new process could get right now.
+# VMANGOS_MEM_AVAILABLE_BYTES exists as a seam so the sizing rules below can be
+# argued with in a test rather than only on a machine.
+mem_available_bytes() {
+    if [ -n "${VMANGOS_MEM_AVAILABLE_BYTES:-}" ]; then
+        printf '%s\n' "$VMANGOS_MEM_AVAILABLE_BYTES"
+        return 0
+    fi
+    local line
+    line="$(awk '/^MemAvailable:/{print $2 * 1024; exit}' /proc/meminfo 2>/dev/null)"
+    if [ -z "$line" ]; then
+        printf '0\n'
+        return 1
+    fi
+    printf '%s\n' "$line"
+}
+
+# build_parallel_jobs <cores> <mem_available_bytes>: how many compiler
+# front-ends this box can run at once. nproc alone is not a bound: vmangos'
+# largest translation units (SpellAuras.cpp, ObjectMgr.cpp) each want well over a
+# gigabyte at -O3, mysqld is already resident because the database phase runs
+# before the build, and the realm hosts this installer targets are commonly
+# 7-8 GiB machines. 1.5 GiB per job is the budget; a box that cannot fund one job
+# still gets one, because a build that finishes slowly beats one the OOM killer
+# stops halfway through src/game.
+build_parallel_jobs() {
+    local cores="$1" avail="$2" jobs
+    jobs=$(( avail / 1610612736 ))
+    [ "$jobs" -lt 1 ] && jobs=1
+    [ "$jobs" -gt "$cores" ] && jobs="$cores"
+    printf '%s\n' "$jobs"
 }
 
 # config_edit <setting> <file> <sed-expr>: one guarded config edit. sed -i
@@ -1541,7 +1590,7 @@ phase_data_extraction() {
         log_info "  VMANGOS_CLIENT_DATA=/path/to/Data sudo bash vmangos_setup.sh"
         log_info ""
         log_info "To extract manually instead, place the client Data folder and run:"
-        log_info "  sudo $INSTALLROOT/run/bin/Extractors/mapextractor --silent -i <client_root_with_Data>"
+        log_info "  sudo $INSTALLROOT/mapextractor --silent -i <client_root_with_Data>"
         fail_marker extraction "No client data found" "Provide a WoW 1.12.1 (build 5875) client Data folder and set VMANGOS_CLIENT_DATA, then re-run the installer"
         return 1
     fi
@@ -1749,7 +1798,16 @@ phase_data_extraction() {
         HEARTBEAT_PID=$!
 
         # Run the actual generation (--silent: it waits for "press enter" otherwise)
-        sudo -u "$MANGOSOSUSER" ./MoveMapGen --silent --offMeshInput offmesh.txt 2>&1 | tee -a "$INSTALL_LOG"
+        # --threads is not tuning: MoveMapGenerator prompts on stdin for a core
+        # count whenever --threads is absent, whatever --silent says
+        # (contrib/mmap/src/generator.cpp: if (!threads) { std::cout << "How many
+        # cores should be used?" …; std::cin >> threads; … }, then a second Enter).
+        # With the installer's stdin that prompt reads EOF, threads stays 0,
+        # std::max(1, threads) clamps it, and the whole mmap pass crawls along on
+        # one core behind an ETA this script printed from nproc.
+        local mmap_jobs
+        mmap_jobs="$(build_parallel_jobs "$(nproc)" "$(mem_available_bytes || printf 0)")"
+        sudo -u "$MANGOSOSUSER" ./MoveMapGen --silent --threads "$mmap_jobs" --offMeshInput offmesh.txt 2>&1 | tee -a "$INSTALL_LOG"
         local MOVEMAP_RC=${PIPESTATUS[0]}
 
         # Stop the heartbeat
@@ -1787,10 +1845,14 @@ phase_data_extraction() {
         log_error ""
         log_info "Manual extraction commands:"
         log_info "  cd $INSTALLROOT"
-        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/mapextractor --silent -i <client_root_with_Data>"
-        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/vmapextractor --silent -d <client_data_folder>"
-        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/vmap_assembler --silent buildings vmaps"
-        log_info "  sudo -u $MANGOSOSUSER ./run/bin/Extractors/MoveMapGenerator --silent"
+        # The lowercase names are the copies this phase puts in the install root;
+        # run/bin/Extractors/ holds CMake's names (MapExtractor, VMapExtractor,
+        # VMapAssembler, MoveMapGenerator), and the lowercase ones are the files
+        # that actually sit next to the data they read.
+        log_info "  sudo -u $MANGOSOSUSER ./mapextractor --silent -i <client_root_with_Data>"
+        log_info "  sudo -u $MANGOSOSUSER ./vmapextractor --silent -d <client_data_folder>"
+        log_info "  sudo -u $MANGOSOSUSER ./vmap_assembler --silent Buildings vmaps"
+        log_info "  sudo -u $MANGOSOSUSER ./MoveMapGen --silent --threads <n>"
         log_error ""
         fail_marker extraction "Data extraction failed" "Verify the client data is WoW 1.12.1 (build 5875) and complete, then re-run the installer to resume from this phase"
         return 1
@@ -1913,7 +1975,7 @@ phase_database_import() {
                     if [ -f "mysql-dump/logon.sql" ]; then
                         log_info "Importing auth database (logon.sql)..."
                         mysql "$AUTHDB" < "mysql-dump/logon.sql" || {
-                            fail_marker db-import "Failed to import the auth database" "Check the MariaDB log for the failing statement, then re-run the installer"
+                            fail_marker db-import "Failed to import the auth database" "Check /var/log/mysql/error.log (Ubuntu's packaged mysqld.cnf sets log_error there) for the failing statement, then re-run the installer"
                             return 1
                         }
                         log_marker db-import progress "percent=20" "step=Import auth database"
@@ -1922,7 +1984,7 @@ phase_database_import() {
                     if [ -f "mysql-dump/characters.sql" ]; then
                         log_info "Importing characters database..."
                         mysql "$CHARACTERDB" < "mysql-dump/characters.sql" || {
-                            fail_marker db-import "Failed to import the characters database" "Check the MariaDB log for the failing statement, then re-run the installer"
+                            fail_marker db-import "Failed to import the characters database" "Check /var/log/mysql/error.log (Ubuntu's packaged mysqld.cnf sets log_error there) for the failing statement, then re-run the installer"
                             return 1
                         }
                         log_marker db-import progress "percent=40" "step=Import characters database"
@@ -1931,7 +1993,7 @@ phase_database_import() {
                     if [ -f "mysql-dump/logs.sql" ]; then
                         log_info "Importing logs database..."
                         mysql "$LOGSDB" < "mysql-dump/logs.sql" || {
-                            fail_marker db-import "Failed to import the logs database" "Check the MariaDB log for the failing statement, then re-run the installer"
+                            fail_marker db-import "Failed to import the logs database" "Check /var/log/mysql/error.log (Ubuntu's packaged mysqld.cnf sets log_error there) for the failing statement, then re-run the installer"
                             return 1
                         }
                         log_marker db-import progress "percent=60" "step=Import logs database"
@@ -1940,7 +2002,7 @@ phase_database_import() {
                     if [ -f "mysql-dump/mangos.sql" ]; then
                         log_info "Importing world database (this may take a while)..."
                         mysql "$WORLDDB" < "mysql-dump/mangos.sql" || {
-                            fail_marker db-import "Failed to import the world database" "Check the MariaDB log for the failing statement, then re-run the installer"
+                            fail_marker db-import "Failed to import the world database" "Check /var/log/mysql/error.log (Ubuntu's packaged mysqld.cnf sets log_error there) for the failing statement, then re-run the installer"
                             return 1
                         }
                         log_info "World database imported successfully"
@@ -1957,7 +2019,7 @@ phase_database_import() {
                     if [ -n "$WORLD_SQL" ]; then
                         log_info "Importing world database from $WORLD_SQL (this may take a while)..."
                         mysql "$WORLDDB" < "$WORLD_SQL" || {
-                            fail_marker db-import "Failed to import the world database" "Check the MariaDB log for the failing statement, then re-run the installer"
+                            fail_marker db-import "Failed to import the world database" "Check /var/log/mysql/error.log (Ubuntu's packaged mysqld.cnf sets log_error there) for the failing statement, then re-run the installer"
                             return 1
                         }
                         log_info "World database imported successfully"
@@ -2032,7 +2094,7 @@ phase_database_import() {
     fi
 
     ensure_realmlist_entry || {
-        fail_marker db-import "Failed to seed the realmlist" "Check that the auth database exists and the MariaDB log for the failing statement"
+        fail_marker db-import "Failed to seed the realmlist" "Check that the auth database exists and /var/log/mysql/error.log for the failing statement"
         return 1
     }
     log_marker db-import "done"

@@ -780,7 +780,11 @@ EOF
 printf 'chown:%s\n' "\$*" >> '$tmp_dir/capture'
 exit 0
 EOF
-    chmod +x "$tmp_dir/bin/sudo" "$tmp_dir/bin/id" "$tmp_dir/bin/useradd" "$tmp_dir/bin/chown"
+    cat > "$tmp_dir/bin/nproc" <<'EOF'
+#!/usr/bin/env bash
+echo 4
+EOF
+    chmod +x "$tmp_dir/bin/sudo" "$tmp_dir/bin/id" "$tmp_dir/bin/useradd" "$tmp_dir/bin/chown" "$tmp_dir/bin/nproc"
 
     touch "$client/dbc.MPQ" "$client/terrain.MPQ" "$root/client-data/dbc.MPQ"
 
@@ -853,9 +857,15 @@ EOF
     assert_equals "vmap_assembler:--silent $root/Buildings $root/vmaps" \
         "$(printf '%s\n' "$capture" | grep '^vmap_assembler:' | head -1)" \
         "vmap_assembler assembles Buildings into vmaps, silently" || failed=1
-    assert_equals "MoveMapGen:--silent --offMeshInput offmesh.txt" \
+    # --threads is not a performance nicety: MoveMapGenerator prompts on stdin for a
+    # core count whenever --threads is absent ("if (!threads) { … std::cin >> threads;
+    # … }" in contrib/mmap/src/generator.cpp), regardless of --silent, and then waits
+    # for a second Enter. Under the installer's stdin that prompt reads EOF, threads
+    # stays 0, std::max(1, threads) clamps it, and the whole mmap pass runs on ONE
+    # core behind an ETA the script computed from nproc.
+    assert_equals "MoveMapGen:--silent --threads 4 --offMeshInput offmesh.txt" \
         "$(printf '%s\n' "$capture" | grep '^MoveMapGen:')" \
-        "MoveMapGen runs silent with the offmesh file" || failed=1
+        "MoveMapGen is told how many threads to use" || failed=1
     assert_equals "1" \
         "$(printf '%s\n' "$capture" | grep -c '^MoveMapGen:')" \
         "MoveMapGen is skipped when the assembler fails (no masked pipeline)" || failed=1
@@ -959,6 +969,7 @@ EOF
     PATH="$tmp_dir/bin:$PATH" \
     REPO_ROOT="$REPO_ROOT" \
     CLIENT_DATA="" \
+    VMANGOS_MEM_AVAILABLE_BYTES=8589934592 \
     bash -c '
         set -eu
         source "$REPO_ROOT/vmangos_setup.sh"
@@ -2394,6 +2405,80 @@ EOF
     return "$failed"
 }
 
+
+
+# -j nproc is not a bound on a realm host: vmangos' largest translation units
+# (SpellAuras.cpp, ObjectMgr.cpp) want well over a gigabyte each at -O3, mysqld is
+# already resident because the database phase runs first, and this class of host has
+# 7.1 GiB. The cap is a function so it can be argued with in a test.
+test_build_parallel_jobs_caps_by_memory() {
+    local failed=0
+    out() { REPO_ROOT="$REPO_ROOT" bash -c '
+            set -eu
+            source "$REPO_ROOT/vmangos_setup.sh"
+            printf "JOBS=%s\n" "$(build_parallel_jobs "$1" "$2")"
+        ' _ "$1" "$2" 2>&1 | sed -n 's/^JOBS=//p'; }
+    assert_equals "4" "$(out 4 8589934592)" \
+        "four cores with 8 GiB free compile four-wide" || failed=1
+    assert_equals "2" "$(out 8 3221225472)" \
+        "eight cores with 3 GiB free are capped to two compiler front-ends" || failed=1
+    assert_equals "1" "$(out 4 536870912)" \
+        "half a gigabyte still gets one job rather than a build that cannot start" || failed=1
+    assert_equals "1" "$(out 1 99999999999)" \
+        "the core count is a ceiling in the other direction too" || failed=1
+    return "$failed"
+}
+
+# -DDEBUG is not an option of this codebase — cmake/options.cmake defines
+# DEBUG_SYMBOLS — so passing -DDEBUG=0 buys nothing but a "manually-specified
+# variables were not used by the project" warning, and with no build type plus
+# DEBUG_SYMBOLS defaulting ON, cmake/showoptions.cmake appends -g to -O3.
+test_build_phase_configures_options_the_code_understands() {
+    local tmp_dir root failed=0
+    tmp_dir="$(mktemp -d)"
+    root="$tmp_dir/root"
+    mkdir -p "$tmp_dir/bin" "$root" "$root/.install-checkpoints"
+
+    cat > "$tmp_dir/bin/cmake" <<EOF
+#!/usr/bin/env bash
+printf 'cmake:%s\n' "\$*" >> '$tmp_dir/capture'
+exit 0
+EOF
+    cat > "$tmp_dir/bin/make" <<EOF
+#!/usr/bin/env bash
+printf 'make:%s\n' "\$*" >> '$tmp_dir/capture'
+exit 0
+EOF
+    cat > "$tmp_dir/bin/nproc" <<'EOF'
+#!/usr/bin/env bash
+echo 4
+EOF
+    chmod +x "$tmp_dir/bin/cmake" "$tmp_dir/bin/make" "$tmp_dir/bin/nproc"
+
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    VMANGOS_MEM_AVAILABLE_BYTES=3221225472 \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        BUILD_IN_BACKGROUND=0
+        phase_build
+    ' > "$tmp_dir/phase.out" 2>&1
+
+    assert_equals "1" "$(grep -c -- '-DDEBUG_SYMBOLS=OFF' "$tmp_dir/capture" 2>/dev/null || true)" \
+        "debug symbols are switched off with the option this project actually defines" || failed=1
+    assert_equals "0" "$(grep -c -- '-DDEBUG=0' "$tmp_dir/capture" 2>/dev/null || true)" \
+        "the invented -DDEBUG=0 is gone" || failed=1
+    assert_equals "1" "$(grep -c -- '-DCMAKE_BUILD_TYPE=Release' "$tmp_dir/capture" 2>/dev/null || true)" \
+        "the build type is stated rather than inherited from a force-set default" || failed=1
+    assert_equals "1" "$(grep -c '^make:-j 2' "$tmp_dir/capture" 2>/dev/null || true)" \
+        "3 GiB free compiles two-wide on a four-core box" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
 main() {
     echo "========================================"
     echo "VMANGOS Installer Test Suite"
@@ -2432,6 +2517,8 @@ main() {
     run_test "Installer: Config edit required lands" test_config_edit_required_detects_a_silent_noop
     run_test "Installer: Services units hardened" test_services_units_are_sandboxed_and_core_free
     run_test "Installer: Realmlist build range" test_realmlist_row_advertises_only_the_vanilla_build
+    run_test "Installer: Build jobs capped by memory" test_build_parallel_jobs_caps_by_memory
+    run_test "Installer: Build phase cmake options" test_build_phase_configures_options_the_code_understands
     run_test "Installer: Build nproc guard" test_build_phase_nproc_guard
     run_test "Installer: db-import extraction guard" test_db_import_extraction_guard
 
