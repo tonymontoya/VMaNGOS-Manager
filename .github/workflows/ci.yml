@@ -12,7 +12,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        # v5, not v4: the v4 runtime is Node 20, which GitHub deprecated and now
+        # force-runs on Node 24 — the warning is CI noise we should not re-earn.
+        uses: actions/checkout@v5
 
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
@@ -39,7 +41,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # fetch-depth 0 so the tag-vs-VERSION release check has history to compare
           fetch-depth: 0
