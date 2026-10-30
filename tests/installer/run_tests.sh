@@ -1071,8 +1071,10 @@ EOF
     PATH="$tmp_dir/bin:$PATH" \
     REPO_ROOT="$REPO_ROOT" \
     VMANGOS_DOWNLOAD_RETRY_DELAY=0 \
+    SCRATCH="$tmp_dir" \
     bash -c '
         set -euo pipefail
+        cd "$SCRATCH"   # the download targets are relative; without this the suite leaves ok.zip in the repository root
         source "$REPO_ROOT/vmangos_setup.sh"
         if download_with_retry "https://example.invalid/db.zip" out.zip; then
             printf "RESULT=pass\n"
@@ -1171,9 +1173,13 @@ test_config_phase_local_db_host() {
     root="$tmp_dir/root"
     mkdir -p "$root/run/etc"
 
+    # Mirrors upstream realmd.conf.dist.in: the empty LogsDir is what leaves
+    # Realmd.log in WorkingDirectory, and the installer now refuses to pretend it
+    # fixed that line if the file no longer has it.
     cat > "$root/run/etc/realmd.conf.dist" <<'EOF'
 LoginDatabaseInfo = "127.0.0.1;3306;mangos;mangos;realmd"
 BindIP = "0.0.0.0"
+LogsDir = ""
 EOF
     cat > "$root/run/etc/mangosd.conf.dist" <<'EOF'
 LoginDatabase.Info = "127.0.0.1;3306;mangos;mangos;realmd"
@@ -1490,9 +1496,13 @@ test_config_phase_manager_provision_guards() {
     root="$tmp_dir/root"
     mkdir -p "$tmp_dir/bin" "$root/run/etc" "$root/manager/config"
 
+    # Mirrors upstream realmd.conf.dist.in: the empty LogsDir is what leaves
+    # Realmd.log in WorkingDirectory, and the installer now refuses to pretend it
+    # fixed that line if the file no longer has it.
     cat > "$root/run/etc/realmd.conf.dist" <<'EOF'
 LoginDatabaseInfo = "127.0.0.1;3306;mangos;mangos;realmd"
 BindIP = "0.0.0.0"
+LogsDir = ""
 EOF
     cat > "$root/run/etc/mangosd.conf.dist" <<'EOF'
 LoginDatabase.Info = "127.0.0.1;3306;mangos;mangos;realmd"
@@ -1760,9 +1770,13 @@ test_config_phase_sed_guards() {
     root="$tmp_dir/root"
     mkdir -p "$tmp_dir/bin" "$root/run/etc" "$root/manager/config"
 
+    # Mirrors upstream realmd.conf.dist.in: the empty LogsDir is what leaves
+    # Realmd.log in WorkingDirectory, and the installer now refuses to pretend it
+    # fixed that line if the file no longer has it.
     cat > "$root/run/etc/realmd.conf.dist" <<'EOF'
 LoginDatabaseInfo = "127.0.0.1;3306;mangos;mangos;realmd"
 BindIP = "0.0.0.0"
+LogsDir = ""
 EOF
     cat > "$root/run/etc/mangosd.conf.dist" <<'EOF'
 LoginDatabase.Info = "127.0.0.1;3306;mangos;mangos;realmd"
@@ -2185,6 +2199,201 @@ test_extraction_no_client_data_marker() {
     return "$failed"
 }
 
+# Ubuntu 26.04 dropped p7zip-full (apt-cache policy -> (none)); the installer must
+# ask for whatever the release actually offers, because one dead name in the single
+# apt-get install line fails the whole prerequisites phase.
+test_prerequisites_archiver_package_choice() {
+    local tmp_dir failed=0 out
+    tmp_dir="$(mktemp -d)"
+    mkdir -p "$tmp_dir/bin"
+
+    cat > "$tmp_dir/bin/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+# 26.04 shape: 7zip has a candidate, p7zip-full does not.
+if [[ "$2" == "7zip" ]]; then
+    printf '%s\n' "7zip:" "  Candidate: 26.00+dfsg-1"
+else
+    printf '%s\n' "p7zip-full:" "  Candidate: (none)"
+fi
+EOF
+    chmod +x "$tmp_dir/bin/apt-cache"
+
+    out="$(REPO_ROOT="$REPO_ROOT" PATH="$tmp_dir/bin:$PATH" bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        printf "PKG=%s\n" "$(archiver_package)"
+    ' 2>/dev/null)"
+    assert_equals "7zip" "$(printf '%s\n' "$out" | sed -n 's/^PKG=//p')" \
+        "a release that ships 7zip gets 7zip" || failed=1
+
+    cat > "$tmp_dir/bin/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+# 22.04 shape: p7zip-full is the only thing that exists.
+if [[ "$2" == "7zip" ]]; then
+    printf '%s\n' "7zip:" "  Candidate: (none)"
+else
+    printf '%s\n' "p7zip-full:" "  Candidate: 16.02-3"
+fi
+EOF
+
+    out="$(REPO_ROOT="$REPO_ROOT" PATH="$tmp_dir/bin:$PATH" bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        printf "PKG=%s\n" "$(archiver_package)"
+    ' 2>/dev/null)"
+    assert_equals "p7zip-full" "$(printf '%s\n' "$out" | sed -n 's/^PKG=//p')" \
+        "a release that only has p7zip-full still gets an archiver" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
+# sed -i exits 0 when its pattern matches nothing, so a config edit that should
+# have bound a daemon or repointed a database can no-op and report success.
+test_config_edit_required_detects_a_silent_noop() {
+    local tmp_dir failed=0 markers
+    tmp_dir="$(mktemp -d)"
+    mkdir -p "$tmp_dir/bin"
+    printf '%s\n' 'BindIP = "0.0.0.0"' > "$tmp_dir/realmd.conf"
+
+    # The sed, the expected value and the target all arrive through the
+    # environment: nesting them in the quoted -c string is how this test would
+    # otherwise break on its own quoting instead of testing the guard.
+    run_edit() {
+        REPO_ROOT="$REPO_ROOT" INSTALL_LOG="$tmp_dir/install.log" \
+        TARGET="$tmp_dir/realmd.conf" \
+        EXPECTED='BindIP = "10\.0\.5\.5"' \
+        EXPR='s|BindIP.*=.*"0\.0\.0\.0"|BindIP = "10.0.5.5"|' \
+        bash -c '
+            set -eu
+            source "$REPO_ROOT/vmangos_setup.sh"
+            set +e
+            config_edit_required "BindIP" "$TARGET" "$EXPR" "$EXPECTED"
+            printf "RC=%s\n" "$?"
+        ' 2>&1
+    }
+
+    markers="$(run_edit)"
+    assert_equals "0" "$(printf '%s\n' "$markers" | sed -n 's/^RC=//p')" \
+        "an edit that lands passes" || failed=1
+    assert_equals 'BindIP = "10.0.5.5"' "$(cat "$tmp_dir/realmd.conf")" \
+        "the edit actually rewrote the file" || failed=1
+
+    # Resume shape: the value is already right, so sed matches nothing and that
+    # must stay a success rather than failing a resumed install.
+    markers="$(run_edit)"
+    assert_equals "0" "$(printf '%s\n' "$markers" | sed -n 's/^RC=//p')" \
+        "an already-applied edit is still a success on resume" || failed=1
+
+    # Drift shape: the file no longer looks like the release default.
+    printf '%s\n' 'BindIP = "192.168.9.9"' > "$tmp_dir/realmd.conf"
+    markers="$(run_edit)"
+    assert_equals "1" "$(printf '%s\n' "$markers" | sed -n 's/^RC=//p')" \
+        "an edit whose pattern matched nothing fails instead of lying" || failed=1
+    assert_equals "1" "$(printf '%s\n' "$markers" | grep -c 'event=error' || true)" \
+        "the silent-noop path emits an error marker" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
+# What the generated units leave running: no core dumps (this host measures
+# DefaultLimitCORE=infinity with apport into a world-writable /var/crash, and
+# Restart=on-failure turns one crash into one core every five seconds), and no
+# unauthenticated GM console welded to a physical terminal.
+test_services_units_are_sandboxed_and_core_free() {
+    local tmp_dir root units failed=0
+    tmp_dir="$(mktemp -d)"
+    root="$tmp_dir/root"; units="$tmp_dir/units"
+    mkdir -p "$tmp_dir/bin" "$root" "$units"
+
+    cat > "$tmp_dir/bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/systemctl"
+
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    VMANGOS_SYSTEMD_UNIT_DIR="$units" \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$root"'"
+        MANGOSOSUSER="mangos"
+        phase_service_setup
+    ' > "$tmp_dir/phase.out" 2>/dev/null
+
+    for u in auth.service world.service; do
+        assert_equals "1" "$([ -f "$units/$u" ] && echo 1 || echo 0)" \
+            "the services phase writes $u into the unit dir it was given" || failed=1
+    done
+
+    assert_equals "2" "$(grep -l 'LimitCORE=0' "$units"/*.service 2>/dev/null | wc -l)" \
+        "both units refuse core dumps" || failed=1
+    assert_equals "0" "$(grep -c 'tty-force' "$units"/*.service 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')" \
+        "no unit hands the GM console to a physical terminal" || failed=1
+    # ProtectSystem=full, not strict: strict would need an exact ReadWritePaths list
+    # for dbc/maps/vmaps/mmaps/Buildings/client-data, and a missing entry there is a
+    # daemon that fails at boot. full protects /usr, /boot and /etc, which is where
+    # persistence after a game-socket foothold actually goes.
+    assert_equals "2" "$(grep -l 'ProtectSystem=full' "$units"/*.service 2>/dev/null | wc -l)" \
+        "both units make the system directories read-only" || failed=1
+    assert_equals "2" "$(grep -l 'NoNewPrivileges=yes' "$units"/*.service 2>/dev/null | wc -l)" \
+        "both units refuse privilege escalation" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
+# realmd advertises which client builds may reach its pre-authentication path.
+# A vanilla realm advertising TBC builds publishes extra out-of-protocol parsers
+# to unauthenticated remote clients, and contradicts its own gamebuild range.
+test_realmlist_row_advertises_only_the_vanilla_build() {
+    local tmp_dir failed=0
+    tmp_dir="$(mktemp -d)"
+    mkdir -p "$tmp_dir/bin"
+
+    # The seeder verifies its own work with a COUNT(*) afterwards, so the fake
+    # answers that (a silent 0 would make the function report failure and the test
+    # would be measuring the fake, not the SQL) and records the statement it was
+    # asked to run.
+    cat > "$tmp_dir/bin/mysql" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    case "$arg" in
+        *COUNT*) printf '1\n' ;;
+        *) printf '%s\n' "$arg" >> "$SQL_CAPTURE" ;;
+    esac
+done
+exit 0
+EOF
+    chmod +x "$tmp_dir/bin/mysql"
+
+    INSTALL_LOG="$tmp_dir/install.log" \
+    PATH="$tmp_dir/bin:$PATH" \
+    REPO_ROOT="$REPO_ROOT" \
+    SQL_CAPTURE="$tmp_dir/sql" \
+    bash -c '
+        set -eu
+        source "$REPO_ROOT/vmangos_setup.sh"
+        INSTALLROOT="'"$tmp_dir"'"
+        SERVERIP="10.0.5.5"
+        AUTHDB="auth"
+        MANGOSOSUSER="mangos"
+        ensure_realmlist_entry
+    ' > "$tmp_dir/phase.out" 2>/dev/null
+
+    assert_equals "1" "$(grep -c "realmbuilds\` = '5875';" "$tmp_dir/sql" 2>/dev/null || true)" \
+        "the realmlist row advertises only the 1.12.1 build" || failed=1
+    assert_equals "0" "$(grep -c '6005' "$tmp_dir/sql" 2>/dev/null || true)" \
+        "no TBC-era client build is advertised on the logon socket" || failed=1
+
+    rm -rf "$tmp_dir"
+    return "$failed"
+}
+
 main() {
     echo "========================================"
     echo "VMANGOS Installer Test Suite"
@@ -2219,6 +2428,10 @@ main() {
     run_test "Installer: Services unit write guard" test_services_phase_unit_write_guard
     run_test "Installer: Extraction chown guards" test_extraction_phase_chown_guards
     run_test "Installer: Config sed guards" test_config_phase_sed_guards
+    run_test "Installer: Prerequisites archiver choice" test_prerequisites_archiver_package_choice
+    run_test "Installer: Config edit required lands" test_config_edit_required_detects_a_silent_noop
+    run_test "Installer: Services units hardened" test_services_units_are_sandboxed_and_core_free
+    run_test "Installer: Realmlist build range" test_realmlist_row_advertises_only_the_vanilla_build
     run_test "Installer: Build nproc guard" test_build_phase_nproc_guard
     run_test "Installer: db-import extraction guard" test_db_import_extraction_guard
 

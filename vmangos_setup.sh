@@ -1012,10 +1012,16 @@ phase_prerequisites() {
     # which default-libmysqlclient-dev Depends on), so requesting both makes
     # the whole install fail to resolve. The MangOS CMake FindMySQL module
     # accepts mysqlclient (provided here) as well as libmariadb.
+    local archiver
+    archiver="$(archiver_package)" || {
+        fail_marker prerequisites "Neither 7zip nor p7zip-full is installable on this release" "Install an archiver that can unpack the world database dump, then re-run the installer"
+        return 1
+    }
+    log_info "Using '$archiver' as the archive extractor for this release"
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none \
         apt-get install -y build-essential cmake git default-libmysqlclient-dev libssl-dev \
             libbz2-dev libreadline-dev libncurses-dev libboost-all-dev \
-            p7zip-full python3 python3-pip python3-venv sysstat unzip wget zlib1g-dev || {
+            "$archiver" python3 python3-pip python3-venv sysstat unzip wget zlib1g-dev || {
         fail_marker prerequisites "Failed to install build prerequisites" "Check the apt output in the install log for the failing package"
         return 1
     }
@@ -1228,6 +1234,44 @@ phase_build() {
     set_checkpoint "BUILD_DONE"
 }
 
+# archiver_package: the .7z unpacker this release can actually install. Ubuntu 24.10
+# replaced p7zip-full with 7zip, and 26.04 has no p7zip-full candidate at all
+# (measured on the target host: apt-cache policy p7zip-full -> (none)). The
+# prerequisites phase installs everything in ONE apt-get line, so naming a package
+# the release does not offer fails the whole phase with a message about "the
+# failing package" somewhere in a 15-name list. Resolve the one that exists.
+archiver_package() {
+    local name version
+    for name in 7zip p7zip-full; do
+        version="$(apt-cache policy "$name" 2>/dev/null | awk '/^  Candidate:/{print $2; exit}')"
+        if [ -n "$version" ] && [ "$version" != "(none)" ]; then
+            printf '%s\n' "$name"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# config_edit_required <setting> <file> <sed-expr> <expected-grep>: a config edit
+# whose landing is checked. config_edit below only notices sed dying; sed exits 0
+# when its pattern matches nothing, so a BindIP or a database endpoint can stay at
+# the release default ("0.0.0.0", mangos/mangos) while the phase logs success. The
+# expected value is grepped afterwards, which also makes a resumed run pass: the
+# edit is a no-op precisely because it already landed.
+config_edit_required() {
+    local setting="$1" file="$2" expr="$3" expected="$4"
+    if ! sed -i "$expr" "$file"; then
+        fail_marker config "Failed to update $setting in $(basename "$file")" \
+            "Check free disk space and the permissions of $file, then re-run the installer"
+        return 1
+    fi
+    if ! grep -q "$expected" "$file"; then
+        fail_marker config "$setting in $(basename "$file") was not changed: the pattern matched nothing" \
+            "The config file no longer matches the release default this installer assumes; compare $file against $(basename "$file").dist before trusting this phase"
+        return 1
+    fi
+}
+
 # config_edit <setting> <file> <sed-expr>: one guarded config edit. sed -i
 # succeeds even when the pattern matches nothing; this catches execution
 # failures (unwritable file, no space left), which under set -e would
@@ -1274,24 +1318,36 @@ phase_config_setup() {
     # the realmlist entry and BindIP below.
     # The config format is: LoginDatabaseInfo = "host;port;user;pass;db"
     # Use more flexible sed patterns that handle variations in spacing
-    config_edit "LoginDatabaseInfo" "$INSTALLROOT/run/etc/realmd.conf" \
-        "s|LoginDatabaseInfo.*=.*\"127\.0\.0\.1;3306;mangos;.*;realmd\"|LoginDatabaseInfo = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$AUTHDB\"|" || return 1
-    config_edit "BindIP" "$INSTALLROOT/run/etc/realmd.conf" \
-        "s|BindIP.*=.*\"0\.0\.0\.0\"|BindIP = \"$SERVERIP\"|" || return 1
+    config_edit_required "LoginDatabaseInfo" "$INSTALLROOT/run/etc/realmd.conf" \
+        "s|LoginDatabaseInfo.*=.*\"127\.0\.0\.1;3306;mangos;.*;realmd\"|LoginDatabaseInfo = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$AUTHDB\"|" \
+        "LoginDatabaseInfo = \"127\.0\.0\.1;3306;$MANGOSDBUSER;" || return 1
+    config_edit_required "BindIP" "$INSTALLROOT/run/etc/realmd.conf" \
+        "s|BindIP.*=.*\"0\.0\.0\.0\"|BindIP = \"$SERVERIP\"|" \
+        "BindIP = \"$SERVERIP\"" || return 1
+    # realmd leaves LogsDir empty, which writes Realmd.log — failed logon names and
+    # client source IPs — into WorkingDirectory, a world-readable directory. It also
+    # has to be somewhere fail2ban can read.
+    config_edit_required "LogsDir" "$INSTALLROOT/run/etc/realmd.conf" \
+        "s|LogsDir = \"\"|LogsDir = \"$INSTALLROOT/logs/realmd/\"|" \
+        "LogsDir = \"$INSTALLROOT/logs/realmd/\"" || return 1
 
     log_info "Configuring mangosd.conf..."
 
     # Update World server config - handle both old and new format
     # New format uses dots: LoginDatabase.Info, WorldDatabase.Info, etc.
     # Use flexible patterns that match the actual config file format
-    config_edit "LoginDatabase.Info" "$INSTALLROOT/run/etc/mangosd.conf" \
-        "s|LoginDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|LoginDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$AUTHDB\"|" || return 1
-    config_edit "WorldDatabase.Info" "$INSTALLROOT/run/etc/mangosd.conf" \
-        "s|WorldDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|WorldDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$WORLDDB\"|" || return 1
-    config_edit "CharacterDatabase.Info" "$INSTALLROOT/run/etc/mangosd.conf" \
-        "s|CharacterDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|CharacterDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$CHARACTERDB\"|" || return 1
-    config_edit "LogsDatabase.Info" "$INSTALLROOT/run/etc/mangosd.conf" \
-        "s|LogsDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|LogsDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$LOGSDB\"|" || return 1
+    config_edit_required "LoginDatabase.Info" "$INSTALLROOT/run/etc/mangosd.conf" \
+        "s|LoginDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|LoginDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$AUTHDB\"|" \
+        "LoginDatabase\.Info = \"127\.0\.0\.1;3306;$MANGOSDBUSER;" || return 1
+    config_edit_required "WorldDatabase.Info" "$INSTALLROOT/run/etc/mangosd.conf" \
+        "s|WorldDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|WorldDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$WORLDDB\"|" \
+        "WorldDatabase\.Info = \"127\.0\.0\.1;3306;$MANGOSDBUSER;" || return 1
+    config_edit_required "CharacterDatabase.Info" "$INSTALLROOT/run/etc/mangosd.conf" \
+        "s|CharacterDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|CharacterDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$CHARACTERDB\"|" \
+        "CharacterDatabase\.Info = \"127\.0\.0\.1;3306;$MANGOSDBUSER;" || return 1
+    config_edit_required "LogsDatabase.Info" "$INSTALLROOT/run/etc/mangosd.conf" \
+        "s|LogsDatabase\.Info.*=.*\"127\.0\.0\.1;3306;mangos;.*;.*\"|LogsDatabase.Info = \"127.0.0.1;3306;$MANGOSDBUSER;${MANGOSDBPASS_SED};$LOGSDB\"|" \
+        "LogsDatabase\.Info = \"127\.0\.0\.1;3306;$MANGOSDBUSER;" || return 1
     # Update DataDir to point to installation root
     config_edit "DataDir" "$INSTALLROOT/run/etc/mangosd.conf" \
         "s|DataDir = \"\.\"|DataDir = \"$INSTALLROOT\"|" || return 1
@@ -1303,8 +1359,9 @@ phase_config_setup() {
         "s|HonorDir = \"\"|HonorDir = \"$INSTALLROOT/logs/honor/\"|" || return 1
 
     # Update BindIP for world server
-    config_edit "BindIP" "$INSTALLROOT/run/etc/mangosd.conf" \
-        "s|BindIP = \"0.0.0.0\"|BindIP = \"$SERVERIP\"|" || return 1
+    config_edit_required "BindIP" "$INSTALLROOT/run/etc/mangosd.conf" \
+        "s|BindIP = \"0.0.0.0\"|BindIP = \"$SERVERIP\"|" \
+        "BindIP = \"$SERVERIP\"" || return 1
 
     # Disable VMaps by default (they're optional and extraction takes hours)
     config_edit "vmap.enableLOS" "$INSTALLROOT/run/etc/mangosd.conf" \
@@ -1450,8 +1507,8 @@ ensure_realmlist_entry() {
 
     # localAddress must match address so external clients resolve the advertised realm correctly.
     mysql -u root -e "INSERT INTO \`$AUTHDB\`.\`realmlist\` (\`id\`, \`name\`, \`address\`, \`localAddress\`, \`localSubnetMask\`, \`port\`, \`icon\`, \`realmflags\`, \`timezone\`, \`allowedSecurityLevel\`, \`population\`, \`gamebuild_min\`, \`gamebuild_max\`, \`flag\`, \`realmbuilds\`)
-        VALUES (1, 'VMaNGOS', '$SERVERIP', '$SERVERIP', '255.255.255.0', 8085, 0, 0, 1, 0, 0, 5875, 5875, 0, '5875 6005 6141')
-        ON DUPLICATE KEY UPDATE \`name\` = 'VMaNGOS', \`address\` = '$SERVERIP', \`localAddress\` = '$SERVERIP', \`localSubnetMask\` = '255.255.255.0', \`port\` = 8085, \`icon\` = 0, \`realmflags\` = 0, \`timezone\` = 1, \`allowedSecurityLevel\` = 0, \`population\` = 0, \`gamebuild_min\` = 5875, \`gamebuild_max\` = 5875, \`flag\` = 0, \`realmbuilds\` = '5875 6005 6141';"
+        VALUES (1, 'VMaNGOS', '$SERVERIP', '$SERVERIP', '255.255.255.0', 8085, 0, 0, 1, 0, 0, 5875, 5875, 0, '5875')
+        ON DUPLICATE KEY UPDATE \`name\` = 'VMaNGOS', \`address\` = '$SERVERIP', \`localAddress\` = '$SERVERIP', \`localSubnetMask\` = '255.255.255.0', \`port\` = 8085, \`icon\` = 0, \`realmflags\` = 0, \`timezone\` = 1, \`allowedSecurityLevel\` = 0, \`population\` = 0, \`gamebuild_min\` = 5875, \`gamebuild_max\` = 5875, \`flag\` = 0, \`realmbuilds\` = '5875';"
 
     realm_count=$(mysql -u root -N -B -e "SELECT COUNT(*) FROM \`$AUTHDB\`.\`realmlist\`;" 2>/dev/null || printf '0')
     if [ "$realm_count" -lt 1 ]; then
@@ -1987,12 +2044,21 @@ phase_service_setup() {
     log_section "PHASE: Service Setup"
     log_marker services start
 
-    # Create systemd services
-    if ! cat > /etc/systemd/system/auth.service << EOF
+    # Create systemd services. VMANGOS_SYSTEMD_UNIT_DIR exists so the units this
+    # phase produces can be inspected (and tested) without touching the host's
+    # unit directory; it defaults to the real one.
+    local unit_dir="${VMANGOS_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+    if ! cat > "$unit_dir/auth.service" << EOF
 [Unit]
 Description=VMaNGOS Auth Server (Classic WoW)
 After=network.target mysql.service
 Wants=mysql.service
+# A crash loop must not become a disk-filling exercise: this daemon is reachable
+# pre-authentication, and the host default is DefaultLimitCORE=infinity with
+# apport dropping cores into a world-writable /var/crash. A core of this process
+# holds account rows, SRP session material and the plaintext DB password.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -2001,6 +2067,11 @@ ExecStart=${INSTALLROOT}/run/bin/realmd
 WorkingDirectory=${INSTALLROOT}/run/bin/
 Restart=on-failure
 RestartSec=5
+LimitCORE=0
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -2010,9 +2081,11 @@ EOF
         return 1
     fi
 
-    if ! cat > /etc/systemd/system/world.service << EOF
+    if ! cat > "$unit_dir/world.service" << EOF
 [Unit]
 Description=VMaNGOS World Server (Classic WoW)
+StartLimitIntervalSec=60
+StartLimitBurst=5
 After=network.target mysql.service
 Wants=mysql.service
 
@@ -2023,10 +2096,11 @@ ExecStart=${INSTALLROOT}/run/bin/mangosd
 WorkingDirectory=${INSTALLROOT}/run/bin/
 Restart=on-failure
 RestartSec=5
-StandardInput=tty-force
-TTYPath=/dev/tty3
-TTYReset=yes
-TTYVHangup=yes
+LimitCORE=0
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
 
 [Install]
 WantedBy=multi-user.target
