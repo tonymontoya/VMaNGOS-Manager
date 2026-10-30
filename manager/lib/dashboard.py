@@ -3879,6 +3879,13 @@ def create_app(
             # same reason the others are: before the first layout pass there is no
             # screen size to ask.
             self.short_sidebar = self.size.height < SHORT_VIEWPORT_HEIGHT
+            # The class exists so the rail's width can follow the rail's own content:
+            # the sidebar text is shortened below SHORT_VIEWPORT_HEIGHT, and that short
+            # form is the only one narrow enough to survive a narrow rail. Without the
+            # class, a window that is compact but not short — 100x36, measured — would
+            # shrink the rail while still printing its long config line, and the line
+            # would wrap.
+            self.screen.set_class(self.short_sidebar, "short")
             if narrow != self.narrow_viewport:
                 # The banner text is written for the room available, not merely
                 # styled for it, so the decision has to be re-taken here: a window
@@ -5311,6 +5318,36 @@ DASHBOARD_CSS = """
             height: auto;
         }
 
+        /* The rail is 32 columns wide at every width. That is a third of a
+           100-column terminal and two fifths of an 80-column one, and the cards
+           beside it need about 53 columns before their own lines stop wrapping:
+           measured at 80 columns the Overview asked for 60 rows of content to hold
+           four cards whose unwrapped height is 47, every extra row a line the card
+           had to break.
+
+           So the rail gives four columns back — in the one band where its own text can
+           afford it, which is a measurement rather than a hedge. The rail keeps 2
+           columns of padding on each side and loses a column to its own scrollbar when
+           its content is taller than the window, so 28 leaves 23 usable. The short
+           form of the Console Target block has a longest line of 22 and fits; the long
+           form's "config    manager.conf ok" is 25 and broke in half at 100x36, which
+           is compact but not short. A window tall enough to keep that line has vertical
+           room to spare and its card lines are not wrapping, so the rail keeps its 32
+           columns there. A test boots every band and refuses any wrapped line in the
+           rail, so these numbers stay honest if the wording changes. */
+        .short.narrow #sidebar {
+            width: 28;
+            min-width: 28;
+        }
+
+        /* A short window spends two rows per card on padding, and the Overview has
+           four of them: eight rows gone from a 24-row terminal that can show twenty.
+           The border is what separates one card from the next; the padding only ever
+           separated a card's title from its own border. */
+        .compact .panel {
+            padding: 0 2;
+        }
+
         .narrow #overview-view,
         .narrow #monitor-view,
         .stacked #overview-view,
@@ -5341,6 +5378,23 @@ DASHBOARD_CSS = """
         .stacked #player-pulse-pane,
         .stacked #alerts-pane {
             min-height: 9;
+        }
+
+        /* The 9 above is an accounting of the padded card, not a preference: the
+           Realm Services card's short form is five lines, and five lines plus two
+           rows of padding plus two rows of border is exactly nine. A compact window
+           spends no rows on padding, so the same floor would be painting two blank
+           rows inside the first card — in the window with the least room of all. The
+           floor drops to what the content plus the border actually is. */
+        .compact.narrow #service-pane,
+        .compact.narrow #metrics-pane,
+        .compact.narrow #player-pulse-pane,
+        .compact.narrow #alerts-pane,
+        .compact.stacked #service-pane,
+        .compact.stacked #metrics-pane,
+        .compact.stacked #player-pulse-pane,
+        .compact.stacked #alerts-pane {
+            min-height: 7;
         }
 
         /* Equal columns. The split used to be 7fr 5fr, which handed the narrower

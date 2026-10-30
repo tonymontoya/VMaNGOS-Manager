@@ -15,6 +15,21 @@ SCREEN_COLUMNS="${SCREEN_COLUMNS:-140}"
 SCREEN_LINES="${SCREEN_LINES:-52}"
 
 mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR=$(cd "$OUTPUT_DIR" && pwd)
+
+if [ "$THEME_NAME" != "dark" ] && [ "$OUTPUT_DIR" = "$SCRIPT_DIR" ]; then
+    # The committed screenshots are named by view, not by theme — there is exactly one
+    # light artifact, dashboard-overview-light.svg — so a theme pass aimed at this
+    # directory quietly replaces every dark screenshot with a light one and leaves the
+    # light artifact stale. One run did exactly that, and git status was the only thing
+    # that noticed. Refuse, and say what to do instead.
+    echo "a $THEME_NAME-theme pass writes dashboard-<view>.svg — the same names the dark pass owns." >&2
+    echo "render the other theme into its own directory:" >&2
+    echo "    THEME_NAME=$THEME_NAME bash ${BASH_SOURCE[0]} /tmp/shots-$THEME_NAME" >&2
+    echo "then copy the one file you want, for instance" >&2
+    echo "    /tmp/shots-$THEME_NAME/dashboard-overview.svg -> docs/assets/dashboard-overview-$THEME_NAME.svg" >&2
+    exit 1
+fi
 
 SNAPSHOT_FILE="$OUTPUT_DIR/dashboard-demo-snapshot.json"
 python3 "$SCRIPT_DIR/generate_dashboard_demo.py" --output "$SNAPSHOT_FILE"

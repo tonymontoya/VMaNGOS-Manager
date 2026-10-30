@@ -1277,6 +1277,96 @@ def test_the_narrow_window_asks_the_cards_for_their_narrow_form(tmp_path):
         asyncio.run(scenario())
 
 
+def test_a_card_in_a_short_window_occupies_no_rows_it_does_not_use(tmp_path):
+    """A card's height must be its content plus its border, with nothing left over.
+
+    The stacked card floors are a floor, not a target. The 9-row one was written as
+    an accounting of a padded card — the Realm Services card's short form is five
+    lines, plus two rows of padding, plus two rows of border — and once a compact
+    window stopped paying for padding that same floor was painting two blank rows
+    inside the first card of the Overview, in the window with the least room of all:
+    100x24 showed one card and reported 42 rows below the fold. Measured after the
+    floor was made to follow the padding, the same window reports 34 and the
+    Overview's content is 42 rows rather than 50. If a card ever carries slack
+    again, the equality below fails and names the card.
+    """
+    for size in ((100, 36), (100, 24)):
+        app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+        async def scenario(app=app, size=size):
+            async with app.run_test(size=size) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                for card in app.query("#overview-grid > Static"):
+                    lines = strip_markup(str(card.renderable)).splitlines()
+                    assert card.region.height == len(lines) + 2, (
+                        f"{card.id} at {size[0]}x{size[1]}: {len(lines)} rows of text in a "
+                        f"{card.region.height}-row card, so {card.region.height - len(lines) - 2} "
+                        "rows are painted but say nothing"
+                    )
+
+        asyncio.run(scenario())
+
+
+def test_the_sidebar_never_wraps_a_line_of_its_own_text(tmp_path):
+    """The rail may be narrowed, but not so far that its labels lose their values.
+
+    Every number in the sidebar is a label and a value on one line, and a wrapped
+    line there is a value alone on a row: "install" over "/opt/mangos" reads as two
+    facts about nothing. This measures the rendered rail rather than a constant, so
+    it still means something the next time someone rewords a line — the failure that
+    produced it was "config    manager.conf ok" at 25 columns in a 23-column rail.
+    """
+    for size in ((80, 24), (100, 24), (100, 36), (100, 50), (140, 52)):
+        app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+        async def scenario(app=app, size=size):
+            async with app.run_test(size=size) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                for widget in app.query("#sidebar-head, #sidebar-pulse, #sidebar-target"):
+                    lines = strip_markup(str(widget.renderable)).splitlines()
+                    available = widget.region.width
+                    over = [line for line in lines if len(line) > available]
+                    assert not over, (
+                        f"{widget.id} at {size[0]}x{size[1]}: {available} columns, and these lines are longer: "
+                        + "; ".join(f"{len(line)} {line!r}" for line in over[:3])
+                    )
+
+        asyncio.run(scenario())
+
+
+def test_the_rail_gives_its_columns_back_only_while_its_short_form_is_showing(tmp_path):
+    """The width the rail may take is decided by the text it is actually rendering.
+
+    The rail trims its own copy below SHORT_VIEWPORT_HEIGHT, and that short form is
+    the only one narrow enough to survive a narrow rail. Gating the narrower rail on
+    compactness instead — which is the other short-window class the app already
+    carries — shrinks the rail at 100x36 while the long config line is still being
+    printed, and that line wraps: measured, the rail is 28 columns and its content
+    23 there, and the line is 25. So the gate is the class that tracks the content.
+    """
+    for height, expect_short, expect_width in ((24, True, 28), (36, False, 32), (52, False, 32)):
+        app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo_snapshot_path())
+
+        async def scenario(app=app, height=height, expect_short=expect_short, expect_width=expect_width):
+            async with app.run_test(size=(100, height)) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message="snapshot to load")
+                assert app.screen.has_class("short") is expect_short, (
+                    f"a {height}-row window set the short class to {not expect_short}"
+                )
+                assert app.short_sidebar is expect_short, (
+                    f"a {height}-row window trimmed the sidebar copy to {not expect_short}"
+                )
+                sidebar = app.query_one("#sidebar")
+                assert sidebar.region.width == expect_width, (
+                    f"a {height}-row window gave the rail {sidebar.region.width} columns, expected {expect_width}"
+                )
+
+        asyncio.run(scenario())
+
+
 def test_a_short_narrow_window_shows_three_of_the_four_cards(tmp_path):
     """Stacking makes a view scrollable; it does not make the cards visible.
 
