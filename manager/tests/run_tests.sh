@@ -2441,6 +2441,11 @@ class FakeTable:
         self.clears = 0
         self.rows = []
         self.cursor_moves = 0
+        # A DataTable that has never been mounted reports no parent, and the
+        # controller sizes its frame from the panel it sits in: the stub has to
+        # carry that fact or the seam is measured against something no real
+        # widget is ever shaped like.
+        self.parent = None
 
     def clear(self, columns=False):
         self.clears += 1

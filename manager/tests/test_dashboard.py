@@ -2560,3 +2560,152 @@ def test_a_rail_row_never_parts_a_key_from_the_word_that_explains_it(tmp_path):
                     )
 
     asyncio.run(scenario())
+
+
+def test_a_short_roster_does_not_keep_a_frame_it_has_no_rows_for(tmp_path):
+    """Eight accounts get a nine-row table, not a window-sized one.
+
+    `#accounts-table { height: 1fr }` laid a 29-row table inside a 31-row border at
+    140x52 for a realm with eight accounts — 21 rows of frame holding nothing,
+    drawn as a box an operator has to read past to find the bottom. Backups and
+    the log roster had the same shape. The height is now chosen against the rows
+    the view owns, so the frame stops at the last row instead of at the window.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="accounts")
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            table = app.query_one("#accounts-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="accounts table to load")
+            await pilot.pause()
+            rows = table.row_count
+            panel = app.query_one("#accounts-table-layout")
+            view = app.query_one("#accounts-view")
+            assert rows == 8, f"this fixture is supposed to hold eight accounts, got {rows}"
+            assert table.content_size.height == rows + 1, (
+                f"the table holds {rows} rows and was given {table.content_size.height}"
+            )
+            assert panel.content_size.height < view.content_size.height, (
+                f"the roster frame is {panel.content_size.height} rows in a "
+                f"{view.content_size.height}-row view: it stretched to the window again"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_a_roster_longer_than_the_window_fills_it_and_scrolls_itself(tmp_path):
+    """The exception that keeps the arrow keys working survives the rule above.
+
+    Eighty accounts do not fit, so the table fills the view and scrolls on its
+    own: a cursor that moves inside a widget the view cannot follow is how a
+    roster becomes unreadable. Both postures have to stay true, and neither may
+    be chosen from a number guessed at the terminal's minimum size.
+    """
+    app, _log_path = build_app(
+        tmp_path, initial_view="accounts", accounts=make_accounts(80)
+    )
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            table = app.query_one("#accounts-table", DataTable)
+            await wait_for(lambda: table.row_count >= 80, message="eighty-row roster to load")
+            await pilot.pause()
+            view = app.query_one("#accounts-view")
+            assert table.content_size.height < table.row_count, (
+                "the table grew to its rows instead of clipping them to the window"
+            )
+            assert table.content_size.height >= view.content_size.height - 8, (
+                f"a roster that does not fit filled only {table.content_size.height} "
+                f"rows of a {view.content_size.height}-row view"
+            )
+            table.focus()
+            for _ in range(2):
+                await pilot.press("pagedown")
+                await pilot.pause()
+            assert table.cursor_row > 0, (
+                f"pagedown left the cursor on row {table.cursor_row}; the table is not "
+                "keeping the arrow keys it is credited with"
+            )
+            assert table.scroll_y > 0, "the table never scrolled to show the row it selected"
+
+    asyncio.run(scenario())
+
+
+def test_the_scheduled_tasks_card_holds_what_it_drew_a_border_around(tmp_path):
+    """An `1fr` panel inside an auto-height layout collapses to nothing.
+
+    That is what the Operations view shipped with: the Scheduled Tasks border drew
+    itself a few rows tall while its title, roster, and details pane were laid out
+    underneath it and clipped away, so an operator who pressed 7 found an empty
+    box. The card sizes to its content now, and the roster inside it is never
+    shorter than the details pane beside it — one border, one bottom edge.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        for cols, lines, same_bottom_edge in ((140, 52, True), (100, 36, False)):
+            app, _log_path = build_app(
+                tmp_path, initial_view="operations", snapshot_file=demo
+            )
+            async with app.run_test(size=(cols, lines)) as pilot:
+                table = app.query_one("#schedules-table", DataTable)
+                await wait_for(
+                    lambda: table.row_count > 0, message="scheduled tasks table to load"
+                )
+                await pilot.pause()
+                panel = app.query_one("#schedules-layout")
+                title = panel.query(".table-detail-title").first()
+                details = app.query_one("#schedule-details")
+                assert panel.content_size.height > 0, (
+                    f"{cols}x{lines}: the card has no height to draw"
+                )
+                for widget, what in (
+                    (title, "the card title"),
+                    (table, "the roster"),
+                    (details, "the details pane"),
+                ):
+                    assert widget.region.y >= panel.region.y, (
+                        f"{cols}x{lines}: {what} sits above the border drawn around it"
+                    )
+                    assert widget.region.bottom <= panel.region.bottom, (
+                        f"{cols}x{lines}: {what} hangs below the border drawn around it"
+                    )
+                if same_bottom_edge:
+                    assert table.content_size.height >= details.content_size.height, (
+                        f"{cols}x{lines}: the roster is {table.content_size.height} rows "
+                        f"beside a {details.content_size.height}-row pane — two bottom edges"
+                    )
+
+    asyncio.run(scenario())
+
+
+def test_the_schedules_roster_fits_the_frame_it_was_given(tmp_path):
+    """Four columns of this data want more room than the card has.
+
+    The roster is handed 56 columns at 140x52 and 57 at 100x36; Type, Schedule,
+    Next Run, and the timer name want 69. Textual's answer is a horizontal
+    scrollbar along the bottom of the table and a column nobody can finish
+    reading. The timer's name is printed by the details pane beside the table, so
+    the roster keeps the three columns that answer what runs, when it runs, and
+    when it runs next — and nothing here scrolls sideways.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        for cols, lines in ((140, 52), (100, 36)):
+            app, _log_path = build_app(
+                tmp_path, initial_view="operations", snapshot_file=demo
+            )
+            async with app.run_test(size=(cols, lines)) as pilot:
+                table = app.query_one("#schedules-table", DataTable)
+                await wait_for(
+                    lambda: table.row_count >= 2, message="two scheduled tasks to load"
+                )
+                await pilot.pause()
+                assert table.row_count >= 2, "a one-row roster cannot measure a column fit"
+                assert table.max_scroll_x == 0, (
+                    f"{cols}x{lines}: the roster wants {table.virtual_size.width} columns in a "
+                    f"{table.content_size.width}-column frame and scrolls sideways"
+                )
+
+    asyncio.run(scenario())

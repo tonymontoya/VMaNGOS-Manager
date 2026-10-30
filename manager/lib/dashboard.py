@@ -1002,6 +1002,8 @@ class SelectionTable:
         self._rendered: tuple[tuple[str, tuple[str, ...]], ...] | None = None
         self.filter_text = ""
         self.sort_column: int | None = None
+        self._frame_height: Any = None
+        self._height_retry_pending = False
 
     def set_filter(self, text: str) -> None:
         normalized = text.strip().lower()
@@ -1017,6 +1019,85 @@ class SelectionTable:
         self.sort_column = column_index
         self._rendered = None
         self.apply_sort_indicator()
+
+    # A table is the one widget on this dashboard allowed a height it did not
+    # earn, because a roster longer than the window has to scroll itself: the view
+    # cannot follow a cursor that moves inside a widget. The other half of that
+    # rule was missing. `#accounts-table { height: 1fr }` hands a realm with eight
+    # accounts a 29-row table inside a 31-row frame at 140x52 — measured with
+    # `ops/tools/dashboard_probe_roster_frames.py`, 21 rows of bordered nothing,
+    # the same shape under a two-row schedule list and under six log events.
+    ROSTER_FRAME_TOLERANCE = 3
+
+    def apply_frame_height(self, row_count: int) -> None:
+        """Give a roster as much frame as its rows need, and no more.
+
+        Short roster: the table gets its rows plus a header, so the panel stops at
+        the last row instead of stretching to the window. Long roster: it keeps
+        filling and scrolls internally, which is what the arrow keys, the cursor,
+        and the search box depend on. Between those two, a table is never shorter
+        than the pane sitting beside it in the same row: two ragged edges inside
+        one border look like a bug even when each half is sized correctly.
+
+        The window this is measured against is the **view**, not the panel: the
+        panel's own height is the thing this method changes, and a first attempt
+        that compared against it flapped — once the frame had shrunk, the next
+        refresh concluded the roster no longer fit and stretched it back out. The
+        view's height is set by the screen and does not move when a roster does.
+        """
+        panel = self.table.parent
+        if panel is None:
+            return
+        wanted = row_count + 1  # the header row is content too
+        beside = 0
+        # `styles.layout` is a layout object (`<horizontal>`), not its name: the
+        # first version of this compared it to a string, was always false, and left
+        # the Operations roster shorter than the pane beside it.
+        if type(getattr(panel.styles, "layout", None)).__name__ == "HorizontalLayout":
+            beside = max(
+                (
+                    sibling.content_size.height
+                    for sibling in panel.children
+                    if sibling is not self.table and sibling.display != "none"
+                ),
+                default=0,
+            )
+        view = next(
+            (node for node in self.table.ancestors_with_self if node.has_class("view")),
+            None,
+        )
+        available = (
+            view.content_size.height if view is not None else panel.content_size.height
+        )
+        if available <= 0:
+            # Nothing has been laid out yet — a view that is hidden, or an app that
+            # has not drawn its first frame. Measuring nothing here is how an
+            # eight-row roster got the long-roster posture: zero rows is always
+            # fewer than the rows it needs, so the table filled a window that was
+            # not on screen. Ask again once there is a frame to measure.
+            if not self._height_retry_pending:
+                self._height_retry_pending = True
+                self.table.call_after_refresh(lambda: self.retry_frame_height(row_count))
+            return
+        if wanted + self.ROSTER_FRAME_TOLERANCE >= available:
+            height: Any = "1fr"
+        else:
+            height = max(wanted, beside)
+            if beside > wanted and not self._height_retry_pending:
+                # The height came from a pane whose text is rendered after this
+                # table is: at the moment of the rebuild it still held the previous
+                # selection's lines. One more pass, once the pane has been written.
+                self._height_retry_pending = True
+                self.table.call_after_refresh(lambda: self.retry_frame_height(row_count))
+        if height == self._frame_height:
+            return
+        self._frame_height = height
+        self.table.styles.height = height
+
+    def retry_frame_height(self, row_count: int) -> None:
+        """Decide again, now that the layout has been drawn at least once."""
+        self._height_retry_pending = False
+        self.apply_frame_height(row_count)
 
     def apply_sort_indicator(self) -> None:
         if not self.titles:
@@ -1050,6 +1131,7 @@ class SelectionTable:
                 )
             )
         rendered = tuple((key, cells) for key, cells, _entry in rows)
+        self.apply_frame_height(len(rendered))
 
         if self._rendered is not None and rendered == self._rendered:
             # Data unchanged: leave the table (and the user's cursor) alone.
@@ -3958,14 +4040,21 @@ def create_app(
             schedules_table = self.query_one("#schedules-table", DataTable)
             schedules_table.cursor_type = "row"
             schedules_table.zebra_stripes = True
-            schedules_table.add_columns("Type", "Schedule", "Next Run", "ID")
+            # Three columns, and the count is a measurement. The card gives the
+            # roster 56 columns at 140x52 (the details pane takes the rest); four
+            # columns of this data want 69, which is a horizontal scrollbar across
+            # the bottom of the table and an ID column nobody can read. The timer's
+            # name is printed by the details pane beside it, one glance away, so the
+            # roster spends its columns on what the operator asks first: what runs,
+            # when it runs, and when that happens next.
+            schedules_table.add_columns("Type", "Schedule", "Next Run")
 
             # Long-lived controllers so unchanged data can skip table churn.
             self.selection_tables = {
                 "accounts": SelectionTable(accounts_table, titles=["ID", "Username", "GM", "Online", "Banned"]),
                 "backups": SelectionTable(backups_table, titles=["Timestamp", "Size", "File", "Created By"]),
                 "logs": SelectionTable(realm_logs_table, titles=["Time", "Source", "Severity", "Message"]),
-                "schedules": SelectionTable(schedules_table, titles=["Type", "Schedule", "Next Run", "ID"]),
+                "schedules": SelectionTable(schedules_table, titles=["Type", "Schedule", "Next Run"]),
             }
 
             # Identity before data: the console states which Manager build it
@@ -4351,7 +4440,6 @@ def create_app(
                     escape_markup(schedule_job_type_label(schedule.get("job_type", ""))),
                     escape_markup(schedule_label(schedule)),
                     escape_markup(str(schedule.get("next_run", "") or "n/a")),
-                    escape_markup(str(schedule.get("id", ""))),
                 ],
                 current_key=self.selected_schedule_id,
             )
@@ -5412,6 +5500,12 @@ DASHBOARD_CSS = """
             height: auto;
         }
 
+        .narrow .table-detail {
+            /* The body stacks vertically here, so the card's floor has to cover a
+               roster sitting on top of its details pane instead of beside it. */
+            min-height: 22;
+        }
+
         .narrow .detail-pane {
             width: 1fr;
             height: auto;
@@ -5596,7 +5690,16 @@ DASHBOARD_CSS = """
 
         .table-detail {
             layout: vertical;
-            height: 1fr;
+            /* auto, and it has to stay auto. This card lives inside
+               `#operations-layout { height: auto }` in a view that scrolls, and an
+               `1fr` panel in an auto layout resolves to zero rows: the Scheduled
+               Tasks border drew itself four rows tall at 140x52 while the title,
+               the roster, and the details pane were placed underneath it and
+               clipped out of sight. Pressing 7 showed an empty box. The roster's
+               own height is decided in Python for the same reason — see
+               SelectionTable.apply_frame_height. */
+            height: auto;
+            min-height: 14;
         }
 
         .table-detail-title {
@@ -5612,6 +5715,10 @@ DASHBOARD_CSS = """
 
         .table-detail-body {
             layout: horizontal;
+            /* auto: the details pane beside the roster is prose, and the card has
+               to grow to hold it. Nothing inside this row is allowed a `1fr`
+               height, or the row has nothing to resolve it against and the table
+               outgrows the border around it. */
             height: auto;
             min-height: 10;
             margin-top: 1;
