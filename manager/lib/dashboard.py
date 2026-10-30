@@ -1037,7 +1037,9 @@ COLUMN_CELL_PADDING = 1
 # that is genuinely hidden from asking forever.
 MAX_WIDTH_PASSES = 24
 # How long to wait before asking again when the frame could not be measured at all.
-WIDTH_RETRY_DELAY = 0.2
+# Shared by the two places that wait on a layout that has not happened yet: the column
+# budget, and a view opening in front of the operator.
+LAYOUT_RETRY_DELAY = 0.2
 MIN_ELASTIC_COLUMNS = 12
 
 
@@ -1298,9 +1300,14 @@ class SelectionTable:
                 # sideways, and the pilot test timed out waiting for a scrollbar to
                 # disappear. Workstations refresh often enough that this has never been
                 # visible locally. A timer is driven by the event loop rather than by the
-                # thing being waited for, so the ask goes out on a timer too.
-                self.table.call_after_refresh(self.retry_column_budget, cells)
-                self.table.set_timer(WIDTH_RETRY_DELAY, lambda: self.retry_column_budget(cells))
+                # thing being waited for, so the ask goes out on a timer too — and on
+                # the timer only. It used to arm an after-refresh callback alongside it,
+                # and that pair is how a bounded wait turns into a flood: the pass that
+                # is waiting arms two callbacks, each of which arms two more, so a
+                # roster that stays unmeasured for the full budget queues on the order
+                # of 2**24 callbacks rather than 24. The pending flag limits how many
+                # chains are open at one instant, not how many generations arrive.
+                self.table.set_timer(LAYOUT_RETRY_DELAY, lambda: self.retry_column_budget(cells))
             return
         self._width_passes = 0
         visible, widths, naturals = column_plan(
@@ -4400,6 +4407,17 @@ def create_app(
             # when it runs, and when that happens next.
             schedules_table.add_columns("Type", "Schedule", "Next Run")
 
+            # Which view the last `apply_view_state` opened, so a view is scrolled to
+            # its top when it is *opened* and not every time its state is applied —
+            # closing a dialog applies the same state, and an operator who had
+            # scrolled to row 40 should land back on row 40.
+            self._opened_view: str | None = None
+            # One settling chain at a time, the same discipline `SelectionTable` pays
+            # its column budget: each pass would otherwise arm both an after-refresh
+            # callback and a timer, and both of those arm two more, so a view that kept
+            # waiting would grow the queue geometrically instead of settling.
+            self._view_settling = False
+
             # Long-lived controllers so unchanged data can skip table churn.
             self.selection_tables = {
                 "accounts": SelectionTable(
@@ -4536,18 +4554,132 @@ def create_app(
             # The newly visible view's data buckets may be stale — fetch
             # them fresh (coalesced with any inflight refresh).
             self.request_snapshot_refresh()
+            # `scroll_visible=False` on every roster focus: Textual would scroll the
+            # view to the *table*, which lands mid-card — at 100x30 with the view named
+            # on the command line, Accounts opened at scroll 3, Backups at 10, Logs at
+            # 13, Operations at 22 of a 58-row column, in each case with the card's own
+            # title above the fold. Where the card starts is decided below, once, and
+            # it is the same answer however the view was reached: switching with the
+            # number keys had left those views at scroll 0, so a view looked different
+            # depending on whether it was opened by key or at startup.
             if self.active_view == "accounts":
-                self.set_focus(self.query_one("#accounts-table", DataTable))
+                self.set_focus(self.query_one("#accounts-table", DataTable), scroll_visible=False)
             elif self.active_view == "backups":
-                self.set_focus(self.query_one("#backups-table", DataTable))
+                self.set_focus(self.query_one("#backups-table", DataTable), scroll_visible=False)
             elif self.active_view == "logs":
-                self.set_focus(self.query_one("#realm-logs-table", DataTable))
+                self.set_focus(self.query_one("#realm-logs-table", DataTable), scroll_visible=False)
             elif self.active_view == "operations":
-                self.set_focus(self.query_one("#schedules-table", DataTable))
+                self.set_focus(self.query_one("#schedules-table", DataTable), scroll_visible=False)
             else:
                 # Views without a table focus the view container itself so
                 # its scoped command bindings are live.
                 self.set_focus(self.query_one(f"#{self.active_view}-view", Container))
+
+            # The reading order for a view: its heading, then the card the view is
+            # about. A view with a roster is scrolled to the top of that card — the
+            # card's title and the first rows of its table in one screen — rather
+            # than to the top of the view, because at a 30-row window the summary
+            # cards above it are 29 rows on their own and the roster would be entirely
+            # below the fold. A view without a roster opens at its top. This runs only
+            # when the view *changes*: closing a dialog also applies view state, and an
+            # operator who had scrolled to row 40 should come back to row 40.
+            if self.active_view != self._opened_view:
+                self._opened_view = self.active_view
+                self.open_view_on_its_content(0)
+
+        def roster_card(self, view_name: str):
+            # The card a roster view is about, or None if the view has none. Each of
+            # the four roster views holds exactly one `.table-panel` — Accounts,
+            # Backups and Logs name theirs `#*-table-layout`, Operations names its
+            # `#schedules-layout`, and only Operations also carries `table-detail`, so
+            # a query on that class would silently leave three views scrolling home.
+            if view_name not in ("accounts", "backups", "logs", "operations"):
+                return None
+            from textual.dom import NoMatches
+
+            try:
+                return self.query_one(f"#{view_name}-view .table-panel")
+            except NoMatches:
+                return None
+
+        def arm_view_settle(self, attempt: int) -> None:
+            # One callback per pass, on a timer. Nothing obliges a refresh at the moment
+            # a layout is needed — that is what the v0.7.17 CI red taught — so the timer
+            # is the mechanism; an after-refresh callback armed beside it doubles the
+            # queue every pass and turns a 24-pass budget into millions of callbacks,
+            # which is what made a single pilot test take 160 seconds instead of seven.
+            if self._view_settling:
+                return
+            self._view_settling = True
+            self.set_timer(LAYOUT_RETRY_DELAY, lambda: self.open_view_on_its_content(attempt + 1))
+
+        def open_view_on_its_content(self, attempt: int) -> None:
+            # Put the card the opened view is about at the top of the screen.
+            # `scroll_visible` asks for the least movement that makes the card visible,
+            # which for a card taller than the window puts its top edge at the top of
+            # the viewport: the card's title and the first rows of its roster in one
+            # screen. A view without a roster gets its top instead, where its heading
+            # and the readiness summary live.
+            if self.active_view != self._opened_view:
+                # The operator moved on while the layout was settling.
+                return
+            self._view_settling = False
+            if attempt >= MAX_WIDTH_PASSES:
+                return
+            if self.modal_open():
+                # A dialog covers the base screen, and a covered screen does not answer
+                # queries at all: asking it for `#accounts-view` raises `NoMatches`
+                # inside the callback, and an exception in a callback ends the message
+                # pump — which is how this dashboard has failed before. Pressing `c` on
+                # Accounts three hundred milliseconds after opening the view was enough
+                # to prove it. Keep waiting rather than asking: the chain that waits out
+                # an unsettled layout waits this out too, on the same bounded budget.
+                self.arm_view_settle(attempt)
+                return
+            from textual.dom import NoMatches
+
+            try:
+                view = self.query_one(f"#{self.active_view}-view", Container)
+            except NoMatches:
+                # The screen is going away underneath the callback — a pilot teardown
+                # flushes pending timers after the screen has been popped — and a view
+                # that will never be looked at again has nothing to scroll.
+                return
+            card = self.roster_card(self.active_view)
+            if card is None:
+                view.scroll_home(animate=False)
+                return
+            if card.region.height <= 0:
+                # The view was hidden until a moment ago, so this pass has no geometry
+                # to aim at: the card reports a region of nothing and `scroll_visible`
+                # decides there is nothing to move. This is the same unmeasured-frame
+                # trap as the column budget, and the answer is the same — wait for a
+                # layout, and do not make the wait conditional on a refresh, which is
+                # why a timer sits alongside the after-refresh callback.
+                self.arm_view_settle(attempt)
+                return
+            card.scroll_visible(animate=False)
+            # And the column budget, for the same reason. A roster that was hidden has
+            # never been measured, so the widths it is drawing are the widths its cells
+            # asked for; `rebuild()` is the only other place that re-takes the plan, and
+            # switching views with cached data does not rebuild anything. Until the next
+            # refresh — 2s in normal running, never if the refresh is off — Logs drew
+            # `Time | Source | Severity | Message` wider than the card and answered with
+            # a horizontal scrollbar.
+            self.replan_view_columns()
+
+        # The view name is not always the controller name: Operations drives `schedules`.
+        ROSTER_CONTROLLER = {
+            "accounts": "accounts",
+            "backups": "backups",
+            "logs": "logs",
+            "operations": "schedules",
+        }
+
+        def replan_view_columns(self) -> None:
+            controller = self.selection_tables.get(self.ROSTER_CONTROLLER.get(self.active_view, ""))
+            if controller is not None:
+                controller.replan_columns()
 
         def refresh_chrome(self) -> None:
             if self.modal_open():
@@ -5928,9 +6060,16 @@ DASHBOARD_CSS = """
         }
 
         .narrow .table-detail {
-            /* The body stacks vertically here, so the card's floor has to cover a
-               roster sitting on top of its details pane instead of beside it. */
-            min-height: 22;
+            /* The body stacks vertically here, so the card has to be tall enough to
+               hold a roster sitting on top of its details pane instead of beside it.
+               It does not have to be tall enough to hold the space those panes used
+               to reserve: at 100x36 the Scheduled Tasks card measured 28 rows around
+               20 rows of content, because the floors inside it (a table floor of 8
+               for two systemd timers, a details floor of 9 for three lines of prose)
+               invented rows that this floor then refused to give back. The card keeps
+               the same floor it has at any width; the floors that invented the rows
+               are lowered below. */
+            min-height: 14;
         }
 
         .narrow .detail-pane {
@@ -6245,9 +6384,24 @@ DASHBOARD_CSS = """
             min-height: 8;
         }
 
+        .narrow #schedules-table {
+            /* `apply_frame_height` already gives a short roster its rows plus a
+               header. A floor of 8 rows buys five rows of nothing when the realm has
+               two timers: measured at 100x36 with two schedules, card 28 rows, table
+               8 rows, roster 2 rows. */
+            min-height: 4;
+        }
+
         #schedule-details {
             height: auto;
             min-height: 9;
+        }
+
+        .narrow #schedule-details {
+            /* The 9-row floor belongs to the side-by-side arrangement, where this
+               pane has to be as tall as the roster next to it. Stacked it should be
+               as tall as its sentences, which for a selected timer is three lines. */
+            min-height: 3;
         }
 
         #backup-summary {

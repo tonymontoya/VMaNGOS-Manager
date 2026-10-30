@@ -27,7 +27,7 @@ from dashboard import (
     ACTION_STYLES,
     COLUMN_POLICY,
     MAX_WIDTH_PASSES,
-    WIDTH_RETRY_DELAY,
+    LAYOUT_RETRY_DELAY,
     column_plan,
     fit_text,
     CHROME_ROLES,
@@ -38,6 +38,7 @@ from dashboard import (
     SCROLL_KEYS_CLAIMED_BY_SEARCH,
     SCROLL_KEYS_CLAIMED_BY_TABLE,
     TWO_COLUMN_MINIMUM_WIDTH,
+    SelectionTable,
     create_app,
     empty_snapshot,
     format_flag,
@@ -3011,7 +3012,7 @@ def test_a_roster_waits_for_a_frame_instead_of_guessing_twice(tmp_path):
             # runner's condition — a settled screen, nothing scheduled to refresh the
             # table, and a scrollbar that has to go away anyway.
             for _pass_number in range(20):
-                await asyncio.sleep(WIDTH_RETRY_DELAY / 2)
+                await asyncio.sleep(LAYOUT_RETRY_DELAY / 2)
                 assert [column.width for column in table.columns.values()] == widths, (
                     f"pass {controller._width_passes} wrote widths against a frame of zero columns"
                 )
@@ -3036,5 +3037,171 @@ def test_a_roster_waits_for_a_frame_instead_of_guessing_twice(tmp_path):
                 "the budget never re-planned once the frame was measurable"
             )
             assert table.max_scroll_x == 0, "the roster scrolls sideways after re-planning"
+
+    asyncio.run(scenario())
+
+
+def test_a_view_opens_on_the_card_it_is_about(tmp_path):
+    """Opening a roster view has to show the roster, not wherever the focus left it.
+
+    Focusing a table makes Textual scroll the container to that table, and that lands
+    the screen in the middle of the card. Measured at 100x30 with the view named on the
+    command line: Operations opened at scroll 22 of a 58-row column with its
+    `Scheduled Tasks` title above the fold, Accounts at 3, Backups at 10, Logs at 13.
+    Reaching the same views by their number keys did not scroll at all, which at that
+    height meant Operations showed its summary cards and no roster. Either way the view
+    the operator asked for was not the view they got, and the two ways of asking for it
+    disagreed with each other.
+
+    A view now opens on its roster card with the least movement that puts the card on
+    screen — startup and key press alike.
+    """
+    demo = demo_snapshot_path()
+    keys = {"accounts": "3", "backups": "4", "logs": "6", "operations": "7"}
+
+    async def settle(app, pilot, view_name):
+        """Wait until the view's card has geometry, which a hidden view does not have.
+
+        Geometry is not the same moment as settled: the card becomes measurable on one
+        layout pass and the scroll that aims at it happens on the next, on the chain's
+        own timer (`LAYOUT_RETRY_DELAY`, 0.2 s). So the caller gets a further half
+        second on top, stated here rather than assumed by the assertion below.
+        """
+        await wait_for(
+            lambda: app.query_one(f"#{view_name}-view .table-panel").region.height > 0,
+            message=f"the {view_name} card to be laid out",
+        )
+        await pilot.pause(0.5)
+
+    async def check_opened(app, pilot, view_name, opened_by):
+        view_region = app.query_one(f"#{view_name}-view").region
+        panel = app.query_one(f"#{view_name}-view .table-panel")
+        table = panel.query_one(DataTable)
+        assert panel.region.y >= view_region.y, (
+            f"{view_name} opened by {opened_by} at 100x36 scrolled past its own card: "
+            f"the card top sits at {panel.region.y} against a screen starting at {view_region.y}, "
+            f"so its title is off the screen"
+        )
+        assert panel.region.y < view_region.bottom, (
+            f"{view_name} opened by {opened_by} at 100x36 shows no roster at all: "
+            f"the card starts at {panel.region.y} and the screen ends at {view_region.bottom}"
+        )
+        assert table.region.y >= panel.region.y, (
+            f"{view_name} opened by {opened_by} scrolled to its table instead of its card: "
+            f"the table at {table.region.y} is above the card top at {panel.region.y}"
+        )
+
+    async def scenario():
+        for view_name, _key in keys.items():
+            app, _log_path = build_app(tmp_path, initial_view=view_name, snapshot_file=demo, refresh=9999)
+            async with app.run_test(size=(100, 36)) as pilot:
+                await wait_for(lambda: getattr(app, "snapshot_loaded", False), message=f"the {view_name} data to load")
+                await settle(app, pilot, view_name)
+                await check_opened(app, pilot, view_name, "startup")
+
+        for view_name, key in keys.items():
+            app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo, refresh=9999)
+            async with app.run_test(size=(100, 36)) as pilot:
+                await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the overview to load")
+                await pilot.press(key)
+                await settle(app, pilot, view_name)
+                await check_opened(app, pilot, view_name, f"the {key} key")
+
+    asyncio.run(scenario())
+
+
+def test_a_view_switched_to_fits_its_roster_to_its_rows(tmp_path):
+    """A roster laid out while hidden keeps the frame and the widths it guessed with.
+
+    Two measurements taken at 100x36 after pressing 7 with the refresh interval turned
+    off, so nothing would fix them later. The Scheduled Tasks table stood 8 rows tall
+    around a two-row roster — the CSS floor of 8 rows, which at that width has to fight
+    `apply_frame_height` instead of deferring to it — and below it the details pane,
+    whose own floor of 9 rows is meant to match a roster sitting beside it, padded out
+    three sentences. The card measured 28 rows around 20 rows of content. On Logs the
+    same indifference showed sideways: the table drew `Time | Source | Severity |
+    Message` wider than the card, cut `World crashed while loading map 530…` to
+    `World crashed`, and answered with a horizontal scrollbar, because a view switch
+    over cached data rebuilds nothing and `rebuild()` is the only other place the
+    column budget is taken.
+
+    A view that becomes visible re-takes both decisions: the frame height comes from the
+    rows, and the column budget is replanned against the frame it now has.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="overview", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the overview to load")
+
+            for view_name, key, table_id, details_id in (
+                ("operations", "7", "#schedules-table", "#schedule-details"),
+                ("logs", "6", "#realm-logs-table", "#realm-log-details"),
+            ):
+                await pilot.press(key)
+                table = app.query_one(table_id, DataTable)
+                await wait_for(lambda: table.row_count > 0, message=f"the {view_name} roster to load")
+                await wait_for(
+                    lambda: table.max_scroll_x == 0,
+                    timeout=30.0,
+                    message=f"the {view_name} roster to fit its card at 100 columns",
+                    details=lambda: (
+                        f"table={table.region.width}x{table.region.height} rows={table.row_count} "
+                        f"drawn={sum(column.get_render_width(table) for column in table.columns.values())} "
+                        f"max_scroll_x={table.max_scroll_x}"
+                    ),
+                )
+                assert table.max_scroll_x == 0, (
+                    f"{view_name} scrolls sideways after a view switch: the widths it drew are the "
+                    "ones its cells asked for, because a switch over cached data never rebuilds the table"
+                )
+
+                air = table.region.height - (table.row_count + 1)
+                assert air <= SelectionTable.ROSTER_FRAME_TOLERANCE, (
+                    f"{view_name} bought a table frame {table.region.height} rows tall for "
+                    f"{table.row_count} rows: {air} rows of frame holding nothing"
+                )
+
+                details = app.query_one(details_id, Static)
+                assert details.region.height > 0, f"{view_name} left its details pane out of the layout"
+                card = app.query_one(f"#{view_name}-view .table-panel")
+                slack = (card.region.y + card.region.height) - (details.region.y + details.region.height)
+                assert slack <= SelectionTable.ROSTER_FRAME_TOLERANCE, (
+                    f"{view_name} padded its card with {slack} rows below the details pane: "
+                    f"card bottom {card.region.y2}, pane bottom {details.region.y2}"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_a_view_that_is_still_settling_does_not_ask_a_covered_screen_for_its_widgets(tmp_path):
+    """A dialog can appear between one layout pass and the next.
+
+    The scroll that puts a roster card on screen re-asks until the card has geometry,
+    and geometry arrives some passes after the view opens. Press `c` on Accounts inside
+    that window — a form opens over the base screen — and the next pass reaches for
+    `#accounts-view`, which a covered screen does not answer: `NoMatches` inside a
+    callback ends the message pump, and the failures arrive as unrelated emptiness
+    several keystrokes later (`''` where the form's validation message should be).
+    Four pilot tests went red that way, and none of them were about layout.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="overview", refresh=9999)
+
+    async def scenario():
+        async with app.run_test(size=(120, 40)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the overview to load")
+            await pilot.press("3")
+            # Do not pause first: the point is that the dialog opens while the view is
+            # still waiting for a layout, which is the window the retry chain lives in.
+            await pilot.press("c")
+            assert app.screen.__class__.__name__ == "CommandFormScreen", "the create form never opened"
+            await pilot.press("escape")
+            await pilot.pause(0.5)
+            assert app.screen.__class__.__name__ != "CommandFormScreen", "the form would not close"
+            table = app.query_one("#accounts-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="the accounts roster to be readable after the dialog")
+            panel = app.query_one("#accounts-view .table-panel")
+            assert panel.region.height > 0, "the roster card never laid itself out after the dialog"
 
     asyncio.run(scenario())
