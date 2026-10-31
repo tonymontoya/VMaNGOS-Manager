@@ -626,14 +626,19 @@ show_client_data_help() {
     log_info "   - Install from original CD/DVD media"
     log_info "   - Copy the Data folder from your installation"
     log_info ""
-    log_info "3. PRE-EXTRACTED DATA (Community Alternative):"
-    log_info "   Some community repacks provide pre-extracted map files."
-    log_info "   Search: 'vmangos pre-extracted maps' (legally grey area)"
+    log_info "3. PRE-EXTRACTED MAPS (Community Repacks):"
+    log_info "   This installer will not fetch them, and neither should you put them here"
+    log_info "   without knowing their origin: a map pack from a stranger is unverified"
+    log_info "   bytes placed in the data directory of a realm exposed to the public internet."
+    log_info "   Extraction from archives you hold is the supported path, and it is auditable."
     log_info ""
     log_info "REQUIRED FILES IN DATA FOLDER:"
-    log_info "   - dbc.MPQ, terrain.MPQ, wmo.MPQ, model.MPQ"
-    log_info "   - texture.MPQ, sound.MPQ, speech.MPQ"
-    log_info "   - patch.MPQ (should be ~1.9GB for 1.12.1)"
+    log_info "   The extractor opens exactly these five archives"
+    log_info "   (contrib/extractor/System.cpp:104-108 of the pinned core):"
+    log_info "   - model.MPQ, dbc.MPQ, terrain.MPQ, patch.MPQ, patch-2.MPQ"
+    log_info "   Other client archives (textures, sound, speech) are not read by the"
+    log_info "   extractors; wmo.MPQ belongs to a later expansion and does not exist in"
+    log_info "   a vanilla client."
     log_info ""
     log_info "NOTE: The installer will attempt extraction but can continue without"
     log_info "      valid client data (you can extract manually later)."
@@ -647,8 +652,16 @@ validate_client_data() {
     
     log_info "Validating client data at: $data_path"
     
-    # Check for required MPQ files
-    local required_files=("dbc.MPQ" "terrain.MPQ" "wmo.MPQ" "model.MPQ" "texture.MPQ")
+    # Check for the MPQ archives the extractor actually opens. The list is a compile-time
+    # array in the core: contrib/extractor/System.cpp:104-108 of the pinned checkout names
+    # model.MPQ, dbc.MPQ, terrain.MPQ, patch.MPQ, patch-2.MPQ - nothing else.
+    #
+    # The list here used to be dbc/terrain/wmo/model/texture. Neither wmo.MPQ nor texture.MPQ
+    # exists in a vanilla 1.12 client (wmo.MPQ is a Wrath archive; vanilla spells the other one
+    # textures.MPQ), so a perfectly good client directory was refused, while patch-2.MPQ - which
+    # the extractor does open - was never checked at all. Pinned by
+    # tests/installer/run_tests.sh:test_client_data_requirements_match_the_extractor.
+    local required_files=("model.MPQ" "dbc.MPQ" "terrain.MPQ" "patch.MPQ" "patch-2.MPQ")
     for file in "${required_files[@]}"; do
         if [ ! -f "$data_path/$file" ]; then
             log_warn "Missing required file: $file"
@@ -656,21 +669,21 @@ validate_client_data() {
         fi
     done
     
-    # Check patch.MPQ size (should be ~1.9GB for 1.12.1)
-    if [ -f "$data_path/patch.MPQ" ]; then
-        local patch_size
-        patch_size=$(stat -c%s "$data_path/patch.MPQ" 2>/dev/null || echo 0)
-        if [ "$patch_size" -lt 1000000000 ]; then
-            log_warn "patch.MPQ seems too small ($patch_size bytes) - expected ~1.9GB"
-            log_warn "This may not be a valid 1.12.1 client"
-            ((errors++))
-        else
-            log_info "patch.MPQ size looks correct ($(numfmt --to=iec "$patch_size"))"
+    # patch.MPQ is the size of a full 1.12 patch chain (~1.9GB); the floor below only catches a
+    # truncated download. patch-2.MPQ is reported, not judged: no measurement backs a threshold
+    # for it here, and a false refusal of valid data is its own defect.
+    for file in patch.MPQ patch-2.MPQ; do
+        if [ -f "$data_path/$file" ]; then
+            local archive_size
+            archive_size=$(stat -c%s "$data_path/$file" 2>/dev/null || echo 0)
+            log_info "$file present: $(numfmt --to=iec "$archive_size")"
+            if [ "$file" = "patch.MPQ" ] && [ "$archive_size" -lt 1000000000 ]; then
+                log_warn "patch.MPQ seems too small ($archive_size bytes) - expected ~1.9GB"
+                log_warn "This may not be a valid 1.12.1 client"
+                ((errors++))
+            fi
         fi
-    else
-        log_warn "Missing patch.MPQ"
-        ((errors++))
-    fi
+    done
     
     # Test extraction capability with a dry-run
     if [ -f "$data_path/dbc.MPQ" ]; then

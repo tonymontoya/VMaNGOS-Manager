@@ -2165,6 +2165,65 @@ EOF
     return "$failed"
 }
 
+# The client-data checklist must be the extractor's checklist, not a remembered one.
+# contrib/extractor/System.cpp:104-108 of the pinned core opens exactly:
+#     model.MPQ, dbc.MPQ, terrain.MPQ, patch.MPQ, patch-2.MPQ
+# An earlier revision of vmangos_setup.sh asked for wmo.MPQ and texture.MPQ instead, neither of
+# which exists in a vanilla 1.12 client, and never checked patch-2.MPQ at all - so it refused
+# valid client directories and accepted incomplete ones. The list is checked through the same
+# `if ! validate_client_data ...` shape the installer uses (line 847), because the script runs
+# under `set -e` and `((errors++))` returns non-zero on its first increment: a test that called
+# the function bare would be measuring errexit, not validation.
+test_client_data_requirements_match_the_extractor() {
+    local tmp failed=0 rc
+    tmp="$(mktemp -d)"
+
+    make_valid_dir() {
+        local dir="$1"
+        mkdir -p "$dir"
+        touch "$dir/model.MPQ" "$dir/dbc.MPQ" "$dir/terrain.MPQ" "$dir/patch-2.MPQ"
+        truncate -s 2G "$dir/patch.MPQ"
+    }
+
+    run_validate() {
+        INSTALL_LOG="$tmp/install.log" bash -c '
+            set -e
+            source "$1"
+            if validate_client_data "$2" >/dev/null 2>&1; then
+                printf "pass\n"
+            else
+                printf "fail\n"
+            fi
+        ' _ "$REPO_ROOT/vmangos_setup.sh" "$1"
+    }
+
+    # 1. exactly the five archives, nothing else: a real vanilla client directory passes.
+    make_valid_dir "$tmp/vanilla"
+    assert_equals "pass" "$(run_validate "$tmp/vanilla")" \
+        "a directory holding exactly the five archives the extractor opens is accepted" || failed=1
+
+    # 2. patch-2.MPQ is one of them: its absence is a failure, which the old list never caught.
+    rm "$tmp/vanilla/patch-2.MPQ"
+    assert_equals "fail" "$(run_validate "$tmp/vanilla")" \
+        "missing patch-2.MPQ is refused" || failed=1
+
+    # 3. the two archives the old list demanded do not rescue that absence.
+    make_valid_dir "$tmp/wrong"
+    touch "$tmp/wrong/wmo.MPQ" "$tmp/wrong/texture.MPQ"
+    rm "$tmp/wrong/patch-2.MPQ"
+    assert_equals "fail" "$(run_validate "$tmp/wrong")" \
+        "wmo.MPQ and texture.MPQ do not substitute for a missing archive" || failed=1
+
+    # 4. the truncated-download floor still fires (the fix did not remove a working gate).
+    make_valid_dir "$tmp/truncated"
+    truncate -s 4096 "$tmp/truncated/patch.MPQ"
+    assert_equals "fail" "$(run_validate "$tmp/truncated")" \
+        "a 4 KiB patch.MPQ is still refused" || failed=1
+
+    rm -rf "$tmp"
+    return "$failed"
+}
+
 test_extraction_no_client_data_marker() {
     local tmp_dir root failed=0 markers
     tmp_dir="$(mktemp -d)"
@@ -2491,6 +2550,7 @@ main() {
     run_test "Installer: Guided state" test_guided_state_round_trip
     run_test "Installer: Extraction root" test_extraction_root_preparation
     run_test "Installer: Client data symlink farm" test_client_data_symlink_farm
+    run_test "Installer: Client data list matches the extractor" test_client_data_requirements_match_the_extractor
     run_test "Installer: Database server provisioning" test_database_server_provisioning
     run_test "Installer: Extraction resume clears partial vmaps" test_extraction_resume_clears_partial_vmaps
     run_test "Installer: Extraction skips mmaps on request" test_extraction_skip_mmaps
