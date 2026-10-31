@@ -3957,6 +3957,63 @@ def test_a_view_switched_to_fits_its_roster_to_its_rows(tmp_path):
     asyncio.run(scenario())
 
 
+def test_a_plan_measured_mid_settle_is_re_taken_when_the_frame_arrives(tmp_path):
+    """A plan measured against a frame that is still moving is measured against nothing.
+
+    The column budget checks its own frame when it takes the plan and again immediately
+    after applying it — but the layout settles in stages, so a frame that moves *after*
+    the plan is applied is invisible to both samples. Measured locally against the
+    current code: the Logs roster's card was held at 56 columns, a re-plan was taken
+    against the 50-column table that produced, and the card then moved to 44 columns.
+    The table was left with `content=38 virtual=50 drawn=50 max_scroll_x=14` and stayed
+    that way for the whole 2.4 seconds of polling that followed — no event arrives for a
+    move that has already happened, and only an event re-takes the budget. CI run
+    41190648956 (ubuntu-24.04) sat in the same hole for the 30 seconds a pilot polled:
+    `table=56x7 rows=6 drawn=58 max_scroll_x=4`, with the refresh interval turned off so
+    nothing else was coming either.
+
+    The interleave here is the one the app itself produces: `retry_column_budget` is the
+    entry the layout-retry timer uses, and a refresh landing in the middle of a settle
+    reaches it the same way. What the test holds is the invariant, not the timing: a plan
+    whose frame has since moved has to be re-taken.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="logs", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the snapshot to load")
+            table = app.query_one("#realm-logs-table", DataTable)
+            controller = app.selection_tables["logs"]
+            await wait_for(
+                lambda: table.row_count > 0 and table.max_scroll_x == 0 and not controller._width_retry_pending,
+                timeout=30.0,
+                message="the roster to fit its card with no retry chain open",
+            )
+            cells = [row for _key, row in controller._rows_cache]
+            card = app.query_one("#realm-logs-table-layout")
+
+            card.styles.width = table.content_size.width + 6
+            await pilot.pause(0.05)
+            controller.retry_column_budget(cells)
+            await pilot.pause(0.05)
+
+            measured = table.content_size.width
+            card.styles.width = card.region.width - 14
+            for _ in range(6):
+                await pilot.pause(0.3)
+
+            drawn = sum(column.get_render_width(table) for column in table.columns.values())
+            assert table.max_scroll_x == 0, (
+                f"the roster kept a plan measured against a {measured}-column frame while it now "
+                f"sits in {table.content_size.width}: content={table.content_size.width} "
+                f"virtual={table.virtual_size.width} drawn={drawn} "
+                f"max_scroll_x={table.max_scroll_x}"
+            )
+
+    asyncio.run(scenario())
+
+
 def test_a_view_that_is_still_settling_does_not_ask_a_covered_screen_for_its_widgets(tmp_path):
     """A dialog can appear between one layout pass and the next.
 

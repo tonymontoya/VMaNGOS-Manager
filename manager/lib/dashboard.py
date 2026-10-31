@@ -1202,6 +1202,10 @@ class SelectionTable:
         column_policy: dict[str, Any] | None = None,
     ) -> None:
         self.table = table
+        # The widget gets the news about its own frame (`Resize`, posted by the layout)
+        # and the arithmetic lives here, so the table needs one way back to the
+        # controller. `RosterTable.on_resize` is the only reader.
+        table._vm_controller = self
         self.titles = list(titles or [])
         self.column_policy = dict(column_policy or {})
         # The policy carries one word that is not part of the arithmetic — `elide`,
@@ -1228,8 +1232,15 @@ class SelectionTable:
         # `LAYOUT_RETRY_DELAY` for the life of the session rather than a wait.
         self._height_passes = 0
         # Generations of "the frame moved after I measured it". `_width_passes` cannot
-        # count them: every successful plan zeroes that counter.
+        # count them: every successful plan zeroes that counter. It is a budget for one
+        # wait, not for a session: a pass that finds the plan still matching the frame
+        # zeroes it, so a roster that has settled starts the next settle with the full
+        # budget in hand.
         self._moved_passes = 0
+        # Did the last pass through `apply_column_budget` actually change the plan? The
+        # rows only have to be redrawn when it did, and this distinguishes that from a
+        # verification pass that found nothing to change.
+        self._plan_changed = False
 
     def set_filter(self, text: str) -> None:
         normalized = text.strip().lower()
@@ -1392,6 +1403,9 @@ class SelectionTable:
         again after a resize, when the frame each roster owns has moved with the details
         pane beside it.
         """
+        # Whether this pass changes the plan is what decides if the drawn rows have to be
+        # re-added; a verification pass that finds everything settled changes nothing.
+        self._plan_changed = False
         if not self.column_policy or not self.titles:
             return
         available = self.table.content_size.width
@@ -1446,9 +1460,13 @@ class SelectionTable:
             # a roster), and a plan measured against a frame that has since moved by
             # four columns leaves a table that still scrolls.
             if self.table.content_size.width == available:
+                # Observed settled. This is the only place that knows a wait is over, so
+                # it is where the wait's budget is handed back.
+                self._moved_passes = 0
                 return
         self._column_signature = signature
         self._width_retry_pending = False
+        self._plan_changed = True
         # A width is only a layout fact once cells have been drawn against it: Textual
         # works out the table's scrollable width as rows are added, so a plan that
         # changes the widths and leaves the rows alone leaves the old width — and the
@@ -1479,21 +1497,22 @@ class SelectionTable:
                 self._capped[index] = room
         self.apply_sort_indicator()
         if self.table.content_size.width != available:
-            # The frame the plan was measured against is gone: the density classes, the
-            # chrome, or a scrollbar appearing beside the roster moves it after this
-            # method has run, and the table is left holding a plan wider than the frame
-            # around it. On ubuntu-22.04 (run 41079089969) that left a pilot test polling
-            # for thirty seconds against `table=57x4 rows=2 drawn=59 max_scroll_x=2`. The
-            # ask is a timer for the same reason as the height wait above, and the budget
-            # counts generations in `_moved_passes` rather than the `_width_passes` a few
-            # lines up: that counter is zeroed by every successful plan, so a bound written
-            # against it (`< 3`) bound nothing at all.
+            # The frame the plan was measured against is gone already: the density
+            # classes, the chrome, or a scrollbar appearing beside the roster moves it
+            # while this method is running, and the table is left holding a plan wider
+            # than the frame around it. On ubuntu-22.04 (run 41079089969) that left a
+            # pilot test polling for thirty seconds against `table=57x4 rows=2 drawn=59
+            # max_scroll_x=2`. A frame that goes *after* this sample is a different
+            # problem and is answered where the layout reports it — `RosterTable.on_resize`
+            # — because no amount of re-asking here can see a settle that has not
+            # happened yet. The ask is a timer for the same reason as the height wait
+            # above, and the budget counts generations in `_moved_passes` rather than the
+            # `_width_passes` a few lines up: that counter is zeroed by every successful
+            # plan, so a bound written against it (`< 3`) bound nothing at all.
             if self._moved_passes < MAX_WIDTH_PASSES and not self._width_retry_pending:
                 self._moved_passes += 1
                 self._width_retry_pending = True
-                self.table.set_timer(
-                    LAYOUT_RETRY_DELAY, lambda: self.retry_column_budget(cells)
-                )
+                self.table.set_timer(LAYOUT_RETRY_DELAY, lambda: self.retry_column_budget(cells))
 
     def _owned_by_a_modal(self) -> bool:
         """Is a dialog on top of the screen these tables live on?
@@ -1514,8 +1533,10 @@ class SelectionTable:
         # A width is only a layout fact once the cells have been drawn against it:
         # Textual recomputes the table's scrollable width as rows are added, so a
         # re-plan that leaves the rows alone leaves the old width on screen. The
-        # normal rebuild re-adds them; this path has no rebuild to lean on.
-        self.relay_rows()
+        # normal rebuild re-adds them; this path has no rebuild to lean on. A
+        # verification pass that changed nothing has nothing to redraw.
+        if self._plan_changed:
+            self.relay_rows()
 
     def replan_columns(self) -> None:
         """Spend a new window's columns on the rows already drawn.
@@ -4319,12 +4340,38 @@ def create_app(
         from textual.app import App, ComposeResult
         from textual.command import DiscoveryHit, Hit, Hits, Provider
         from textual.containers import Container, Horizontal, Vertical
+        from textual.events import Resize
         from textual.screen import ModalScreen
         from textual.widgets import Button, DataTable, Header, Input, Label, Select, Static
     except ImportError as exc:
         raise DashboardRuntimeError(
             f"Textual runtime import failed: {exc}. Run 'vmangos-manager dashboard --bootstrap' first."
         ) from exc
+
+    class RosterTable(DataTable):
+        """A roster that re-takes its column plan when its frame moves.
+
+        Every other re-take of the budget happens because something asked for a plan: a
+        rebuild, a window resize, a retry timer aimed at a frame that was already wrong
+        when the plan was taken. None of them can see the common case, a frame that moves
+        *after* the plan — the view's content growing tall enough to gain a scrollbar, a
+        summary line taking a second row, a neighbour card changing height. Narrowing the
+        Logs roster's card from 62 columns to 48 left that view at `content=42 virtual=56
+        drawn=56 max_scroll_x=16`, and it stayed there for as long as the pilot watched
+        it: no event arrives for a layout that has already settled, and only an event
+        re-takes a plan. CI run 41190648956 (ubuntu-24.04) polled exactly that shape for
+        thirty seconds — `table=56x7 rows=6 drawn=58 max_scroll_x=4` — in the pilot that
+        had just switched to the view.
+
+        The table is the widget the layout tells. `Resize` arrives whatever moved the
+        frame, so the re-plan hangs off the event rather than off whichever cause happened
+        to be written down.
+        """
+
+        def on_resize(self, event: Resize) -> None:
+            controller = getattr(self, "_vm_controller", None)
+            if controller is not None:
+                controller.replan_columns()
 
     def make_form_control(field: dict[str, Any]) -> Input | Select:
         """One input control per form field spec.
@@ -4689,7 +4736,7 @@ def create_app(
                                 with Vertical(classes="panel table-panel", id="accounts-table-layout"):
                                     yield Static("[b]Account Inventory[/b]", classes="table-detail-title")
                                     yield Input(placeholder="filter rows - Enter keeps, Esc clears", id="accounts-search", classes="table-search hidden")
-                                    yield DataTable(id="accounts-table", classes="detail-table")
+                                    yield RosterTable(id="accounts-table", classes="detail-table")
                                 yield Static("", id="account-details", classes="panel hero-panel")
                         with view_containers["backups"](id="backups-view", classes="view hidden"):
                             with Horizontal(id="backups-layout"):
@@ -4706,7 +4753,7 @@ def create_app(
                                     # rather than at the foot of the prose pane beside the roster.
                                     yield Static("", id="backup-selection", classes="table-selection")
                                     yield Input(placeholder="filter rows - Enter keeps, Esc clears", id="backups-search", classes="table-search hidden")
-                                    yield DataTable(id="backups-table", classes="detail-table")
+                                    yield RosterTable(id="backups-table", classes="detail-table")
                                 yield Static("", id="backup-summary", classes="panel hero-panel")
                         with view_containers["config"](id="config-view", classes="view hidden"):
                             yield Static("", id="config-pane", classes="panel hero-panel")
@@ -4717,7 +4764,7 @@ def create_app(
                                     with Vertical(classes="panel table-panel", id="realm-logs-table-layout"):
                                         yield Static("[b]Recent Events[/b]", classes="table-detail-title")
                                         yield Input(placeholder="filter rows - Enter keeps, Esc clears", id="logs-search", classes="table-search hidden")
-                                        yield DataTable(id="realm-logs-table", classes="detail-table")
+                                        yield RosterTable(id="realm-logs-table", classes="detail-table")
                                     yield Static("", id="realm-log-details", classes="panel accent-panel")
                         with view_containers["operations"](id="operations-view", classes="view hidden"):
                             with Vertical(id="operations-layout"):
@@ -4729,7 +4776,7 @@ def create_app(
                                     yield Static("", id="schedule-intro")
                                     yield Input(placeholder="filter rows - Enter keeps, Esc clears", id="schedules-search", classes="table-search hidden")
                                     with Horizontal(classes="table-detail-body"):
-                                        yield DataTable(id="schedules-table", classes="detail-table")
+                                        yield RosterTable(id="schedules-table", classes="detail-table")
                                         yield Static("", id="schedule-details", classes="detail-pane")
                     yield Static("", id="command-rail")
 
