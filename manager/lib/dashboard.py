@@ -4764,6 +4764,12 @@ def create_app(
             self.repaint_pending = False
             self.service_remeasure_passes = 0
             self._view_settle_attempts = 0
+            # Whether the current settle chain has had one pass that measured the aim as
+            # satisfied and a later pass that measured it still satisfied. A pass cannot see
+            # the layout its own request provokes, and the layout that follows a refresh can
+            # move the card back to where it started.
+            self._view_settle_confirmed = False
+            self._view_settle_confirmations = 0
             self.refresh_force_full = False
             self.last_refresh_failed = False
             self.snapshot_loaded = False
@@ -5087,6 +5093,10 @@ def create_app(
             # pass it died on instead of describing the geometry and leaving the reader
             # to guess whether the aim was late or never came.
             self._view_settle_attempts = attempt + 1
+            if attempt == 0:
+                # A fresh chain: opening a view or resizing it. Re-arms inside the chain pass
+                # attempt >= 1 and must not clear the confirmation the chain is working toward.
+                self._view_settle_confirmed = False
             # One callback per pass, on a timer. Nothing obliges a refresh at the moment
             # a layout is needed — that is what the v0.7.17 CI red taught — so the timer
             # is the mechanism; an after-refresh callback armed beside it doubles the
@@ -5145,29 +5155,48 @@ def create_app(
                 # why a timer sits alongside the after-refresh callback.
                 self.arm_view_settle(attempt)
                 return
-            card.scroll_visible(animate=False)
-            # `scroll_visible` moves as little as it can, and a card shorter than the
-            # window therefore settles against the *bottom* of the box — the wrong end
-            # when the element the card feeds sits next to it. Measured at 100x36 with
-            # the Logs view open: box rows 8..29, roster card 17..29, and the
-            # selected-event pane the cursor updates starting at row 29. One row of an
-            # eighteen-row pane was on screen, and the message the operator had just
-            # moved the cursor to was not on the screen at all. At 140x52 the same aim
-            # left the pane's last three rows below the box, cutting the Message line
-            # mid-word with no bottom border to show it had been cut.
-            #
-            # A card that fits the box is therefore aimed at its top. That keeps the card
-            # whole — it is no taller than the box either way — and puts the head of what
-            # follows it inside the box. What gives way is the prose summary above the
-            # roster, which is reference material with a scroll hint on it, not the
-            # surface the operator is working on.
             box = view.content_region
+            # The aim is one line, and it is the same line in both shapes: the top of the
+            # card at the top of the box. What used to ask for that was
+            # `card.scroll_visible()`, which asks for the **least** movement that makes the
+            # card visible — not the same request when the card is taller than the box — and
+            # then a second branch aimed the card only when it fitted, with no way for the
+            # pass to see what its own request provoked.
+            #
+            # ubuntu-22.04 in CI run 41200657690 measured what that leaves. Operations at
+            # 100x36: a 30-row card — intro lines, a four-row roster, and the eighteen-row
+            # selection pane stacked under it — in a 19-row box. The chain's too-tall branch
+            # was satisfied at the instant it looked (the card happened to start at the box
+            # top), the layout that followed pushed the card 47 rows back down, and nothing
+            # was left to look again. The selection pane ended at rows **66..84** of a box at
+            # 8..28: the operator opened Ops and saw the two tasks and nothing the cursor
+            # selects.
+            #
+            # So: ask for the geometry, and then **measure it on a later pass**. A pass that
+            # finds the aim satisfied confirms it once more before the chain is allowed to
+            # say done — the refresh that follows is exactly the layout that can move the
+            # card back. All of it stays inside the same bounded budget (40 passes, 8 s).
+            delta = card.region.y - box.y
             reaim = False
-            if card.region.height <= box.height:
-                delta = card.region.y - box.y
-                if delta:
-                    view.scroll_to(y=view.scroll_y + delta, animate=False)
-                    reaim = True
+            if delta:
+                target = view.scroll_y + delta
+                clamped = max(0.0, min(float(view.max_scroll_y), target))
+                view.scroll_to(y=clamped, animate=False)
+                # Ask again only while the aim is reachable. A card taller than the box at the
+                # end of the document cannot put its top at the top of the box: the scroll
+                # clamps and the delta never closes. Measured at 140x52 with Operations open,
+                # the 57-row card rests at rows 19..75 of a 34-row box — the pane beside the
+                # roster whole, the view at the end of its range — and an aim that re-armed on
+                # an unreachable target would ask 40 times for the impossible, 8 seconds of
+                # timers on every open, before the budget ended the chain anyway.
+                reaim = abs(clamped - target) < 0.5
+            elif not self._view_settle_confirmed:
+                self._view_settle_confirmed = True
+                # A counter, for the same reason `_view_settle_attempts` is one: a chain that
+                # never confirmed its aim should be able to say so in a failure message rather
+                # than describe the geometry and leave the reader to infer it.
+                self._view_settle_confirmations += 1
+                reaim = True
             # The rail row counts rows above and below the box from `scroll_y`, so this
             # scroll has to be followed by a restatement of it. It happens in the view's
             # own `watch_scroll_y`, which fires for every move whoever makes it; reading
@@ -5195,7 +5224,10 @@ def create_app(
                 # was rows 8..29, and the card sat at 26..38 with nothing left to ask again,
                 # because the chain had treated *asking* as *done*. The postcondition of a
                 # settle chain is the geometry, so the chain re-checks the geometry and comes
-                # back on the same bounded budget (40 passes, 8 s).
+                # back on the same bounded budget (40 passes, 8 s). The same arm now also
+                # carries a pass that found the aim already satisfied: it measured the geometry
+                # as of *before* the refresh this chain provoked, and ubuntu-22.04 in run
+                # 41200657690 found the card back at its starting row 47 rows later.
                 self.arm_view_settle(attempt)
 
         # The view name is not always the controller name: Operations drives `schedules`.

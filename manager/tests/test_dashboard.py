@@ -29,6 +29,7 @@ from dashboard import (
     ACTION_STYLES,
     COLUMN_POLICY,
     MAX_WIDTH_PASSES,
+    MAX_VIEW_SETTLE_PASSES,
     LAYOUT_RETRY_DELAY,
     column_plan,
     fit_text,
@@ -4351,6 +4352,107 @@ def test_the_backups_pane_prints_its_warnings_above_its_instructions(tmp_path):
             assert positions["Credentials"] < positions["Preflight"], (
                 "the pane prints how to run a restore before it prints that the restore "
                 "credentials are missing"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_a_view_whose_card_does_not_fit_still_lands_on_the_card_and_proves_it(tmp_path):
+    """A pass that likes the geometry has not measured that the geometry held.
+
+    ubuntu-22.04 in CI run 41200657690, Operations at 100x36: a 30-row card — two intro
+    lines, a four-row roster, and the eighteen-row selection pane stacked under it — inside
+    a 19-row box. The settle chain had one pass; that pass found the card at the top of the
+    box and reported the view settled. The refresh that followed pushed the card 47 rows
+    back down, and the pane the cursor feeds ended at rows **66..84** of a box at 8..28.
+    The operator opened Ops, saw the two scheduled tasks, and saw nothing of anything they
+    select, while every wait in this suite was satisfied.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="operations", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the snapshot to load")
+            table = app.query_one("#schedules-table", DataTable)
+            await wait_for(
+                lambda: (
+                    table.row_count > 0
+                    and app._view_settle_attempts >= 1
+                    and not app._view_settling
+                ),
+                timeout=30.0,
+                message="the view to settle",
+            )
+            view = app.query_one("#operations-view")
+            card = app.roster_card("operations")
+            box = view.content_region
+            assert card is not None and card.region.height > box.height, (
+                f"precondition: the Operations card ({card.region.height if card else 0} rows) is "
+                f"expected to be taller than its box ({box.y}..{box.bottom}, {box.height} rows)"
+            )
+            assert app._view_settle_confirmations >= 1, (
+                f"the settle chain ran {app._view_settle_attempts} pass and never re-measured the "
+                "aim on a later one — the shape CI measured on ubuntu-22.04, where the pass that "
+                "liked the geometry was the last pass there was"
+            )
+            assert card.region.y == box.y, (
+                f"the Operations card rests at row {card.region.y}, not at the top of its box "
+                f"({box.y}..{box.bottom})"
+            )
+            pane = app.query_one("#schedule-details", Static)
+            shown = max(0, min(pane.content_region.bottom, box.bottom) - max(pane.content_region.y, box.y))
+            assert shown > 0, (
+                f"the selection pane (content rows {pane.content_region.y}..{pane.content_region.bottom}) "
+                f"is entirely below the box ({box.y}..{box.bottom})"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_an_aim_the_scroll_range_cannot_reach_is_not_asked_for_forty_times(tmp_path):
+    """At 140x52 the Operations card cannot be aimed at the top of its box. Nothing should ask.
+
+    The card is 25 rows in a 34-row box at the end of a document whose scroll range ends at
+    22, so the closest the aim can come is the card flush with the **bottom** — which is also
+    where the selection pane is whole. Ask for the top anyway and re-arm on the delta, and
+    the chain re-asks an impossible request once every 0.2 s until the budget dies:
+    measured with the clamp removed, **40 passes, the whole 8 seconds**, finishing at
+    exactly the same geometry (`card 19..44`, `scroll 22/22`) the single clamped pass
+    reaches. Eight seconds of timers on every open of the view, and every wait in this
+    suite sits behind it.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="operations", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(140, 52)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the snapshot to load")
+            table = app.query_one("#schedules-table", DataTable)
+            await wait_for(
+                lambda: (
+                    table.row_count > 0
+                    and app._view_settle_attempts >= 1
+                    and not app._view_settling
+                ),
+                timeout=40.0,
+                message="the view to settle",
+            )
+            view = app.query_one("#operations-view")
+            card = app.roster_card("operations")
+            box = view.content_region
+            assert app._view_settle_attempts < MAX_VIEW_SETTLE_PASSES, (
+                f"the settle chain spent its whole budget ({app._view_settle_attempts} passes) "
+                f"chasing an aim the scroll range cannot reach: card {card.region.y}.."
+                f"{card.region.bottom} against box {box.y}..{box.bottom}, scroll "
+                f"{view.scroll_y:.0f}/{view.max_scroll_y:.0f}"
+            )
+            pane = app.query_one("#schedule-details", Static)
+            shown = max(0, min(pane.content_region.bottom, box.bottom) - max(pane.content_region.y, box.y))
+            assert shown >= pane.content_region.height, (
+                f"the unaimable position is supposed to be the one that keeps the pane whole: "
+                f"{shown} of {pane.content_region.height} pane rows are inside the box "
+                f"({box.y}..{box.bottom})"
             )
 
     asyncio.run(scenario())
