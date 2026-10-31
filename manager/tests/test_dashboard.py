@@ -855,8 +855,27 @@ def test_backups_view_shows_restore_readiness(tmp_path):
             await wait_for(lambda: table.row_count > 0, message="backups table to load")
             await pilot.pause()
             panel = str(app.query_one("#backup-summary").renderable)
-            assert "Restore Readiness" in panel
-            assert "not in this session" in panel, "missing credentials must carry env-var guidance"
+            # There is no `Restore Readiness` heading any more: measured at 100x36 the box
+            # leaves the pane 4 content rows, and the row went to the second warning line.
+            # What has to hold is that the readiness *state* is printed, and printed before
+            # anything the pane only tells you how to do.
+            lines = [MARKUP.sub("", line) for line in panel.splitlines()]
+
+            def label_row(label: str) -> int:
+                return next((i for i, line in enumerate(lines) if line.startswith(label)), -1)
+
+            for label in ("Protection", "Credentials", "Safety Copy", "Preflight"):
+                assert label_row(label) >= 0, f"the backups pane never prints {label!r}: {lines!r}"
+            assert label_row("Credentials") < label_row("Preflight"), (
+                "the pane prints the restore command before it prints that the restore "
+                "credentials are missing"
+            )
+            assert label_row("Safety Copy") < label_row("Preflight"), (
+                "the pane prints the restore command before it prints that the newest copy "
+                "is too old to restore from safely"
+            )
+            assert "not in this session" in panel, "missing credentials must name the state"
+            assert "Restore env" in panel, "missing credentials must carry env-var guidance"
             assert "within 24h window" in panel, "a fresh backup must read as within the safety window"
             assert "press p on a selected backup" in panel
             assert "--preflight" in panel
@@ -4142,8 +4161,8 @@ def test_the_selected_event_pane_prints_the_event_before_it_prints_the_reference
             view = app.query_one("#logs-view")
             pane = app.query_one("#realm-log-details", Static)
             box = view.content_region
-            shown = max(0, min(pane.region.bottom, box.bottom) - max(pane.region.y, box.y))
-            assert pane.region.height > shown, (
+            shown = max(0, min(pane.content_region.bottom, box.bottom) - max(pane.content_region.y, box.y))
+            assert pane.content_region.height > shown, (
                 f"precondition: the pane ({pane.region.height} rows) is not clipped by the box "
                 f"({box.y}..{box.bottom}) at this size, so the ordering is not what is at stake"
             )
@@ -4169,6 +4188,170 @@ def test_the_selected_event_pane_prints_the_event_before_it_prints_the_reference
                         f"the pane prints {reference} on line {position} and the message on line "
                         f"{at}: the reference fields are ahead of the event they describe"
                     )
+
+    asyncio.run(scenario())
+
+
+def test_the_accounts_pane_keeps_the_two_flags_that_change_what_you_do_next(tmp_path):
+    """Six rows of pane, and the two that matter are the two that fall off.
+
+    `ops/tools/probe_panes.py` measures the Accounts prose pane at 100x36: it authors 9
+    lines, the box leaves 6 on screen, and what survives the clip is the title, an
+    "Inventory 8 accounts loaded" count the sidebar already prints, the name, the id, and
+    the GM level. Banned — the flag that decides whether this account can be handed out at
+    all — and Online are the two lines the box takes. Reordered: the flags come up with the
+    name, the count and the id go down.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="accounts", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the snapshot to load")
+            table = app.query_one("#accounts-table", DataTable)
+            await wait_for(
+                lambda: (
+                    table.row_count > 0
+                    and table.max_scroll_x == 0
+                    and app._view_settle_attempts >= 1
+                    and not app._view_settling
+                ),
+                timeout=30.0,
+                message="the view to settle",
+            )
+            view = app.query_one("#accounts-view")
+            pane = app.query_one("#account-details", Static)
+            box = view.content_region
+            shown = max(0, min(pane.content_region.bottom, box.bottom) - max(pane.content_region.y, box.y))
+            assert pane.content_region.height > shown, (
+                f"precondition: the accounts pane ({pane.region.height} rows) is not clipped by "
+                f"the box ({box.y}..{box.bottom}) at this size"
+            )
+            lines = str(pane.renderable).splitlines()
+            for needle in ("Selected", "Banned", "Online"):
+                position = next((i for i, line in enumerate(lines) if f"]{needle}[/]" in line), -1)
+                assert position >= 0, f"the accounts pane never prints {needle!r}: {lines!r}"
+                assert position < shown, (
+                    f"{needle!r} is authored on line {position} of the accounts pane but only "
+                    f"{shown} of its {len(lines)} lines are on screen (pane rows "
+                    f"{pane.region.y}..{pane.region.bottom}, box {box.y}..{box.bottom})"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_the_scheduled_task_pane_prints_when_it_runs_before_where_it_came_from(tmp_path):
+    """A task's schedule is cut; its provenance is not.
+
+    Measured at 100x36 (`ops/tools/probe_panes.py`): the Selected Task pane authors 14
+    lines, 8 are on screen, and the eight are the title, a sentence describing the pane,
+    the queue count, the task id, its type, its origin and its cadence. `Schedule 03:00
+    UTC` and `Next Run 2026-04-15 03:00 UTC` — the reason the operator opened a queue —
+    are lines 8 and 9, below the cut. The when goes up with the what.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="operations", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the snapshot to load")
+            table = app.query_one("#schedules-table", DataTable)
+            await wait_for(
+                lambda: (
+                    table.row_count > 0
+                    and table.max_scroll_x == 0
+                    and app._view_settle_attempts >= 1
+                    and not app._view_settling
+                ),
+                timeout=30.0,
+                message="the view to settle",
+            )
+            view = app.query_one("#operations-view")
+            pane = app.query_one("#schedule-details", Static)
+            box = view.content_region
+            shown = max(0, min(pane.content_region.bottom, box.bottom) - max(pane.content_region.y, box.y))
+            assert pane.content_region.height > shown, (
+                f"precondition: the task pane ({pane.region.height} rows) is not clipped by the "
+                f"box ({box.y}..{box.bottom}) at this size"
+            )
+            lines = str(pane.renderable).splitlines()
+            for needle in ("Schedule", "Next Run"):
+                position = next((i for i, line in enumerate(lines) if needle in line), -1)
+                assert position >= 0, f"the task pane never prints {needle!r}: {lines!r}"
+                assert position < shown, (
+                    f"{needle!r} is authored on line {position} of the task pane but only "
+                    f"{shown} of its {len(lines)} lines are on screen (pane rows "
+                    f"{pane.region.y}..{pane.region.bottom}, box {box.y}..{box.bottom})"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_the_backups_pane_prints_its_warnings_above_its_instructions(tmp_path):
+    """Five rows of backup posture, and the warnings are not among them.
+
+    Measured at 100x36: the pane authors 18 lines, the box leaves 5, and the five are the
+    title, Protection healthy, Count, and the backup directory — a path that never changes.
+    The two lines that say something is wrong (`Credentials warning not in this session`,
+    `Safety Copy warning latest backup 200d ago — live restore will require --backup-first`)
+    are lines 14 and 15, and the pane ends with two lines of instruction about preflight
+    that outrank nothing. Posture and warnings come first; the directory, the timers and
+    the instructions go below.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="backups", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the snapshot to load")
+            table = app.query_one("#backups-table", DataTable)
+            await wait_for(
+                lambda: (
+                    table.row_count > 0
+                    and table.max_scroll_x == 0
+                    and app._view_settle_attempts >= 1
+                    and not app._view_settling
+                ),
+                timeout=30.0,
+                message="the view to settle",
+            )
+            view = app.query_one("#backups-view")
+            pane = app.query_one("#backup-summary", Static)
+            box = view.content_region
+            shown = max(0, min(pane.content_region.bottom, box.bottom) - max(pane.content_region.y, box.y))
+            assert pane.content_region.height > shown, (
+                f"precondition: the backups pane ({pane.region.height} rows) is not clipped by "
+                f"the box ({box.y}..{box.bottom}) at this size"
+            )
+            lines = str(pane.renderable).splitlines()
+            # Authored lines are not screen rows: a long line wraps, and a five-row pane
+            # that "contains" a warning on its fifth authored line may show only the first
+            # wrapped fragment of it. Map each line to the row it starts on, counting the
+            # wrap at the pane's own content width.
+            width = max(1, pane.content_region.width)
+
+            def screen_row(needle: str) -> int:
+                row = 0
+                for line in lines:
+                    if needle in line:
+                        return row
+                    plain = re.sub(r"\[/?[^\]]*\]", "", line)
+                    row += max(1, -(-len(plain) // width))
+                return -1
+
+            positions = {needle: screen_row(needle) for needle in ("Protection", "Credentials", "Safety Copy", "Directory", "Preflight", "Safety[")}
+            for needle, position in positions.items():
+                assert position >= 0, f"the backups pane never prints {needle!r}: {lines!r}"
+            for needle in ("Credentials", "Safety Copy"):
+                assert positions[needle] < shown, (
+                    f"the {needle!r} line starts on screen row {positions[needle]} of the backups "
+                    f"pane but only {shown} rows are on screen (pane rows "
+                    f"{pane.region.y}..{pane.region.bottom}, box {box.y}..{box.bottom})"
+                )
+            assert positions["Credentials"] < positions["Preflight"], (
+                "the pane prints how to run a restore before it prints that the restore "
+                "credentials are missing"
+            )
 
     asyncio.run(scenario())
 

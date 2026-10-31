@@ -3654,17 +3654,22 @@ def render_account_details(account: dict[str, Any] | None, total_accounts: int) 
             ]
         )
 
+    # Order measured, not inherited: at 100x36 the narrow branch stacks this pane under the
+    # roster and the box leaves 6 of its 10 lines on screen. The old order spent two of them
+    # on a blank and an "N accounts loaded" count the sidebar already prints, and the two
+    # flags that decide what the operator can do with this account — banned, online — fell
+    # off the bottom along with the instructions. Five content rows is the budget at that
+    # size, so the blank under the heading is the row Banned moves into.
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]Selected Account[/]",
-            "",
-            f"[{ACCENT_MUTED}]Inventory[/]     {total_accounts} account{'s' if total_accounts != 1 else ''} loaded",
             f"[{ACCENT_MUTED}]Selected[/]     [bold {ACCENT_TEAL}]{escape_markup(account.get('username', '-'))}[/]",
-            f"[{ACCENT_MUTED}]Account ID[/]   [bold {ACCENT_SKY}]{account.get('id', 0)}[/]",
             f"[{ACCENT_MUTED}]GM Level[/]     {account.get('gm_level', 0)}",
             f"[{ACCENT_MUTED}]Online[/]       {format_flag(account.get('online'))}",
             f"[{ACCENT_MUTED}]Banned[/]       {format_flag(account.get('banned'), true_color=ACCENT_ROSE)}",
+            f"[{ACCENT_MUTED}]Account ID[/]   [bold {ACCENT_SKY}]{account.get('id', 0)}[/]",
             "",
+            f"[{ACCENT_MUTED}]Inventory[/]     {total_accounts} account{'s' if total_accounts != 1 else ''} loaded",
             f"[{ACCENT_MUTED}]Actions[/]      reset password, set GM, ban, or unban from this selection.",
         ]
     )
@@ -3793,71 +3798,80 @@ def render_backups_summary(snapshot: dict[str, Any]) -> str:
     schedule_entries = schedule_data.get("schedules", []) if isinstance(schedule_data.get("schedules", []), list) else []
     configured_schedules = [entry for entry in schedule_entries if entry.get("present")]
     protection_state = "healthy" if summary.get("count", 0) and configured_schedules else ("warning" if summary.get("count", 0) else "critical")
-    lines = [
-        f"[bold {ACCENT_GOLD}]Backup Readiness[/]",
-        "",
+    readiness = summarize_restore_readiness(snapshot)
+    # The sentence used to carry the fix with it — "not in this session — set
+    # MYSQL_RESTORE_DEFAULTS_FILE or MYSQL_RESTORE_PASSWORD in the shell that runs
+    # vmangos-manager" — and at 100 columns that wraps to three rows of a five-row pane, so
+    # the *second* warning, the one about the copy being too old to restore from, was still
+    # off the screen. The state stays on the line the operator reads; the command to fix it
+    # moves down with the other instructions.
+    credentials_line = (
+        f"[{ACCENT_MUTED}]Credentials[/]  {format_state('healthy' if readiness['credentials_ready'] else 'warning')}"
+        + ("" if readiness["credentials_ready"] else "  not in this session")
+    )
+    if readiness["latest_age_seconds"] is None:
+        if summary.get("count", 0):
+            safety_copy_line = f"[{ACCENT_MUTED}]Safety Copy[/]  {format_state('warning')}  latest backup age unknown"
+        else:
+            safety_copy_line = f"[{ACCENT_MUTED}]Safety Copy[/]  {format_state('critical')}  no backups yet"
+    elif readiness["within_safety_window"]:
+        safety_copy_line = (
+            f"[{ACCENT_MUTED}]Safety Copy[/]  {format_state('healthy')}  latest backup {format_age(readiness['latest_age_seconds'])} (within 24h window)"
+        )
+    else:
+        safety_copy_line = (
+            f"[{ACCENT_MUTED}]Safety Copy[/]  {format_state('warning')}  latest backup {format_age(readiness['latest_age_seconds'])} — live restore will require --backup-first"
+        )
+
+    # The order is measured, not inherited. At 100x36 the narrow branch puts this pane above
+    # the roster in the view's box and leaves **5** of its 19 lines on screen; the old order
+    # spent them on the title, a blank, Protection, the backup count the sidebar already
+    # prints, and a directory path that never changes. The two lines that say something is
+    # wrong — restore credentials missing, the latest copy too old to restore from safely —
+    # were lines 14 and 15, under a section heading, above nothing but instructions. So the
+    # posture and its warnings come first, the newest archive next, the timers after that,
+    # and the reference values and the CLI instructions at the bottom, where the clip can
+    # have them. The blank that used to sit under the title and the `Restore Readiness`
+    # heading are the two rows the warnings moved up: at that size the pane has **4 content
+    # rows** — the earlier count of 5 included the card's top border as if it were text — and
+    # a heading that names a section is worth less than the line saying the section is broken.
+    # The labels `Credentials` and `Safety Copy` carry the section on their own.
+    posture_lines = [
         f"[{ACCENT_MUTED}]Protection[/]  {format_state(protection_state)}",
-        f"[{ACCENT_MUTED}]Count[/]       {summary.get('count', 0)}",
-        f"[{ACCENT_MUTED}]Directory[/]   {escape_markup(summary.get('backup_dir', 'n/a') or 'n/a')}",
+        credentials_line,
+        safety_copy_line,
     ]
 
     latest_file = summary.get("latest_file", "")
     if latest_file:
-        lines.extend(
-            [
-                f"[{ACCENT_MUTED}]Latest[/]      {escape_markup(latest_file)}",
-                f"[{ACCENT_MUTED}]When[/]        {escape_markup(iso_to_display(summary.get('latest_timestamp')))}",
-                f"[{ACCENT_MUTED}]Size[/]        {format_bytes(summary.get('latest_size_bytes', 0))}",
-            ]
-        )
+        archive_lines = [
+            f"[{ACCENT_MUTED}]Latest[/]      {escape_markup(latest_file)}",
+            f"[{ACCENT_MUTED}]When[/]        {escape_markup(iso_to_display(summary.get('latest_timestamp')))}",
+            f"[{ACCENT_MUTED}]Size[/]        {format_bytes(summary.get('latest_size_bytes', 0))}",
+        ]
     else:
-        lines.append(f"[{ACCENT_MUTED}]Latest[/]      none")
+        archive_lines = [f"[{ACCENT_MUTED}]Latest[/]      none"]
 
-    lines.extend(["", f"[bold {ACCENT_SKY}]Timer State[/]"])
+    timer_lines: list[str] = [f"[bold {ACCENT_SKY}]Timer State[/]"]
     if backup_schedule_status.get("ok"):
         if configured_schedules:
             for entry in configured_schedules:
                 schedule_name = escape_markup(str(entry.get("id", "backup")).title())
                 schedule_health = "healthy" if entry.get("enabled") and entry.get("active") else "warning"
-                lines.append(
+                timer_lines.append(
                     f"[{ACCENT_MUTED}]{schedule_name}[/]       {format_state(schedule_health)}  {escape_markup(entry.get('configured', 'n/a'))}"
                 )
                 if entry.get("next_run"):
-                    lines.append(f"[{ACCENT_MUTED}]             [/]{escape_markup(entry.get('next_run'))}")
+                    timer_lines.append(f"[{ACCENT_MUTED}]             [/]{escape_markup(entry.get('next_run'))}")
         else:
-            lines.append(f"[{ACCENT_MUTED}]No backup timers configured yet.[/]")
+            timer_lines.append(f"[{ACCENT_MUTED}]No backup timers configured yet.[/]")
     else:
-        lines.extend(backend_failure_lines(snapshot, backup_schedule_status, "Schedule state unavailable"))
+        timer_lines.extend(backend_failure_lines(snapshot, backup_schedule_status, "Schedule state unavailable"))
 
-    readiness = summarize_restore_readiness(snapshot)
-    lines.extend(
-        [
-            "",
-            f"[bold {ACCENT_GOLD}]Restore Readiness[/]",
-            f"[{ACCENT_MUTED}]Credentials[/]  {format_state('healthy' if readiness['credentials_ready'] else 'warning')}"
-            + (
-                ""
-                if readiness["credentials_ready"]
-                else f"  not in this session — set MYSQL_RESTORE_DEFAULTS_FILE or MYSQL_RESTORE_PASSWORD in the shell that runs vmangos-manager"
-            ),
-        ]
-    )
-    if readiness["latest_age_seconds"] is None:
-        if summary.get("count", 0):
-            lines.append(f"[{ACCENT_MUTED}]Safety Copy[/]  {format_state('warning')}  latest backup age unknown")
-        else:
-            lines.append(f"[{ACCENT_MUTED}]Safety Copy[/]  {format_state('critical')}  no backups yet")
-    elif readiness["within_safety_window"]:
-        lines.append(
-            f"[{ACCENT_MUTED}]Safety Copy[/]  {format_state('healthy')}  latest backup {format_age(readiness['latest_age_seconds'])} (within 24h window)"
-        )
-    else:
-        lines.append(
-            f"[{ACCENT_MUTED}]Safety Copy[/]  {format_state('warning')}  latest backup {format_age(readiness['latest_age_seconds'])} — live restore will require --backup-first"
-        )
-    lines.append(
-        f"[{ACCENT_MUTED}]Preflight[/]   press p on a selected backup, or run vmangos-manager backup restore <file> --preflight"
-    )
+    reference_lines = [
+        f"[{ACCENT_MUTED}]Count[/]       {summary.get('count', 0)}",
+        f"[{ACCENT_MUTED}]Directory[/]   {escape_markup(summary.get('backup_dir', 'n/a') or 'n/a')}",
+    ]
 
     # The facts about the selected archive used to be printed here, at the bottom of a
     # prose pane. `COLUMN_POLICY["backups"]` drops Size, Created By and Timestamp from the
@@ -3871,13 +3885,24 @@ def render_backups_summary(snapshot: dict[str, Any]) -> str:
     # `#backup-selection`, inside the roster's own card — on screen whenever the roster is.
     # The CLI-only invariant stays in this pane: it is a property of the deployment, not of
     # the row under the cursor.
-    lines.extend(
-        [
-            "",
-            f"[{ACCENT_MUTED}]Safety[/]      live restore is CLI-only: preflight, then run vmangos-manager backup restore <file> --yes",
-        ]
-    )
+    instruction_lines = [
+        f"[{ACCENT_MUTED}]Preflight[/]   press p on a selected backup, or run vmangos-manager backup restore <file> --preflight",
+        f"[{ACCENT_MUTED}]Restore env[/] MYSQL_RESTORE_DEFAULTS_FILE or MYSQL_RESTORE_PASSWORD, set in the shell that runs vmangos-manager",
+        f"[{ACCENT_MUTED}]Safety[/]      live restore is CLI-only: preflight, then run vmangos-manager backup restore <file> --yes",
+    ]
 
+    lines = (
+        [f"[bold {ACCENT_GOLD}]Backup Readiness[/]"]
+        + posture_lines
+        + [""]
+        + archive_lines
+        + [""]
+        + timer_lines
+        + [""]
+        + reference_lines
+        + [""]
+        + instruction_lines
+    )
     return "\n".join(lines)
 
 
@@ -4310,22 +4335,29 @@ def render_schedule_details(
 
     warnings = str(schedule.get("warnings", "") or "none")
     announce_message = str(schedule.get("announce_message", "") or "none")
+    # Measured at 100x36: this pane authors 14 lines and the box leaves 8. The old order
+    # spent the visible rows on the queue count, the id, the type, the origin and the
+    # cadence, and cut `Schedule 03:00 UTC` and `Next Run 2026-04-15 03:00 UTC` — the two
+    # lines an operator opens a queue to read. The when goes up with the what, and the
+    # sentence describing the pane — which is not about any task — moves to the bottom,
+    # where the clip can have it. Six content rows is the budget at that size; the eight the
+    # first measurement counted included the card's borders as if they were text.
     return "\n".join(
         [
             f"[bold {ACCENT_GOLD}]Selected Task[/]",
-            f"[{ACCENT_MUTED}]What this task is, when it runs next, and how to cancel it.[/]",
-            "",
-            f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
             f"[{ACCENT_MUTED}]Task ID[/]       {escape_markup(schedule.get('id', 'n/a'))}",
             f"[{ACCENT_MUTED}]Type[/]          {escape_markup(schedule_job_type_label(schedule.get('job_type', 'n/a')))}",
-            f"[{ACCENT_MUTED}]Origin[/]        {escape_markup(schedule_origin_label(schedule))}",
             f"[{ACCENT_MUTED}]Cadence[/]       {escape_markup(schedule.get('schedule_type', 'n/a'))}",
             f"[{ACCENT_MUTED}]Schedule[/]      {escape_markup(schedule_label(schedule))}",
             f"[{ACCENT_MUTED}]Next Run[/]      {escape_markup(schedule.get('next_run', 'n/a') or 'n/a')}",
+            f"[{ACCENT_MUTED}]Origin[/]        {escape_markup(schedule_origin_label(schedule))}",
+            f"[{ACCENT_MUTED}]Queue[/]         {queue_label}",
+            "",
             f"[{ACCENT_MUTED}]Warnings[/]      {escape_markup(warnings)}",
             f"[{ACCENT_MUTED}]Announce[/]      {escape_markup(announce_message)}",
             "",
             f"[{ACCENT_MUTED}]Next Action[/]   [bold {ACCENT_GOLD}]j[/] remove this task if it is no longer desired.",
+            f"[{ACCENT_MUTED}]What this task is, when it runs next, and how to cancel it.[/]",
         ]
     )
 
