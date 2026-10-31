@@ -5178,7 +5178,12 @@ def create_app(
         def modal_open(self) -> bool:
             # Any pushed screen (form, confirm, roster, command palette)
             # counts; the base screen is the only entry when none is open.
-            return len(self.screen_stack) > 1
+            # `App.screen_stack` raises ScreenStackError when the stack is empty, and the
+            # stack is empty while the app is being torn down -- measured at the failing
+            # query of CI run 41189462293 (is_running False, stack 0, query("#view-stack") 0).
+            # A guard that raises on the way out is not a guard.
+            stack = getattr(self, "_screen_stack", None)
+            return bool(stack) and len(stack) > 1
 
         def arm_deferred_repaint(self, attempt: int = 0) -> None:
             """Paint the frame a covered screen could not take, once it is shown again.
@@ -5188,6 +5193,15 @@ def create_app(
             first pass where the base screen is the active one again.
             """
             if not self.repaint_pending:
+                return
+            if not self.is_running:
+                # The other end of the same hazard the covered-screen guard handles. A pass
+                # of this chain can land after the last screen has been popped, on the way out
+                # of the app: the stack is empty, the DOM is coming down, and `repaint()`
+                # asking for `#service-pane` raises NoMatches inside the message pump -- which
+                # is how CI run 41189462293 died on ubuntu-22.04, and what an operator gets if
+                # they quit inside the retry window. There is no screen left to paint.
+                self.repaint_pending = False
                 return
             if not self.modal_open():
                 self.repaint_pending = False

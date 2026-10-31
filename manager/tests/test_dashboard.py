@@ -706,6 +706,55 @@ def test_a_refresh_that_lands_under_a_modal_is_repainted_when_it_closes(tmp_path
     asyncio.run(scenario())
 
 
+def test_a_repaint_deferred_behind_a_dialog_does_not_outlive_the_last_screen(tmp_path):
+    """Quitting with a repaint still deferred must exit the app, not raise in the pump.
+
+    This is the failure CI showed on ubuntu-22.04 for run 41189462293 (job 124503050813):
+    `test_one_key_one_action_per_view_even_when_the_letter_is_reused` opened the Accounts
+    password form, asserted its fields, and ended with the form still up. The teardown popped
+    the screens, and the deferred-repaint chain's next timer pass fired into that: `repaint()`
+    raised `NoMatches: No nodes match '#service-pane'`, frames
+    `arm_deferred_repaint -> repaint -> query_one`, and Textual re-raised it out of
+    `run_test.__aexit__`.
+
+    Measured at the failing query (probe, 8/8 with the retry delay shortened to 1 ms, and the
+    same window opened on a loaded runner at the normal 200 ms): `is_running` False, the screen
+    stack empty, `query("#service-pane")` 0 and `query("#view-stack")` 0. So the fact that
+    distinguishes the crash is not which pane is missing -- it is that there is no screen left
+    to paint on. `modal_open()` cannot answer that either: it reads `self.screen_stack`, which
+    raises `ScreenStackError` on an empty stack, a second crash in the same window.
+
+    The operator-visible shape is a dashboard that prints a Python traceback on the way out of
+    an SSH session instead of just leaving, whenever a quit lands inside the retry window.
+    """
+    import dashboard as dashboard_module
+
+    original_delay = dashboard_module.DEFERRED_REPAINT_DELAY
+    # Not a speed-up for its own sake: the window is 200 ms wide and teardown is shorter than
+    # that on an idle runner, which is exactly why CI is not reproducible on demand and this
+    # is. The condition being tested is the same on both.
+    dashboard_module.DEFERRED_REPAINT_DELAY = 0.001
+    try:
+
+        async def scenario():
+            app, _log_path = build_app(tmp_path, initial_view=ACCOUNTS_KEYS_VIEW)
+            async with app.run_test(size=(140, 52)) as pilot:
+                await pilot.pause()
+                await pilot.press("p")
+                await wait_for(lambda: len(app.screen_stack) > 1, message="the password form to open")
+                # A refresh that lands while the form is up -- the posted-callback path, called
+                # directly -- defers rather than querying the dialog.
+                app.repaint()
+                assert app.repaint_pending, "premise: the repaint is deferred behind the form"
+
+            # Exiting here, with the form still up and the repaint still deferred, is where CI
+            # died. Anything the pump raises on the way out fails this test.
+
+        asyncio.run(scenario())
+    finally:
+        dashboard_module.DEFERRED_REPAINT_DELAY = original_delay
+
+
 def test_an_action_result_from_the_operations_view_does_not_ask_a_dialog_for_a_pane(tmp_path):
     """The covered-screen guard in `set_action_result` covered one pane of three.
 
