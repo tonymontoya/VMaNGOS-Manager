@@ -4110,6 +4110,56 @@ def test_opening_the_logs_view_leaves_the_top_of_the_selection_pane_visible(tmp_
     asyncio.run(scenario())
 
 
+def test_a_settle_pass_that_asked_for_a_scroll_has_not_finished_aiming(tmp_path):
+    """The chain may not report settled on a move it only requested.
+
+    `scroll_to` posts the move; the position, and therefore the card, changes in a later
+    message. A settle pass that asked for a scroll and then declared itself done leaves a
+    window in which the view is exactly where it was before the aim — and every wait in this
+    suite keys on "settled". ubuntu-26.04 in CI run 41195487589 fell into it: the chain had
+    run its single pass, the Logs box was rows 8..29, and the roster card was measured at
+    26..38, the unaimed position.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="logs", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the snapshot to load")
+            table = app.query_one("#realm-logs-table", DataTable)
+            await wait_for(
+                lambda: (
+                    table.row_count > 0
+                    and table.max_scroll_x == 0
+                    and app._view_settle_attempts >= 1
+                    and not app._view_settling
+                ),
+                timeout=30.0,
+                message="the view to settle",
+            )
+            view = app.query_one("#logs-view")
+            card = app.query_one("#realm-logs-table-layout")
+            # Put the card out of position the way a later layout pass would — by moving
+            # the viewport it is measured against — and re-enter the settle path.
+            view.scroll_to(y=view.max_scroll_y, animate=False)
+            await pilot.pause(0.2)
+            app.open_view_on_its_content(0)
+            assert app._view_settling, (
+                f"the settle pass asked for a scroll and reported itself done: card rows "
+                f"{card.region.y}..{card.region.bottom}, box {view.content_region.y}.."
+                f"{view.content_region.bottom}"
+            )
+            await wait_for(lambda: not app._view_settling, timeout=30.0, message="the re-aim to land")
+            box = view.content_region
+            assert card.region.y == box.y, (
+                f"the chain finished with the card off the top of the box: card rows "
+                f"{card.region.y}..{card.region.bottom}, box {box.y}..{box.bottom}, "
+                f"attempts {app._view_settle_attempts}"
+            )
+
+    asyncio.run(scenario())
+
+
 def test_the_scroll_hint_in_the_rail_counts_the_window_the_operator_is_in(tmp_path):
     """Aim the view and the rail is left quoting the scroll that has already happened.
 

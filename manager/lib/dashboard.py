@@ -5120,8 +5120,12 @@ def create_app(
             # roster, which is reference material with a scroll hint on it, not the
             # surface the operator is working on.
             box = view.content_region
-            if card.region.height <= box.height and card.region.y > box.y:
-                view.scroll_to(y=view.scroll_y + (card.region.y - box.y), animate=False)
+            reaim = False
+            if card.region.height <= box.height:
+                delta = card.region.y - box.y
+                if delta:
+                    view.scroll_to(y=view.scroll_y + delta, animate=False)
+                    reaim = True
             # The rail row counts rows above and below the box from `scroll_y`, so this
             # scroll has to be followed by a restatement of it. It happens in the view's
             # own `watch_scroll_y`, which fires for every move whoever makes it; reading
@@ -5141,6 +5145,16 @@ def create_app(
             # changing the roster frame. Repaint the row once the layout this pass asked
             # for exists.
             self.call_after_refresh(self.paint_command_rail)
+            if reaim:
+                # The aim is a request, and this pass cannot see its own result: `scroll_to`
+                # posts the move, and the layout that follows — the rail taking its row from
+                # the view, the roster frame being re-measured — can leave the card where it
+                # started. ubuntu-26.04 in CI measured exactly that: one pass had run, the box
+                # was rows 8..29, and the card sat at 26..38 with nothing left to ask again,
+                # because the chain had treated *asking* as *done*. The postcondition of a
+                # settle chain is the geometry, so the chain re-checks the geometry and comes
+                # back on the same bounded budget (40 passes, 8 s).
+                self.arm_view_settle(attempt)
 
         # The view name is not always the controller name: Operations drives `schedules`.
         ROSTER_CONTROLLER = {
