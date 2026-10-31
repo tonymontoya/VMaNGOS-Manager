@@ -2865,7 +2865,8 @@ payload = {
     "monitor_storage": module.render_monitor_storage(snapshot),
     "player_pulse": module.render_player_pulse(snapshot, history, 2),
     "alerts": module.render_alerts_panel(snapshot),
-    "backups": module.render_backups_summary(snapshot, {"file": "backup-20260413-213000.tar.gz", "timestamp": "2026-04-13T21:30:00+00:00", "size_bytes": 52428800, "created_by": "manager", "databases": ["auth", "characters", "mangos", "logs"]}),
+    "backups": module.render_backups_summary(snapshot),
+    "backup_selection": module.render_backup_selection({"file": "backup-20260413-213000.tar.gz", "timestamp": "2026-04-13T21:30:00+00:00", "size_bytes": 52428800, "created_by": "manager", "databases": ["auth", "characters", "mangos", "logs"]}),
     "config": module.render_config_panel(snapshot),
     "player": module.render_player_details(snapshot["players"][0], len(snapshot["players"])),
     "empty_player": module.render_player_details(None, 0),
@@ -3111,7 +3112,14 @@ for name, snapshot in (("error", error_snapshot), ("data", data_snapshot)):
     outputs[f"{name}:storage"] = module.render_monitor_storage(snapshot)
     outputs[f"{name}:player_pulse"] = module.render_player_pulse(snapshot, history, 2)
     outputs[f"{name}:alerts"] = module.render_alerts_panel(snapshot)
-    outputs[f"{name}:backups"] = module.render_backups_summary(snapshot, None)
+    outputs[f"{name}:backups"] = module.render_backups_summary(snapshot)
+    # The selected archive now renders through its own helper, inside the roster's card, so
+    # the markup-safety sweep has to reach that helper too. Dropping the selection block out
+    # of the readiness pane without adding this line would have left the fields that carry
+    # an operator-supplied file name unexamined by the check whose whole job is those fields.
+    outputs[f"{name}:backup_selection"] = module.render_backup_selection(
+        {"file": HOSTILE, "timestamp": HOSTILE, "size_bytes": 52428800, "created_by": HOSTILE, "databases": [HOSTILE]}
+    )
     outputs[f"{name}:config"] = module.render_config_panel(snapshot)
     outputs[f"{name}:realm_logs"] = module.render_realm_logs_summary(snapshot)
     outputs[f"{name}:logs"] = module.render_logs_panel(snapshot)

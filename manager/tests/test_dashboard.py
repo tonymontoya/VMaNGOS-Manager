@@ -156,8 +156,14 @@ def add_services_to_fixture(path):
     return path
 
 
-def add_backups_to_fixture(path, *, age_seconds=300, credentials_ready=False):
-    """Give a snapshot fixture one fresh backup so the Backups view fills in."""
+def add_backups_to_fixture(path, *, age_seconds=300, credentials_ready=False, rows=1):
+    """Give a snapshot fixture one fresh backup so the Backups view fills in.
+
+    `rows` adds older archives underneath the fresh one. A single-row roster cannot test a
+    row cursor: pressing the key that moves it moves nothing, and an assertion about what
+    the view prints for the selected row passes on a build that never updates the selection
+    at all. Ask for two rows when the test is about the cursor.
+    """
     with open(path, "r", encoding="utf-8") as handle:
         snapshot = json.load(handle)
     timestamp = (
@@ -165,19 +171,33 @@ def add_backups_to_fixture(path, *, age_seconds=300, credentials_ready=False):
     ).isoformat()
     backup_file = "vmangos_backup_20260908_120000.sql.gz"
     backup_dir = "/opt/mangos/backups"
+    entries = [
+        {
+            "file": backup_file,
+            "timestamp": timestamp,
+            "size_bytes": 2048,
+            "created_by": "vmangos-manager 0.3.0",
+            "databases": ["auth", "characters"],
+        }
+    ]
+    for older in range(1, rows):
+        # Distinct in every field the roster can show, so a test can tell which row the
+        # view believes is selected rather than spotting a string that is true of all of
+        # them.
+        entries.append(
+            {
+                "file": f"vmangos_backup_2026090{8 - older}_120000.sql.gz",
+                "timestamp": (datetime.now(timezone.utc) - timedelta(days=older)).isoformat(),
+                "size_bytes": 4096 * older,
+                "created_by": f"operator-shell {older}",
+                "databases": ["auth", "characters", "world"],
+            }
+        )
     snapshot["restore_credentials_ready"] = credentials_ready
     snapshot["backups"] = {
-        "entries": [
-            {
-                "file": backup_file,
-                "timestamp": timestamp,
-                "size_bytes": 2048,
-                "created_by": "vmangos-manager 0.3.0",
-                "databases": ["auth", "characters"],
-            }
-        ],
+        "entries": entries,
         "summary": {
-            "count": 1,
+            "count": len(entries),
             "backup_dir": backup_dir,
             "latest_file": backup_file,
             "latest_path": f"{backup_dir}/{backup_file}",
@@ -791,6 +811,151 @@ def test_backups_view_shows_restore_readiness(tmp_path):
             assert "within 24h window" in panel, "a fresh backup must read as within the safety window"
             assert "press p on a selected backup" in panel
             assert "--preflight" in panel
+
+    asyncio.run(scenario())
+
+
+MARKUP = re.compile(r"\[/?[^\]]*\]")
+
+
+def backups_view_box(app):
+    """The strip of screen the Backups view is allowed to paint into.
+
+    Not the screen region: that includes the docked key card along the bottom, and a
+    comparison against it called a roster "on screen" on a build where the card painted
+    over the rows being reported. The view's own content region is what the compositor
+    clips to.
+    """
+    return app.query_one("#backups-view").content_region
+
+
+def test_the_selected_backup_is_printed_where_the_row_cursor_is(tmp_path):
+    """The roster's own card has to carry what the roster cannot show at 80 columns.
+
+    `COLUMN_POLICY["backups"]` drops Size, Created By and Timestamp from the table at a
+    narrow frame, and the written reason was that the prose pane *beside* the roster prints
+    those fields. Measured at 80x24 there was no pane beside the roster: below
+    NARROW_VIEWPORT_WIDTH the panes stack, `#backup-summary` was 39 rows tall and mounted
+    *first*, and the block naming the selected archive sat 33 rows above the row the
+    operator was selecting — off screen, because the view had scrolled to the table. Moving
+    the cursor changed text nobody could see. Textual's default test size is 80x24, so the
+    default size is what is asserted here.
+
+    The fixture carries two archives on purpose. With one row the cursor cannot move, and
+    an assertion that the echo names the selected archive is then true of any build,
+    including one that never repaints the echo.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="backups")
+    add_backups_to_fixture(os.path.join(tmp_path, "snapshot.json"), rows=2)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            table = app.query_one("#backups-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="backups table to load")
+            # The state an operator actually lands in: the roster holds focus when the view
+            # opens, which is why the arrows reach its cursor instead of scrolling the view.
+            # An earlier version of this test pressed Tab first, which moved focus to the
+            # view container, turned the arrows into scroll keys, and left the cursor where
+            # it started — the test then asserted about a selection that had not moved.
+            assert app.focused is table, f"the roster is not focused on entry: {app.focused}"
+            assert table.cursor_row == 0
+            await pilot.press("down")
+            await pilot.pause()
+            assert table.cursor_row == 1, "the row cursor did not move"
+
+            echo = app.query_one("#backup-selection", Static)
+            text = MARKUP.sub("", str(echo.renderable))
+            # The second archive's own numbers, and not the first archive's.
+            for fact in ("4.0 KB", "operator-shell 1", "world"):
+                assert fact in text, f"{fact} is not printed where the row cursor is: {text!r}"
+            assert "2.0 KB" not in text, f"the echo still shows the archive left behind: {text!r}"
+
+            box = backups_view_box(app)
+            echo_region = echo.region
+            assert echo_region.y >= box.y and echo_region.bottom <= box.bottom, (
+                f"the echo is outside the {box.height}-row view box: {echo_region} vs {box}"
+            )
+            assert echo_region.width == table.region.width, "the echo belongs to the roster's card"
+            assert echo_region.bottom <= table.region.y + 1, "the echo sits above the rows, not below them"
+            # 8 rows of view box cannot hold a 7-row roster plus a card title, an echo and
+            # the card's own frame, so the honest assertion at this size is that the roster
+            # is the thing nearest the top and its header is painted: an operator who arrows
+            # down lands on rows, not on 39 rows of readiness prose.
+            assert box.y <= table.region.y < box.bottom, (
+                f"the roster header is not inside the view box: table {table.region}, box {box}"
+            )
+            summary = app.query_one("#backup-summary")
+            assert table.region.bottom <= summary.region.y, (
+                "the readiness prose no longer sits above the roster it describes"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_the_roster_and_its_echo_both_fit_a_100_column_window(tmp_path):
+    """At 100x36 the whole card is painted with no scrolling at all."""
+    app, _log_path = build_app(tmp_path, initial_view="backups")
+    add_backups_to_fixture(os.path.join(tmp_path, "snapshot.json"), rows=2)
+
+    async def scenario():
+        async with app.run_test(size=(100, 36)) as pilot:
+            table = app.query_one("#backups-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="backups table to load")
+            await pilot.press("down")
+            await pilot.pause()
+            assert table.cursor_row == 1, "the row cursor did not move"
+            box = backups_view_box(app)
+            for widget, label in (
+                (app.query_one("#backup-selection", Static), "the selection echo"),
+                (table, "the roster"),
+            ):
+                region = widget.region
+                assert region.y >= box.y and region.bottom <= box.bottom, (
+                    f"{label} is clipped by the {box.height}-row view box: {region} vs {box}"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_the_same_card_holds_the_echo_in_a_wide_window(tmp_path):
+    """The wide window puts the prose pane back beside the roster; the echo does not move.
+
+    A window of this height is not compact, so the echo is the full three-line form and
+    names the archive it describes — the second one, because the cursor has moved.
+    """
+    app, _log_path = build_app(tmp_path, initial_view="backups")
+    add_backups_to_fixture(os.path.join(tmp_path, "snapshot.json"), rows=2)
+
+    async def scenario():
+        async with app.run_test(size=(140, 52)) as pilot:
+            table = app.query_one("#backups-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="backups table to load")
+            await pilot.press("down")
+            await pilot.pause()
+            echo = app.query_one("#backup-selection", Static)
+            text = MARKUP.sub("", str(echo.renderable))
+            assert "vmangos_backup_20260907_120000.sql.gz" in text, f"echo did not follow the cursor: {text!r}"
+            assert "vmangos_backup_20260908_120000.sql.gz" not in text, f"echo shows the row above: {text!r}"
+            assert echo.region.bottom <= table.region.y + 1, "still directly above the rows it describes"
+
+    asyncio.run(scenario())
+
+
+def test_the_backup_prose_stops_repeating_the_selected_row(tmp_path):
+    """The prose pane is readiness, not a second copy of the row under the cursor."""
+    app, _log_path = build_app(tmp_path, initial_view="backups")
+    add_backups_to_fixture(os.path.join(tmp_path, "snapshot.json"), rows=2)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            table = app.query_one("#backups-table", DataTable)
+            await wait_for(lambda: table.row_count > 0, message="backups table to load")
+            await pilot.press("down")
+            await pilot.pause()
+            panel = MARKUP.sub("", str(app.query_one("#backup-summary").renderable))
+            for moved in ("Selected Backup", "Created By", "Covers"):
+                assert moved not in panel, f"{moved} is still duplicated in the prose pane"
+            assert "live restore is CLI-only" in panel, "the CLI-only rule stays with the readiness prose"
 
     asyncio.run(scenario())
 
@@ -3315,8 +3480,10 @@ def test_the_column_budget_spends_the_frame_it_is_handed(tmp_path):
 
     Short, whole facts — a timestamp, a size, a severity — keep the width their widest
     cell needs. One column per view carries a sentence, and takes what is left. When
-    that is not enough, columns come off in the declared order, and only columns the
-    details pane beside the roster prints in full are allowed on that list.
+    that is not enough, columns come off in the declared order, and a column is only
+    allowed on that list if the view prints it in full somewhere on screen at that size —
+    in the details pane beside the roster, or, for Backups, in `#backup-selection` inside
+    the roster's own card.
     """
     titles = ["Timestamp", "Size", "File", "Created By"]
     cells = [
@@ -3336,7 +3503,7 @@ def test_the_column_budget_spends_the_frame_it_is_handed(tmp_path):
 
     # The floor, not the frame, is what costs columns here: 17 columns of archive name
     # repeats the same prefix on every row, so Created By and then Size come off — both
-    # printed by `render_backups_summary` beside the roster — until the name has room.
+    # printed by `#backup-selection` above the rows — until the name has room.
     tight, widths, _naturals = column_plan(titles, cells, 48, **COLUMN_POLICY["backups"])
     assert tight == [0, 2], f"Created By and Size come off before the name is cut: {tight}"
     assert sum(widths.values()) <= 48
@@ -3551,22 +3718,40 @@ def test_a_roster_waits_for_a_frame_instead_of_guessing_twice(tmp_path):
                 "never measured, which is the case a hidden view is allowed to stop at"
             )
 
-            # And when a frame does exist, the same chain spends it.
+            # And when a frame does exist, the same chain spends it. The frame is changed on
+            # purpose here instead of waited for. Until now this half rode on an accident: a
+            # table shown after being hidden sat in a card that scrolled vertically, so the
+            # scrollbar took two columns and the widths had to move. The Backups card stopped
+            # scrolling at 140x52 once its title, selection echo and roster were planned to
+            # fit the card, the accident stopped happening, and the assertion went red on a
+            # layout that had got better. So hand the roster a frame it cannot keep its
+            # columns in — 30 columns against 19 + 27 plus a separator — and ask it again.
             table.display = True
             await pilot.pause()
             assert table.content_size.width > 0, "the roster never got a frame back"
+            narrow_frame = 30
+            table.styles.width = narrow_frame
+            await pilot.pause()
+            assert table.content_size.width == narrow_frame, (
+                f"the roster is not measuring the frame it was handed: {table.content_size.width}"
+            )
             controller._width_retry_pending = False
             controller.retry_column_budget(cells)
-            assert [column.width for column in table.columns.values()] != widths, (
-                "the budget never re-planned once the frame was measurable"
+            replanned = [column.width for column in table.columns.values()]
+            assert replanned != widths, (
+                f"the budget never re-planned against the {narrow_frame}-column frame: {replanned}"
             )
-            # The re-plan above was measured against the frame the table reported the moment
-            # it came back on screen, and a table that has just been shown has not been
-            # laid out yet: the frame it settles on is a few columns narrower, which is what
-            # `max_scroll_x` measures. Waiting for the chain rather than asserting after one
-            # pass is the point of the change this test guards — the re-ask now happens on a
-            # timer, so it arrives whether or not anything refreshes. What is not weakened is
-            # the headline above: the chain reached four passes with no refresh in sight.
+            separators = len(replanned) - 1
+            assert sum(replanned) + separators <= narrow_frame, (
+                f"the re-plan kept {sum(replanned) + separators} columns of content in a "
+                f"{narrow_frame}-column frame: {replanned}"
+            )
+            # The chain may still need one more pass to settle the scrollbar it just
+            # removed, and a table that has just been resized has not been laid out again
+            # yet. Waiting for the settled state rather than asserting after one pass is the
+            # point of the change this test guards — the re-ask happens on a timer, so it
+            # arrives whether or not anything refreshes. What is not weakened is the
+            # headline above: the chain reached four passes with no refresh in sight.
             await wait_for(
                 lambda: table.max_scroll_x == 0,
                 message="the re-plan to fit the frame that arrived after it",

@@ -1013,10 +1013,14 @@ COLUMN_POLICY: dict[str, dict[str, Any]] = {
     # "the beginning is not shown" instead of a mark at the end that would lie.
     "backups": {
         "elastic": "File",
-        # Created By and Size are the first to go because the summary beside the roster
-        # prints both. Timestamp is the last resort, and it is still a duplicate rather
-        # than a loss: the archive name this realm writes carries that same instant, and
-        # `render_backups_summary` prints When.
+        # Created By and Size are the first to go because `#backup-selection`, inside the
+        # roster's own card, prints both next to the row cursor at every window width —
+        # which is the version of this justification that is actually true. It used to read
+        # "the summary beside the roster prints both", and below NARROW_VIEWPORT_WIDTH there
+        # is no summary beside the roster: the panes stack, so a column was dropped on the
+        # strength of a copy that had moved 33 rows away, off screen. Timestamp is still the
+        # last resort: the archive name this realm writes carries that same instant, and
+        # `render_backup_selection` prints When.
         "droppable": ["Created By", "Size", "Timestamp"],
         "min_elastic": 24,
         "elide": "tail",
@@ -3751,7 +3755,16 @@ def render_alerts_panel(snapshot: dict[str, Any], narrow: bool = False) -> str:
     return "\n".join(lines)
 
 
-def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, Any] | None) -> str:
+def render_backups_summary(snapshot: dict[str, Any]) -> str:
+    """The Backups prose pane: protection, timers, restore readiness, and the CLI-only rule.
+
+    It deliberately says nothing about the row under the cursor. That used to be the case,
+    and the pane's bottom section repeated the archive name, instant, size, databases and
+    creator — the same fields `COLUMN_POLICY["backups"]` drops from the roster at a narrow
+    frame. See `render_backup_selection` for where those fields live now, and why the
+    column policy's stated reason for dropping them only held in a window wide enough to
+    put this pane beside the table rather than above it.
+    """
     backups = snapshot.get("backups", {})
     summary = backups.get("summary", {})
     backup_schedule_status = snapshot.get("backup_schedule_status", {})
@@ -3825,30 +3838,65 @@ def render_backups_summary(snapshot: dict[str, Any], selected_backup: dict[str, 
         f"[{ACCENT_MUTED}]Preflight[/]   press p on a selected backup, or run vmangos-manager backup restore <file> --preflight"
     )
 
-    if selected_backup:
-        lines.extend(
-            [
-                "",
-                f"[bold {ACCENT_SKY}]Selected Backup[/]",
-                f"[{ACCENT_MUTED}]File[/]        {escape_markup(selected_backup.get('file', 'n/a'))}",
-                f"[{ACCENT_MUTED}]When[/]        {escape_markup(iso_to_display(selected_backup.get('timestamp')))}",
-                f"[{ACCENT_MUTED}]Size[/]        {format_bytes(selected_backup.get('size_bytes', 0))}",
-                f"[{ACCENT_MUTED}]DBs[/]         {escape_markup(', '.join(selected_backup.get('databases', [])) or 'n/a')}",
-                f"[{ACCENT_MUTED}]Created By[/]  {escape_markup(selected_backup.get('created_by', 'n/a'))}",
-                "",
-                f"[{ACCENT_MUTED}]Safety[/]      live restore is CLI-only: preflight, then run vmangos-manager backup restore <file> --yes",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "",
-                f"[{ACCENT_MUTED}]Selection[/]   choose a backup row to inspect it.",
-                f"[{ACCENT_MUTED}]Safety[/]      live restore is CLI-only: preflight, then run vmangos-manager backup restore <file> --yes",
-            ]
-        )
+    # The facts about the selected archive used to be printed here, at the bottom of a
+    # prose pane. `COLUMN_POLICY["backups"]` drops Size, Created By and Timestamp from the
+    # roster on the written grounds that "the summary beside the roster prints both" — and
+    # measured at 100x36, nothing is beside the roster: below `NARROW_VIEWPORT_WIDTH` the
+    # summary goes full width *above* it, `#backup-summary` occupies 33 of the 33 rows the
+    # card has, and the block naming the selected archive sat 18 rows above the row the
+    # operator was selecting, out of view once the view had scrolled to the table
+    # (scroll_y 28 of 28). A justification that depends on a layout the window no longer
+    # has is how a column quietly stops being worth its width, so those fields now live in
+    # `#backup-selection`, inside the roster's own card — on screen whenever the roster is.
+    # The CLI-only invariant stays in this pane: it is a property of the deployment, not of
+    # the row under the cursor.
+    lines.extend(
+        [
+            "",
+            f"[{ACCENT_MUTED}]Safety[/]      live restore is CLI-only: preflight, then run vmangos-manager backup restore <file> --yes",
+        ]
+    )
 
     return "\n".join(lines)
+
+
+def render_backup_selection(entry: dict[str, Any] | None, compact: bool = False) -> str:
+    """The selected archive, in the lines the roster itself cannot hold.
+
+    Ordered shortest-first on purpose: at 80x24 the roster is 41 columns wide, and a line
+    that starts with the file name wraps into a second row and pushes the size off the
+    card. Size, instant and origin fit on one row there; the archive name fits on its own
+    row; the databases it covers fit on the third. Nothing here is new information — it is
+    the same fields the roster's own dropped columns carry, moved to where they are visible.
+
+    `compact` is the short-window form. At 24 rows the Backups view is handed an 8-row box
+    (measured: `#backups-view.content_region` spans rows 7..14 at 80x24), and every row this
+    echo takes is an archive the roster cannot paint. The compact form therefore drops the
+    archive name — at that width it is the roster's own `File` column, the one column the
+    budget never drops — and the seconds, which the archive name spells out anyway. Size and
+    the database list are what the table has no room for, so they stay.
+    """
+    if not entry:
+        return f"[{ACCENT_MUTED}]No backup selected.[/]  Move the row cursor to inspect one."
+    databases = ", ".join(str(name) for name in entry.get("databases", []) if name) or "n/a"
+    if compact:
+        return "\n".join(
+            [
+                f"[{ACCENT_MUTED}]Size[/] {format_bytes(entry.get('size_bytes', 0))}"
+                f"  {escape_markup(iso_to_display(entry.get('timestamp'))[:16])}"
+                f"  {escape_markup(str(entry.get('created_by', 'n/a')))}",
+                escape_markup(databases),
+            ]
+        )
+    return "\n".join(
+        [
+            f"[{ACCENT_MUTED}]Size[/] {format_bytes(entry.get('size_bytes', 0))}"
+            f"  [{ACCENT_MUTED}]When[/] {escape_markup(iso_to_display(entry.get('timestamp')))}"
+            f"  [{ACCENT_MUTED}]By[/] {escape_markup(str(entry.get('created_by', 'n/a')))}",
+            escape_markup(str(entry.get("file", "n/a"))),
+            f"[{ACCENT_MUTED}]Covers[/] {escape_markup(databases)}",
+        ]
+    )
 
 
 def render_config_panel(snapshot: dict[str, Any]) -> str:
@@ -4587,6 +4635,10 @@ def create_app(
             self.metric_history: list[dict[str, Any]] = []
             self.selected_account_id = ""
             self.selected_backup_file = ""
+            # The `.compact` CSS class, kept as a Python value too so a renderer can be
+            # handed it. Set by apply_view_density before any view is painted; the default
+            # here is only what a renderer sees if asked before the first layout pass.
+            self.compact_viewport = False
             self.selected_log_key = ""
             self.selected_schedule_id = ""
             self.logs_query = normalize_logs_query()
@@ -4641,11 +4693,21 @@ def create_app(
                                 yield Static("", id="account-details", classes="panel hero-panel")
                         with view_containers["backups"](id="backups-view", classes="view hidden"):
                             with Horizontal(id="backups-layout"):
-                                yield Static("", id="backup-summary", classes="panel hero-panel")
+                                # The roster comes first, as it already does in the Accounts
+                                # view. Stacked below NARROW_VIEWPORT_WIDTH that order is the
+                                # whole difference: with the prose pane first, the 39-row
+                                # `#backup-summary` filled a 24-row window and the file list —
+                                # the thing the operator clicks, selects and presses `p` on —
+                                # began 36 rows down, reachable only by scrolling.
                                 with Vertical(classes="panel table-panel", id="backups-table-layout"):
                                     yield Static("[b]Backup Inventory[/b]", classes="table-detail-title")
+                                    # The selected archive, printed where the row cursor is. See
+                                    # `render_backup_selection` for the measurement that put it here
+                                    # rather than at the foot of the prose pane beside the roster.
+                                    yield Static("", id="backup-selection", classes="table-selection")
                                     yield Input(placeholder="filter rows - Enter keeps, Esc clears", id="backups-search", classes="table-search hidden")
                                     yield DataTable(id="backups-table", classes="detail-table")
+                                yield Static("", id="backup-summary", classes="panel hero-panel")
                         with view_containers["config"](id="config-view", classes="view hidden"):
                             yield Static("", id="config-pane", classes="panel hero-panel")
                         with view_containers["logs"](id="logs-view", classes="view hidden"):
@@ -4780,6 +4842,20 @@ def create_app(
             # once made every session start out compact and narrow.
             compact = self.size.height < COMPACT_VIEWPORT_HEIGHT
             self.screen.set_class(compact, "compact")
+            # Python needs the same fact the CSS class carries. The Backups echo is the
+            # first renderer to ask: at 24 rows the view gets an 8-row box, and a four-row
+            # echo inside the roster's card is four archives the operator cannot see.
+            previous_compact = self.compact_viewport
+            self.compact_viewport = compact
+            if previous_compact != compact:
+                # The window crossed the line, so an echo painted in the other form is now
+                # the wrong number of rows. Nothing else in this app is obliged to refresh
+                # at the moment of a resize, so the ask goes out here.
+                echo_pane = self.pane_on_showing_screen("#backup-selection")
+                if echo_pane is not None:
+                    echo_pane.update(
+                        render_backup_selection(self.selected_backup(), compact=compact)
+                    )
             narrow = self.size.width < NARROW_VIEWPORT_WIDTH
             self.screen.set_class(narrow, "narrow")
             # The card grids stack on their own rule: two columns of card content
@@ -5324,7 +5400,10 @@ def create_app(
                 current_key=self.selected_backup_file,
             )
             self.query_one("#backup-summary", Static).update(
-                render_backups_summary(snapshot=self.snapshot, selected_backup=selected_entry)
+                render_backups_summary(snapshot=self.snapshot)
+            )
+            self.query_one("#backup-selection", Static).update(
+                render_backup_selection(selected_entry, compact=self.compact_viewport)
             )
 
         def refresh_logs(self, entries: list[dict[str, Any]]) -> None:
@@ -5392,11 +5471,12 @@ def create_app(
         def update_selected_backup(self, row_key: Any) -> None:
             entry = find_selected_backup(self.snapshot, player_key_value(row_key))
             self.selected_backup_file = str(entry.get("file", "")) if entry else ""
-            pane = self.pane_on_showing_screen("#backup-summary")
+            # Only the echo moves. Nothing in the prose pane depends on the row under the
+            # cursor any more, and repainting a 39-row pane on every cursor keystroke was
+            # how this view ended up scrolling the whole card on each keypress.
+            pane = self.pane_on_showing_screen("#backup-selection")
             if pane is not None:
-                pane.update(
-                    render_backups_summary(snapshot=self.snapshot, selected_backup=entry)
-                )
+                pane.update(render_backup_selection(entry, compact=self.compact_viewport))
 
         def update_selected_log(self, row_key: Any) -> None:
             entry = find_selected_log_entry(self.snapshot, player_key_value(row_key))
@@ -6475,14 +6555,18 @@ DASHBOARD_CSS = """
             width: 1fr;
             height: auto;
             min-height: 12;
+            /* Stacked, this card is now the first thing in the view, so the prose pane
+               below it needs the gap rather than the card above needing one. */
+            margin-bottom: 1;
         }
 
         .narrow #backup-summary {
             width: 1fr;
             min-width: 0;
             height: auto;
-            margin-right: 0;
-            margin-bottom: 1;
+            /* Undo the wide-window gap: stacked, this pane is the last thing in the view,
+               and the card above it already carries the `margin-bottom`. */
+            margin-left: 0;
         }
 
         .narrow .table-detail-body {
@@ -6842,7 +6926,9 @@ DASHBOARD_CSS = """
             min-width: 46;
             height: auto;
             min-height: 12;
-            margin-right: 1;
+            /* The gap is on the reading side now: `#backups-table-layout` mounts first and
+               this pane follows it to the right. */
+            margin-left: 1;
         }
 
         #backups-table-layout {
