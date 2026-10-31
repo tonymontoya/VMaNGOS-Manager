@@ -2962,13 +2962,18 @@ def test_the_scheduled_tasks_card_holds_what_it_drew_a_border_around(tmp_path):
     That is what the Operations view shipped with: the Scheduled Tasks border drew
     itself a few rows tall while its title, roster, and details pane were laid out
     underneath it and clipped away, so an operator who pressed 7 found an empty
-    box. The card sizes to its content now, and the roster inside it is never
-    shorter than the details pane beside it — one border, one bottom edge.
+    box. The card sizes to its content now, and everything inside it is inside the
+    border. This test used to assert one more thing on top of that — that the roster
+    was never shorter than the details pane beside it, so the card had one bottom
+    edge — and that is no longer true on purpose: measured at 140x36 it drew a 17-row
+    frame around a two-row roster. The card still has one bottom edge; the roster no
+    longer has to reach it. `test_a_short_roster_does_not_borrow_a_tall_pane_height`
+    pins what replaced it.
     """
     demo = demo_snapshot_path()
 
     async def scenario():
-        for cols, lines, same_bottom_edge in ((140, 52, True), (100, 36, False)):
+        for cols, lines in ((140, 52), (100, 36)):
             app, _log_path = build_app(
                 tmp_path, initial_view="operations", snapshot_file=demo
             )
@@ -2981,23 +2986,18 @@ def test_the_scheduled_tasks_card_holds_what_it_drew_a_border_around(tmp_path):
                 panel = app.query_one("#schedules-layout")
                 title = panel.query(".table-detail-title").first()
                 details = app.query_one("#schedule-details")
-                if same_bottom_edge:
-                    # The agreement between the two children of this card is what is being
-                    # measured, and a details pane that has just been written has not been laid
-                    # out yet when the roster's frame is first taken — the pane's `content_size`
-                    # still describes the previous selection, so the roster is sized against the
-                    # old text and the two bottom edges only agree on the layout pass after it.
-                    # Every other geometry test here waits for the state it measures; this one
-                    # asserted whatever a single pause happened to catch, which is how it was
-                    # green on a workstation and red on ubuntu-22.04 (run 41079089969). The
-                    # assertion below is unchanged: 140 columns, one card, one bottom edge.
-                    await wait_for(
-                        lambda: table.content_size.height >= details.content_size.height,
-                        message=(
-                            "the roster and the pane beside it to agree on one bottom edge "
-                            f"({table.content_size.height} vs {details.content_size.height})"
-                        ),
-                    )
+                # Every geometry test here waits for the state it measures; this one
+                # used to assert whatever a single pause happened to catch, which is how
+                # it was green on a workstation and red on ubuntu-22.04 (run
+                # 41079089969): a details pane that has just been written has not been
+                # laid out yet, and the card grows on the layout pass after it.
+                await wait_for(
+                    lambda: panel.content_size.height > 0 and details.content_size.height > 0,
+                    message=f"the {cols}x{lines} card and its details pane to be laid out",
+                )
+                # The card is written on the pass after the pane, on the settle chain's
+                # own 0.2 s timer, so one more pause once both measure.
+                await pilot.pause(0.5)
                 assert panel.content_size.height > 0, (
                     f"{cols}x{lines}: the card has no height to draw"
                 )
@@ -3012,11 +3012,69 @@ def test_the_scheduled_tasks_card_holds_what_it_drew_a_border_around(tmp_path):
                     assert widget.region.bottom <= panel.region.bottom, (
                         f"{cols}x{lines}: {what} hangs below the border drawn around it"
                     )
-                if same_bottom_edge:
-                    assert table.content_size.height >= details.content_size.height, (
-                        f"{cols}x{lines}: the roster is {table.content_size.height} rows "
-                        f"beside a {details.content_size.height}-row pane — two bottom edges"
-                    )
+
+    asyncio.run(scenario())
+
+
+def test_a_short_roster_does_not_borrow_a_tall_pane_height(tmp_path):
+    """Two scheduled tasks lived in a 17-row bordered box at 140 columns.
+
+    `apply_frame_height` let a roster take the height of a taller pane beside it so the
+    card would have one bottom edge. Measured on v0.7.26 with the demo realm's two
+    timers beside a 17-row Selected Task pane, at 140x36: `rows=2 table_frame=17
+    air_in_table=14` — a frame of bordered nothing five times the size of the data
+    inside it, the emptiest thing on the view. The 2026-10-30 Operations journal left
+    this open as "whether the rule is right is a picture question"; rendered, it is
+    not. The borrow is now bounded by `ROSTER_FRAME_TOLERANCE`: a roster matches a pane
+    a few rows taller than itself and keeps its own rows past that, so what is left
+    over is card background rather than table. The same measurement after:
+    `table_frame=4 air_in_table=1`.
+
+    The CSS floor is the other half of the picture, which is why it is in this test:
+    bounding the borrow alone left a frame of 8 rows around three rows of content,
+    because `#schedules-table` carried `min-height: 8` on wide windows while narrow
+    windows had already dropped to 4. Bounded borrow plus one floor for both widths is
+    what buys the 14 rows; either half on its own leaves several of them behind.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="operations", snapshot_file=demo)
+        async with app.run_test(size=(140, 36)) as pilot:
+            table = app.query_one("#schedules-table", DataTable)
+            await wait_for(lambda: table.row_count == 2, message="the two scheduled tasks to load")
+            details = app.query_one("#schedule-details")
+            panel = app.query_one("#schedules-layout")
+            await wait_for(
+                lambda: panel.content_size.height > 0 and details.content_size.height > 0,
+                message="the Operations card and its details pane to be laid out",
+            )
+            # Wait for the frame to stop moving, not for the number itself: the settle
+            # chain retakes it on a timer, and an assertion that waited for its own
+            # expected value would not be able to disagree with anything.
+            last, stable = None, 0
+            for _ in range(12):
+                await pilot.pause(0.25)
+                current = table.content_size.height
+                stable = stable + 1 if current == last else 1
+                last = current
+                if stable >= 3:
+                    break
+            assert details.content_size.height > (
+                table.content_size.height + SelectionTable.ROSTER_FRAME_TOLERANCE
+            ), (
+                f"the pane beside this roster is only {details.content_size.height} rows against "
+                f"its {table.content_size.height}: the size no longer shows the divergent case"
+            )
+            air = table.content_size.height - (table.row_count + 1)
+            assert 0 <= air <= SelectionTable.ROSTER_FRAME_TOLERANCE, (
+                f"{table.row_count} rows sit in a {table.content_size.height}-row frame: {air} rows "
+                "of bordered nothing next to a taller pane"
+            )
+            assert (
+                table.region.bottom <= panel.region.bottom
+                and details.region.bottom <= panel.region.bottom
+            ), "the card no longer draws one bottom edge around both of its children"
 
     asyncio.run(scenario())
 

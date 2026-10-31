@@ -1343,11 +1343,22 @@ class SelectionTable:
             # one that says a pane does not cut its own content.
             height: Any = available
         else:
-            # It fits, so it gets its rows — or the taller pane beside it, as long as
-            # that pane also fits. Never fewer rows than it has: at 80x30 the Accounts
+            # It fits, so it gets its rows — and only borrows the height of a taller pane
+            # beside it when the two are a few rows apart, which is the case the flat
+            # bottom was invented for. The unbounded version drew this, measured at
+            # 140x36 with two scheduled tasks beside a 17-row details pane:
+            # `rows=2 table_frame=17 air_in_table=14` — a bordered box of nothing five
+            # times the size of the data inside it, and the emptiest thing on the screen.
+            # A ragged inner edge inside one card is the cheaper offence: the table's
+            # border now ends under its last row, and what is left over is card
+            # background rather than table. The card itself keeps one bottom edge, which
+            # is what `test_the_scheduled_tasks_card_holds_what_it_drew_a_border_around`
+            # insists on. Never fewer rows than it has either: at 80x30 the Accounts
             # view's own viewport is 7 rows, and a clamp that reached below the roster
             # hid its last row inside a table that only the arrow keys can move.
-            height = max(wanted, min(beside, available))
+            height = wanted
+            if beside - wanted <= self.ROSTER_FRAME_TOLERANCE:
+                height = max(wanted, min(beside, available))
         if height == self._frame_height:
             self._height_passes = 0
             return
@@ -6785,14 +6796,16 @@ DASHBOARD_CSS = """
 
         #schedules-table {
             height: 1fr;
-            min-height: 8;
-        }
-
-        .narrow #schedules-table {
             /* `apply_frame_height` already gives a short roster its rows plus a
-               header. A floor of 8 rows buys five rows of nothing when the realm has
-               two timers: measured at 100x36 with two schedules, card 28 rows, table
-               8 rows, roster 2 rows. */
+               header, so this floor only ever decides how much emptier-than-empty the
+               frame may be. It used to be 8, and at 140x36 with two scheduled tasks
+               that bought five rows of nothing even after the borrow was bounded —
+               `rows=2 table_frame=8 air_in_table=5`, the same arithmetic that made the
+               narrow variant of this rule drop to 4 (card 28, table 8, roster 2). Four
+               rows is a header and three slots: enough that a filtered-out roster still
+               shows a place for the cursor and the frame does not twitch as rows come
+               and go, and the number is one, not five. Wide and narrow agree, so the
+               `.narrow` override is gone rather than kept to say the same thing. */
             min-height: 4;
         }
 
