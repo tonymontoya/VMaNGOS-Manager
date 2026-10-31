@@ -2683,6 +2683,63 @@ def test_a_search_box_keeps_its_caret_keys_and_the_rail_says_which(tmp_path):
     asyncio.run(scenario())
 
 
+def test_every_search_box_filters_the_table_it_is_next_to(tmp_path):
+    """Pressing / is not the feature. Typing into the box is.
+
+    The wiring from a search field to the table beside it is a dict assembled out of two
+    other dicts, and on the Operations view those two disagree: the view is called
+    `operations`, its selection controller is called `schedules`, and the assembled map
+    handed the handler the first name. So on Ops the box focused, swallowed every key,
+    and filtering one raised KeyError inside the Input handler -- what an operator would
+    describe as "the search does nothing". No test had ever typed a character into one of
+    these boxes; they had only ever checked that / focuses it, which is the half that
+    worked everywhere.
+    """
+    # (view, box, table, what to type, rows the demo snapshot should leave)
+    cases = (
+        ("accounts", "#accounts-search", "#accounts-table", "RAIDER", 3),
+        ("backups", "#backups-search", "#backups-table", "20260414", 1),
+        ("logs", "#logs-search", "#realm-logs-table", "530", 1),
+        ("operations", "#schedules-search", "#schedules-table", "restart", 1),
+    )
+    for view, search_id, table_id, query, expected in cases:
+        app, _log_path = build_app(tmp_path, initial_view=view, snapshot_file=demo_snapshot_path())
+
+        async def scenario(
+            app=app, search_id=search_id, table_id=table_id, query=query, view=view, expected=expected
+        ):
+            async with app.run_test(size=(112, 34)) as pilot:
+                await pilot.pause()
+                await wait_for(lambda: app.snapshot_loaded, message=f"{view} snapshot to load")
+                await pilot.press("/")
+                await pilot.pause()
+                box = app.query_one(search_id)
+                assert box.has_focus, f"{view}: / did not focus the search field"
+                table = app.query_one(table_id)
+                before = table.row_count
+                assert before > 1, f"{view}: the demo snapshot offers {before} rows, so nothing is proved"
+                for character in query:
+                    await pilot.press(character)
+                await pilot.pause()
+                await pilot.pause(0.1)
+                after = table.row_count
+                assert after < before, (
+                    f"{view}: typing {query!r} left {after} of {before} rows -- the box and the "
+                    "table are not wired together"
+                )
+                assert after == expected, (
+                    f"{view}: typing {query!r} into {search_id} left {after} rows, expected "
+                    f"{expected} of {before}"
+                )
+                for _ in range(len(query)):
+                    await pilot.press("backspace")
+                await pilot.pause()
+                await pilot.pause(0.1)
+                assert table.row_count == before, f"{view}: clearing the box did not bring the rows back"
+
+        asyncio.run(scenario())
+
+
 def test_the_widgets_named_as_keeping_keys_really_do(tmp_path):
     """The legend's honesty rests on what Textual's widgets bind, so that is measured.
 

@@ -1950,22 +1950,30 @@ def make_view_bindings(view_id: str) -> list[tuple[str, str, str]]:
     )
 
 
+# One line per view that has a searchable table, naming the two things that view is wired
+# to: the id of its search box and the key of its selection controller. Those are not the
+# same string -- Operations drives the `schedules` controller through `schedules-search` --
+# and the previous arrangement built the box-to-controller map by inverting a box-to-*view*
+# map, which quietly treated the two names as interchangeable. Typing one character in the
+# Ops search box then raised KeyError inside the Input handler: the box focused, swallowed
+# the keys, and filtered nothing.
+TABLE_VIEW_CONTROLS: dict[str, tuple[str, str]] = {
+    "accounts": ("accounts-search", "accounts"),
+    "backups": ("backups-search", "backups"),
+    "logs": ("logs-search", "logs"),
+    "operations": ("schedules-search", "schedules"),
+}
+
 TABLE_VIEW_SEARCH_IDS: dict[str, str] = {
-    "accounts": "accounts-search",
-    "backups": "backups-search",
-    "logs": "logs-search",
-    "operations": "schedules-search",
+    view: box for view, (box, _selection) in TABLE_VIEW_CONTROLS.items()
 }
 
 TABLE_VIEW_SELECTION_KEYS: dict[str, str] = {
-    "accounts": "accounts",
-    "backups": "backups",
-    "logs": "logs",
-    "operations": "schedules",
+    view: selection for view, (_box, selection) in TABLE_VIEW_CONTROLS.items()
 }
 
 SEARCH_INPUT_TO_SELECTION: dict[str, str] = {
-    search_id: selection_key for selection_key, search_id in TABLE_VIEW_SEARCH_IDS.items()
+    box: selection for _view, (box, selection) in TABLE_VIEW_CONTROLS.items()
 }
 
 
@@ -4748,10 +4756,6 @@ def create_app(
                 screen.set_class(self.theme_name == "light", "theme-light")
                 screen.set_class(self.theme_name == "dark", "theme-dark")
 
-        def on_screen_resume(self, event: object) -> None:
-            """A modal pushed on top of the main screen inherits its palette."""
-            self.apply_theme()
-
         def apply_view_density(self) -> None:
             """Pick the roomy or the scrolling grid layout for the active screen.
 
@@ -5217,8 +5221,11 @@ def create_app(
                 # #service-pane with a form on top raises NoMatches inside a
                 # posted callback, which is how this dashboard has lost its
                 # message pump more than once. The data is not lost (self.snapshot
-                # is already the new frame); only the painting waits, and
-                # on_screen_resume does it when the dialog closes.
+                # is already the new frame); only the painting waits, and the
+                # deferred-repaint timer is what paints it once the dialog is gone.
+                # (It used to say `on_screen_resume` does this. Measured on 2026-10-30
+                # against textual 0.89.1, that handler never fires -- ScreenResume is not
+                # delivered to the App -- and the timer has been the mechanism since.)
                 self.repaint_pending = True
                 self.arm_deferred_repaint()
                 return
