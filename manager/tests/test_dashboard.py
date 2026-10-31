@@ -4110,6 +4110,69 @@ def test_opening_the_logs_view_leaves_the_top_of_the_selection_pane_visible(tmp_
     asyncio.run(scenario())
 
 
+def test_the_selected_event_pane_prints_the_event_before_it_prints_the_references(tmp_path):
+    """At 100x36 the pane shows everything about the event except the event.
+
+    The Selected Event pane wants 18 rows and the narrow window gives it 8 (measured:
+    `pane rows`, box clip, `shown=8` at 100x36). What lands on screen today is the
+    title, "The highlighted log entry in full.", "Window 6 visible events", Time — and
+    then the box cuts the pane. The line the pane exists to print in full, the message,
+    is authored as the fifteenth line, so it is off the screen along with Source,
+    Severity and everything else, and reading it means scrolling the whole view and
+    losing the roster. Reordered: when/severity/source on one line, then the message,
+    then the reference fields below. The rows that fit are then the rows that matter.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="logs", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the snapshot to load")
+            table = app.query_one("#realm-logs-table", DataTable)
+            await wait_for(
+                lambda: (
+                    table.row_count > 0
+                    and table.max_scroll_x == 0
+                    and app._view_settle_attempts >= 1
+                    and not app._view_settling
+                ),
+                timeout=30.0,
+                message="the view to settle",
+            )
+            view = app.query_one("#logs-view")
+            pane = app.query_one("#realm-log-details", Static)
+            box = view.content_region
+            shown = max(0, min(pane.region.bottom, box.bottom) - max(pane.region.y, box.y))
+            assert pane.region.height > shown, (
+                f"precondition: the pane ({pane.region.height} rows) is not clipped by the box "
+                f"({box.y}..{box.bottom}) at this size, so the ordering is not what is at stake"
+            )
+            entry = app.snapshot["log_events"][table.cursor_row]
+            message = str(entry["message"])
+            lines = str(pane.renderable).splitlines()
+            def first_line_containing(needle: str) -> int:
+                for index, line in enumerate(lines):
+                    if needle in line:
+                        return index
+                return -1
+            at = first_line_containing(message.split(";", 1)[0])
+            assert at >= 0, f"the pane does not print the selected message at all: {lines!r}"
+            assert at < shown, (
+                f"the message is authored on line {at} of the pane but only {shown} of its "
+                f"{len(lines)} lines are on screen (pane rows {pane.region.y}..{pane.region.bottom}, "
+                f"box {box.y}..{box.bottom}): the operator reads the boilerplate, not the event"
+            )
+            for reference in ("Service", "Unit", "Identifier", "Window"):
+                position = first_line_containing(reference)
+                if position >= 0:
+                    assert at < position, (
+                        f"the pane prints {reference} on line {position} and the message on line "
+                        f"{at}: the reference fields are ahead of the event they describe"
+                    )
+
+    asyncio.run(scenario())
+
+
 def test_a_settle_pass_that_asked_for_a_scroll_has_not_finished_aiming(tmp_path):
     """The chain may not report settled on a move it only requested.
 

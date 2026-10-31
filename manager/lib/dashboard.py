@@ -4105,12 +4105,21 @@ def render_realm_logs_summary(snapshot: dict[str, Any]) -> str:
 
 
 def render_log_event_details(entry: dict[str, Any] | None, total_count: int) -> str:
+    # The order is a measured one. At 100x36 the narrow branch stacks this pane under the
+    # roster and the view's box clips it: the pane wants 18 rows, the window shows 8
+    # (`shown=8`, measured against `#logs-view.content_region`). The old order spent those
+    # rows on the title, "The highlighted log entry in full.", "Window 6 visible events"
+    # and Time, and left the message — authored on line 14, the whole reason the pane
+    # exists — below the cut, along with the source and severity that say whether to care.
+    # So: what and how bad on the title line, when on the next, the message next, and the
+    # reference fields (service, unit, identifier, window count) underneath, where losing
+    # them to the clip costs the operator nothing they needed to read the event.
+    source = escape_markup(str((entry or {}).get("source", "unknown")))
+    severity = format_state((entry or {}).get("severity", "info"))
     lines = [
-        f"[bold {ACCENT_GOLD}]Selected Event[/]",
+        f"[bold {ACCENT_GOLD}]Selected Event[/] [{ACCENT_MUTED}]·[/] {source} [{ACCENT_MUTED}]·[/] {severity}",
         "",
-        f"[{ACCENT_MUTED}]The highlighted log entry in full.[/]",
-        "",
-        f"[{ACCENT_MUTED}]Window[/] {total_count} visible event{'s' if total_count != 1 else ''}",
+        f"[{ACCENT_MUTED}]Time[/] {escape_markup(iso_to_display((entry or {}).get('timestamp')))}",
     ]
 
     if entry is None:
@@ -4118,6 +4127,8 @@ def render_log_event_details(entry: dict[str, Any] | None, total_count: int) -> 
             [
                 "",
                 f"[{ACCENT_MUTED}]No event selected. Use [bold {ACCENT_GOLD}]f[/] to widen the filter or wait for the next refresh.[/]",
+                "",
+                f"[{ACCENT_MUTED}]Window[/] {total_count} visible event{'s' if total_count != 1 else ''}",
             ]
         )
         return "\n".join(lines)
@@ -4125,15 +4136,14 @@ def render_log_event_details(entry: dict[str, Any] | None, total_count: int) -> 
     lines.extend(
         [
             "",
-            f"[{ACCENT_MUTED}]Time[/]       {escape_markup(iso_to_display(entry.get('timestamp')))}",
-            f"[{ACCENT_MUTED}]Source[/]     {escape_markup(str(entry.get('source', 'unknown')))}",
-            f"[{ACCENT_MUTED}]Severity[/]   {format_state(entry.get('severity', 'info'))}",
+            # No "Message" heading: the pane is already titled "Selected Event", and the
+            # row a heading buys here is a row of the message itself.
+            f"[{ACCENT_SKY}]{escape_markup(str(entry.get('message', '')))}[/]",
+            "",
             f"[{ACCENT_MUTED}]Service[/]    {escape_markup(str(entry.get('service', 'n/a')))}",
             f"[{ACCENT_MUTED}]Unit[/]       {escape_markup(str(entry.get('unit', 'n/a')))}",
             f"[{ACCENT_MUTED}]Identifier[/] {escape_markup(str(entry.get('identifier', 'n/a')))}",
-            "",
-            f"[bold {ACCENT_SKY}]Message[/]",
-            f"{escape_markup(str(entry.get('message', '')))}",
+            f"[{ACCENT_MUTED}]Window[/]     {total_count} visible event{'s' if total_count != 1 else ''}",
         ]
     )
     return "\n".join(lines)
