@@ -1001,6 +1001,40 @@ test_cli_parsing() {
     return $all_passed
 }
 
+# The documented install leaves a symlink at /usr/local/bin/vmangos-manager pointing into
+# the prefix, so that is how an operator types the command. Measured on bds at v0.7.24 on
+# 2026-10-31 02:15Z, run through that symlink: exit **1**, **0 bytes** on stdout, and
+# `/usr/local/bin/vmangos-manager: line 171: /usr/local/bin/../lib/common.sh: No such file
+# or directory` on stderr — SCRIPT_DIR was the invocation path rather than the script's own
+# path, so LIB_DIR resolved beside the symlink. `command -v vmangos-manager` still resolved
+# and the version check run with the absolute prefix path still worked, which is how a
+# broken command sat there through three releases of install checks: a link that exists is
+# not a command that runs. Every CLI test before this one invoked the script by its real
+# path, so none of them exercised the route an operator actually takes.
+test_cli_through_a_path_symlink() {
+    local all_passed=0 dir out status stderr_file
+    dir=$(mktemp -d)
+    ln -s "$MANAGER_DIR/bin/vmangos-manager" "$dir/vmangos-manager"
+    stderr_file="$dir/stderr"
+
+    status=0
+    out=$(PATH="$dir:$PATH" "$dir/vmangos-manager" --version 2>"$stderr_file") || status=$?
+    assert_equals "0" "$status" "CLI through a PATH symlink exits 0" || all_passed=1
+    assert_true "[[ \$out == *'VMANGOS Manager version'* ]]" "CLI through a PATH symlink reports its version" || all_passed=1
+    assert_equals "" "$(cat "$stderr_file")" "CLI through a PATH symlink writes nothing to stderr" || all_passed=1
+
+    # --help is the case that proves lib/ really was sourced: the entry point sources
+    # lib/*.sh before it dispatches anything, so a LIB_DIR beside the symlink dies there
+    # whatever the subcommand was.
+    status=0
+    out=$(PATH="$dir:$PATH" "$dir/vmangos-manager" --help 2>"$stderr_file") || status=$?
+    assert_equals "0" "$status" "CLI --help through a PATH symlink exits 0" || all_passed=1
+    assert_true "[[ \$out == *'server'* ]]" "CLI --help through a PATH symlink lists the server command" || all_passed=1
+
+    rm -rf "$dir"
+    return $all_passed
+}
+
 test_account_validation() {
     # shellcheck source=../lib/account.sh
     source "$LIB_DIR/account.sh"
@@ -6040,6 +6074,7 @@ main() {
     run_test "DB: Restore credentials" test_db_restore_credentials_and_invocation
     run_test "DB: Load config defaults" test_db_load_config_defaults
     run_test "CLI: Parsing" test_cli_parsing
+    run_test "CLI: Invoked through a PATH symlink, as the install documents it" test_cli_through_a_path_symlink
     run_test "CLI: No args opens dashboard" test_cli_no_args_opens_dashboard
     run_test "Account: Validation" test_account_validation
     run_test "Account: Hash vector" test_account_hash_known_vector

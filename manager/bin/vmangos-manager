@@ -9,7 +9,18 @@ set -euo pipefail
 # GLOBALS
 # ============================================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# `${BASH_SOURCE[0]}` is the path this script was **invoked as**, not the path it lives
+# at. The documented install puts a symlink in front of it
+# (`ln -s $PREFIX/bin/vmangos-manager /usr/local/bin/vmangos-manager`), so on an installed
+# host that value is the symlink and `LIB_DIR="$SCRIPT_DIR/../lib"` resolves beside
+# `/usr/local/bin` instead of beside the prefix. Measured on bds at v0.7.24 (2026-10-31):
+# every subcommand run through that symlink died at the first `source` — exit 1, no
+# stdout, `line 171: /usr/local/bin/../lib/common.sh: No such file or directory` — while
+# `command -v vmangos-manager` still resolved, so the install check passed. Following the
+# link is the whole fix; the fallback keeps it working where readlink has no `-f`.
+SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+readonly SELF_PATH
+SCRIPT_DIR="$(cd "$(dirname "$SELF_PATH")" && pwd)"
 readonly SCRIPT_DIR
 
 readonly LIB_DIR="$SCRIPT_DIR/../lib"
@@ -23,7 +34,7 @@ readonly MANAGER_ROOT
 # exists only for running an unpackaged tree; a unit test asserts it agrees with
 # the VERSION file, which is what stops the fallback silently rotting between
 # releases (the reason a 0.5.x host reported "version 0.3.1" when you asked it).
-readonly VERSION_FALLBACK="0.7.24"
+readonly VERSION_FALLBACK="0.7.25"
 
 manager_read_version() {
     local version_file="$MANAGER_ROOT/VERSION"
