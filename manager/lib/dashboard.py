@@ -4628,11 +4628,38 @@ def create_app(
     # bindings. Binding resolution walks the focused widget's ancestors, so
     # the keys are live exactly while a descendant of the view container (its
     # table, or the container itself) has focus.
+    def view_scroll_moved(self: Container, scroll_y: float) -> None:
+        """Restate the rail row after this view's scroll position or extent changes.
+
+        The "N rows above / M rows below" row is a measurement of `scroll_y` against
+        `max_scroll_y`, and it is only honest if it is redrawn whenever either moves —
+        including when the change is the app's own aim while opening a view. Opening Logs
+        at 100x36 moves 18 rows above the fold, and the legend kept printing "27 rows
+        below": the far end of a scroll that had already happened. Reading the extent from
+        the settle callback does not work either — `scroll_to` asks for the move, and the
+        position is still the old one while that pass runs.
+
+        The guard is not decoration: this runs on every scroll, including one that
+        arrives while the base screen is covered or being torn down, and a watcher that
+        raises takes the message pump with it.
+        """
+        paint = getattr(getattr(self, "app", None), "paint_command_rail", None)
+        if paint is None:
+            return
+        try:
+            paint()
+        except Exception:
+            pass
+
     view_containers = {
         view_id: type(
             f"{view_id.capitalize()}ViewContainer",
             (Container,),
-            {"BINDINGS": make_view_bindings(view_id), "can_focus": True},
+            {
+                "BINDINGS": make_view_bindings(view_id),
+                "can_focus": True,
+                "watch_scroll_y": view_scroll_moved,
+            },
         )
         for view_id in VIEW_KEYS
     }
@@ -5077,6 +5104,30 @@ def create_app(
                 self.arm_view_settle(attempt)
                 return
             card.scroll_visible(animate=False)
+            # `scroll_visible` moves as little as it can, and a card shorter than the
+            # window therefore settles against the *bottom* of the box — the wrong end
+            # when the element the card feeds sits next to it. Measured at 100x36 with
+            # the Logs view open: box rows 8..29, roster card 17..29, and the
+            # selected-event pane the cursor updates starting at row 29. One row of an
+            # eighteen-row pane was on screen, and the message the operator had just
+            # moved the cursor to was not on the screen at all. At 140x52 the same aim
+            # left the pane's last three rows below the box, cutting the Message line
+            # mid-word with no bottom border to show it had been cut.
+            #
+            # A card that fits the box is therefore aimed at its top. That keeps the card
+            # whole — it is no taller than the box either way — and puts the head of what
+            # follows it inside the box. What gives way is the prose summary above the
+            # roster, which is reference material with a scroll hint on it, not the
+            # surface the operator is working on.
+            box = view.content_region
+            if card.region.height <= box.height and card.region.y > box.y:
+                view.scroll_to(y=view.scroll_y + (card.region.y - box.y), animate=False)
+            # The rail row counts rows above and below the box from `scroll_y`, so this
+            # scroll has to be followed by a restatement of it. It happens in the view's
+            # own `watch_scroll_y`, which fires for every move whoever makes it; reading
+            # the extent here would paint the number that is about to stop being true,
+            # because `scroll_to` asks for the move and the position is still the old one
+            # while this pass runs.
             # And the column budget, for the same reason. A roster that was hidden has
             # never been measured, so the widths it is drawing are the widths its cells
             # asked for; `rebuild()` is the only other place that re-takes the plan, and
@@ -5085,6 +5136,11 @@ def create_app(
             # `Time | Source | Severity | Message` wider than the card and answered with
             # a horizontal scrollbar.
             self.replan_view_columns()
+            # The rail's numbers describe this view's scroll position against its content
+            # height, and both just moved: the aim above, and the re-plan possibly
+            # changing the roster frame. Repaint the row once the layout this pass asked
+            # for exists.
+            self.call_after_refresh(self.paint_command_rail)
 
         # The view name is not always the controller name: Operations drives `schedules`.
         ROSTER_CONTROLLER = {
@@ -5136,18 +5192,74 @@ def create_app(
                     narrow=self.narrow_viewport,
                 )
             )
-            rows_above, rows_below = self.view_scroll_extent()
-            self.query_one("#command-rail", Static).update(
-                render_command_rail(
-                    self.active_view,
-                    narrow=self.narrow_viewport,
-                    rows_above=rows_above,
-                    rows_below=rows_below,
-                    scroll_tokens=scroll_rail_tokens(self.focused),
-                    width=self.command_rail_width(),
-                )
-            )
+            self.paint_command_rail()
             self.retarget_roster_frames()
+            # `retarget_roster_frames` can change how tall the view's content is, which
+            # changes `max_scroll_y` — the other half of the row the rail just printed.
+            # A settle pass ends by repainting that row from the layout it just produced,
+            # so the hint converges on the window the operator is actually in: at 100x36
+            # the aim moved the scroll, the frame retarget then grew the content by a row,
+            # and the legend was left one row short until something else happened to
+            # redraw it.
+            self.call_after_refresh(self.paint_command_rail)
+
+        def paint_command_rail(self) -> None:
+            """Draw the key legend from the layout as it is right now.
+
+            Split out of `refresh_chrome` because the settle path needs this row alone:
+            it has just scrolled the view, and the row is the one piece of chrome whose
+            text is a measurement of the scroll position.
+
+            The row is also the one piece whose text changes the layout it measures: when
+            the counts first appear the row wraps to a second line, the rail takes a row
+            from the view, the view's box shrinks, and `max_scroll_y` — the number just
+            printed — is one row off. Painting therefore asks for one more pass whenever
+            the text it wrote is not the text it wrote last time, which converges (the
+            second pass changes the number, not the number of lines) and stops.
+            """
+            from textual.dom import NoMatches
+
+            if not self.is_running or not getattr(self, "_screen_stack", None):
+                # The repaint is armed on a timer, and a timer can be the last thing left
+                # in the queue while the app is coming down. A screen that is gone has no
+                # legend to restate, and a callback that raises takes the message pump
+                # with it — the lesson of the deferred repaint, learned in CI. The stack
+                # is read the same way `modal_open` reads it: asking for it raises when it
+                # is empty.
+                return
+            try:
+                rail = self.query_one("#command-rail", Static)
+            except NoMatches:
+                return
+            rows_above, rows_below = self.view_scroll_extent()
+            text = render_command_rail(
+                self.active_view,
+                narrow=self.narrow_viewport,
+                rows_above=rows_above,
+                rows_below=rows_below,
+                scroll_tokens=scroll_rail_tokens(self.focused),
+                width=self.command_rail_width(),
+            )
+            changed = text != getattr(self, "_command_rail_text", None)
+            self._command_rail_text = text
+            rail.update(text)
+            if changed:
+                # Bounded: a layout that keeps changing the row's own line count would
+                # otherwise repaint forever. Four passes is what the settling view needs
+                # (scroll, aim, frame, wrap) with one to spare.
+                self._rail_paint_passes = getattr(self, "_rail_paint_passes", 0) + 1
+                if self._rail_paint_passes <= 4:
+                    # A timer, not an after-refresh callback: the row's second line takes
+                    # its row from the view during the layout *after* this paint, and an
+                    # after-refresh callback runs inside the pass that has not applied it
+                    # yet — measured, three repaints in a row all reading the same
+                    # `max_scroll_y` of 27 while the settled value was 28. This is the
+                    # same reason the settle chains are timers.
+                    self.set_timer(LAYOUT_RETRY_DELAY, self.paint_command_rail)
+                else:
+                    self._rail_paint_passes = 0
+            else:
+                self._rail_paint_passes = 0
 
         def retarget_roster_frames(self) -> None:
             """Measure the frame of every visible roster once this refresh is drawn.

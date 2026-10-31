@@ -4014,6 +4014,158 @@ def test_a_plan_measured_mid_settle_is_re_taken_when_the_frame_arrives(tmp_path)
     asyncio.run(scenario())
 
 
+def test_the_logs_pane_beside_its_roster_is_not_cut_by_the_view(tmp_path):
+    """A selection pane that is cut at the fold loses the end of the thing being read.
+
+    Measured against the current code at 140x52, with the view open and settled: the
+    roster card holds rows 27..41 and the Selected Event pane beside it holds 27..47,
+    while the view's own `content_region` — the box the compositor clips to — stops at
+    row 44. Eighteen of the pane's twenty rows are drawn and three are not, which is what
+    the rendered PNG shows: the card has no bottom border and its `Message` line stops
+    mid-word at the fold, and the only sign that anything is missing is a scroll hint
+    three rows down a screen the operator already believes they have read.
+
+    The pane is the element the cursor feeds, so the pair the operator works with is the
+    roster card and its pane; the prose summary above them is reference, and reference
+    scrolls. The view has to open with the pair whole inside the box.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="logs", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(140, 52)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the snapshot to load")
+            table = app.query_one("#realm-logs-table", DataTable)
+            await wait_for(
+                lambda: (
+                    table.row_count > 0
+                    and table.max_scroll_x == 0
+                    and app._view_settle_attempts >= 1
+                    and not app._view_settling
+                ),
+                timeout=30.0,
+                message="the view to settle",
+            )
+            card = app.query_one("#realm-logs-table-layout")
+            pane = app.query_one("#realm-log-details")
+            box = app.query_one("#logs-view").content_region
+            assert pane.region.y >= box.y and pane.region.bottom <= box.bottom, (
+                f"the pane is cut by the view box: pane rows {pane.region.y}..{pane.region.bottom} "
+                f"against box {box.y}..{box.bottom}; card rows {card.region.y}..{card.region.bottom}"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_opening_the_logs_view_leaves_the_top_of_the_selection_pane_visible(tmp_path):
+    """At an ordinary window size the pane the cursor feeds was entirely off screen.
+
+    Measured at 100x36 against the current code, stacked branch, view open and settled:
+    the view box is rows 8..29, the roster card fills 17..29, and the Selected Event pane
+    starts at row 29 — one row of an eighteen-row pane is drawn, and the message the
+    operator moved the cursor to read is not on the screen they are looking at. The PNG
+    agrees: the roster is centred, the summary card's tail is above it, and the pane is
+    nowhere in the frame.
+
+    `scroll_visible` aims at the least movement that shows the whole card, and a card
+    shorter than the box therefore hangs at the *bottom* of it — which is exactly the
+    wrong side when the element it feeds comes next. A card that fits has to be aimed at
+    the top of the box, so what follows it starts inside the box instead of past its end.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="logs", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the snapshot to load")
+            table = app.query_one("#realm-logs-table", DataTable)
+            await wait_for(
+                lambda: (
+                    table.row_count > 0
+                    and table.max_scroll_x == 0
+                    and app._view_settle_attempts >= 1
+                    and not app._view_settling
+                ),
+                timeout=30.0,
+                message="the view to settle",
+            )
+            view = app.query_one("#logs-view")
+            card = app.query_one("#realm-logs-table-layout")
+            pane = app.query_one("#realm-log-details")
+            box = view.content_region
+            assert card.region.height <= box.height, (
+                f"precondition: the card ({card.region.height} rows) does not fit the box "
+                f"({box.height} rows) at this size, so the top aim cannot be what is asked here"
+            )
+            assert card.region.y >= box.y and card.region.bottom <= box.bottom, (
+                f"the card itself left the box: card rows {card.region.y}..{card.region.bottom} "
+                f"against box {box.y}..{box.bottom}"
+            )
+            assert pane.region.y <= box.bottom - 4, (
+                f"the pane the cursor feeds starts below the box: pane rows "
+                f"{pane.region.y}..{pane.region.bottom}, box {box.y}..{box.bottom}, "
+                f"card {card.region.y}..{card.region.bottom}"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_the_scroll_hint_in_the_rail_counts_the_window_the_operator_is_in(tmp_path):
+    """Aim the view and the rail is left quoting the scroll that has already happened.
+
+    The rail row is computed from `scroll_y` and `max_scroll_y`, so it is right at the
+    moment it runs. Opening the Logs view at 100x36 then scrolls the view to put its
+    roster card at the top of the box — 18 rows pass above the fold — and nothing asks
+    the chrome to restate itself. Measured against the current code: the layout says
+    18 rows above and 9 below, the rail prints "27 rows below". The number is one the
+    operator can disprove by pressing a key, which is the whole reason the row quotes
+    it: it promises where the far end is, and here it promises eighteen rows of nothing.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="logs", snapshot_file=demo, refresh=9999)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await wait_for(lambda: getattr(app, "snapshot_loaded", False), message="the snapshot to load")
+            table = app.query_one("#realm-logs-table", DataTable)
+            await wait_for(
+                lambda: (
+                    table.row_count > 0
+                    and table.max_scroll_x == 0
+                    and app._view_settle_attempts >= 1
+                    and not app._view_settling
+                ),
+                timeout=30.0,
+                message="the view to settle",
+            )
+            above = below = -1
+            rail = ""
+            # The extent is a live measurement and the settle path is still adjusting the
+            # roster frame under it, so the two are read together and re-read until they
+            # agree — a hint that disagrees with the layout for one pass and then agrees
+            # is a different claim from one that never catches up.
+            for _ in range(10):
+                await pilot.pause(0.3)
+                above, below = app.view_scroll_extent()
+                rail = str(getattr(app.query_one("#command-rail"), "_content", ""))
+                if (
+                    f"{above} row{'s' if above != 1 else ''} above" in rail
+                    and f"{below} row{'s' if below != 1 else ''} below" in rail
+                ):
+                    break
+            assert above > 0, f"precondition: the aim left nothing above the fold (extent {above}, {below})"
+            assert f"{above} row{'s' if above != 1 else ''} above" in rail, (
+                f"the rail does not report the {above} rows above the fold (extent {above}, {below}): "
+                f"{rail!r}"
+            )
+            assert f"{below} row{'s' if below != 1 else ''} below" in rail, (
+                f"the rail does not report the {below} rows below the fold (extent {above}, {below}): "
+                f"{rail!r}"
+            )
+
+    asyncio.run(scenario())
+
+
 def test_a_view_that_is_still_settling_does_not_ask_a_covered_screen_for_its_widgets(tmp_path):
     """A dialog can appear between one layout pass and the next.
 
