@@ -14,6 +14,7 @@ import json
 import os
 import pathlib
 import sys
+import threading
 import tempfile
 import textwrap
 from datetime import datetime, timedelta, timezone
@@ -683,6 +684,80 @@ def test_a_refresh_that_lands_under_a_modal_is_repainted_when_it_closes(tmp_path
             assert str(pane.renderable) == expected, "and it must be the current data, not a stale frame"
 
     asyncio.run(scenario())
+
+
+def test_an_action_result_from_the_operations_view_does_not_ask_a_dialog_for_a_pane(tmp_path):
+    """The covered-screen guard in `set_action_result` covered one pane of three.
+
+    `set_action_result` defers the service pane while a dialog covers the base screen
+    and then -- for an action tagged to Operations -- updates `#schedule-details` and
+    `#update-pane` with no guard at all. Those widgets belong to the base screen, and
+    `App.query_one` only sees the *active* screen, so an action that finishes while a
+    confirm dialog is still posted asks the dialog for them and raises `NoMatches`
+    inside a callback posted from the worker thread. The Monitor view never showed
+    this because its actions do not carry `view_context="operations"` -- which is how
+    the half-guard survived every earlier test of the same hazard.
+
+    The reporting path here is the real one: a worker thread calling
+    `call_from_thread`, exactly as `run_action_worker` reports success and failure.
+    Textual answers an exception in a posted callback by killing the app, and a
+    dashboard that has lost its message pump looks to an operator like a manager that
+    simply stopped answering.
+    """
+    demo = demo_snapshot_path()
+
+    async def scenario():
+        app, _log_path = build_app(tmp_path, initial_view="operations", snapshot_file=demo)
+        async with app.run_test(size=(140, 52)) as pilot:
+            await wait_for(lambda: app.snapshot_loaded, message="the demo snapshot to load")
+            # "j" is a key the Operations view actually installs (VIEW_KEYS), and removing
+            # a scheduled task is the dialog that belongs to this view. The action keys the
+            # Monitor-view tests use ("x", stop realm) are not bound here, which is why the
+            # first draft of this test never got a covered screen at all.
+            await pilot.press("j")
+            await pilot.pause()
+            assert app.modal_open(), "a covered base screen is the state under test"
+
+            raised = []
+
+            def report():
+                # The exception Textual raises on the UI thread comes back out of
+                # `call_from_thread` in the worker's own thread -- which is how the real
+                # `run_action_worker` would see it, wrap it in "action failed", and tell
+                # the operator a queued action had errored.
+                try:
+                    app.call_from_thread(
+                        app.set_action_result,
+                        "log rotation queued for the change window",
+                        "success",
+                        "queued",
+                        "",
+                        "operations",
+                    )
+                except Exception as exc:  # noqa: BLE001 - the finding is the exception itself
+                    raised.append(exc)
+
+            worker = threading.Thread(target=report)
+            worker.start()
+            # `wait_for`, not `join`: the report only completes once the app's own event
+            # loop runs the posted callback, and a synchronous join would hold that loop
+            # -- the worker would hang for the wrong reason and the test would prove
+            # nothing about the callback.
+            await wait_for(lambda: not worker.is_alive(), message="the posted callback to run in the app thread")
+            assert app.is_running, "an action result posted under a dialog must not kill the app"
+            assert not raised, f"the report must reach the UI thread without raising: {raised!r}"
+
+            await pilot.press("escape")
+            await wait_for(lambda: not app.modal_open(), message="the confirm dialog to close")
+            await wait_for(lambda: not app.repaint_pending, message="the deferred repaint to run")
+            banner = app.screen_stack[0].query_one("#action-banner", Static)
+            await wait_for(
+                lambda: "log rotation queued" in str(banner.renderable),
+                message="the result to reach the banner once the dialog is gone",
+            )
+
+    asyncio.run(scenario())
+
 
 
 def test_sidebar_click_switches_view(tmp_path):

@@ -6202,10 +6202,26 @@ def create_app(
                     )
                 )
             if self.active_view == "operations":
-                self.query_one("#schedule-details", Static).update(
-                    render_schedule_details(self.selected_schedule(), len(self.snapshot.get("schedules", [])))
-                )
-                self.query_one("#update-pane", Static).update(render_update_panel(self.snapshot, self.update_plan_data))
+                # These two belong to the base screen like the service pane does, and
+                # `App.query_one` only sees the screen being shown -- so an action that
+                # finishes while the view's own form or confirm dialog is up asked the
+                # dialog for a pane it has never contained. Measured 2026-10-31: a
+                # scheduled-task action reported from its worker thread while the
+                # "remove task" form was open raised NoMatches inside the posted
+                # callback, which is Textual's one way to lose the message pump.
+                # `VIEW_KEYS["operations"]` binds "j" and "h"/"m" to screens, so this is
+                # the ordinary path on this view, not a corner: the earlier covered-screen
+                # tests were all written from the Monitor view, whose actions carry no
+                # `view_context="operations"`, which is why the guard above was added and
+                # these two lines were left behind.
+                details = self.pane_on_showing_screen("#schedule-details")
+                if details is not None:
+                    details.update(
+                        render_schedule_details(self.selected_schedule(), len(self.snapshot.get("schedules", [])))
+                    )
+                plan = self.pane_on_showing_screen("#update-pane")
+                if plan is not None:
+                    plan.update(render_update_panel(self.snapshot, self.update_plan_data))
             # Toasts for action completion (success/attention/failure); the
             # info and running tones are progress, not outcomes.
             if tone in ("success", "warning", "error"):
