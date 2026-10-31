@@ -6917,7 +6917,18 @@ DASHBOARD_CSS = """
         }
 
         #realm-logs-body {
-            height: 1fr;
+            /* Not `1fr`. Its parent `#realm-logs-layout` is `height: auto`, and an fr
+               unit inside an auto-height parent has no leftover to divide, so this row
+               collapsed to whatever the parent happened to have left -- measured at
+               140x36 the body was given **4 rows** while its own children wanted 12 and
+               18. The children then spilled past the bottom of the view without ever
+               growing the view's scroll area: `#logs-view` reported
+               `virtual == region` and `max_scroll_y = 0`, so nothing scrolled, and the
+               log details pane sat **+14 rows** past the last reachable line. At 140x44
+               it was +6, and the events table itself was +8. Natural height here is what
+               makes the view scroll, which is the rule the comment below the CSS block
+               already states for prose panes. */
+            height: auto;
         }
 
         #realm-logs-table-layout {

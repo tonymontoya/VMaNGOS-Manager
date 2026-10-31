@@ -2521,6 +2521,78 @@ def test_a_chrome_restatement_with_a_form_open_leaves_the_form_alone(tmp_path):
     asyncio.run(scenario())
 
 
+def test_no_log_pane_sits_below_the_last_row_the_view_can_reach(tmp_path):
+    """The Logs view hid its own detail pane at the window sizes people use.
+
+    `#realm-logs-body` was `height: 1fr`, and its parent `#realm-logs-layout` is
+    `height: auto`. An `fr` unit inside an auto-height parent has no leftover height to
+    divide, so at 140x36 the body was handed **4 rows** while its own children wanted 12
+    and 18. The children then spilled past the bottom of the view without growing the
+    view's scroll area: `#logs-view` answered `virtual == region` with `max_scroll_y = 0`
+    -- Textual's way of saying there is nothing more to see. Measured 2026-10-31 on the
+    dashboard as released: the details pane ended **+2** rows past the last reachable line
+    at 140x52, **+6** at 140x44 and **+14** at 140x36, and the events table itself was +8
+    at 140x36. At 120 columns the body is the `.narrow` rule, which already says
+    `height: auto`, the panes stack, and everything is reachable -- which is why nine
+    narrow-window tests never saw this.
+
+    The assertion is reachability rather than geometry: the bottom row of every pane must
+    be no lower than the bottom row the fully scrolled view can show. The two companion
+    assertions are what stop this test being satisfied by shrinking the prose away: the
+    body must be at least as tall as the pane inside it, and the details pane must still
+    own as many rows as its own rendered prose needs.
+    """
+
+    async def scenario(width, height):
+        app, _log_path = build_app(tmp_path, initial_view="logs", snapshot_file=demo_snapshot_path())
+        async with app.run_test(size=(width, height)) as pilot:
+            await wait_for(lambda: app.snapshot_loaded, message="the demo snapshot to load")
+            view = app.query_one("#logs-view")
+            # Wait for the layout to stop moving: the settle chain retakes the view's
+            # scroll extent on a timer, and an assertion that waited for its own expected
+            # number would not be able to disagree with anything.
+            last, stable = None, 0
+            for _ in range(12):
+                await pilot.pause(0.25)
+                current = (int(view.max_scroll_y), view.virtual_size.height)
+                stable = stable + 1 if current == last else 1
+                last = current
+                if stable >= 3:
+                    break
+
+            limit = view.region.y + view.content_region.height - 1 + int(view.max_scroll_y)
+            for selector in ("#realm-logs-summary", "#realm-logs-table-layout", "#realm-logs-table", "#realm-log-details"):
+                pane = app.query_one(selector)
+                bottom = pane.region.y + pane.region.height - 1
+                assert bottom <= limit, (
+                    f"{width}x{height}: {selector} ends on row {bottom}, but the last row "
+                    f"the Logs view can scroll to is {limit} -- {bottom - limit} rows of it "
+                    "can never be read"
+                )
+
+            details = app.query_one("#realm-log-details")
+            body = app.query_one("#realm-logs-body")
+            assert body.region.height >= details.region.height, (
+                f"{width}x{height}: the body holding the details pane is {body.region.height} rows "
+                f"tall and its own pane is {details.region.height} -- the overflow is the defect"
+            )
+            inner = details.content_region.width
+            wanted = sum(len(textwrap.wrap(line, inner)) or 1 for line in strip_markup(str(details.renderable)).splitlines())
+            assert details.content_region.height >= wanted, (
+                f"{width}x{height}: the details pane owns {details.content_region.height} rows for "
+                f"{wanted} rows of prose"
+            )
+            if (width, height) == (140, 36):
+                assert view.max_scroll_y >= 1, (
+                    "the 140x36 window has to overflow, or this test is checking reachability "
+                    "of content that was simply cut off"
+                )
+
+    for width, height in [(140, 52), (140, 44), (140, 36)]:
+        asyncio.run(scenario(width, height))
+
+
+
 def test_a_stacked_view_can_be_reached_by_keyboard(tmp_path):
     """Cards below the fold have to be reachable without a mouse.
 
